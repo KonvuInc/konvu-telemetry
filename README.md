@@ -38,13 +38,13 @@ konvu-telemetry setup
 - Runs only on your Mac and serves the dashboard only at `127.0.0.1`.
 - Uses browser notifications only when you enable them in the local dashboard.
 
-Costs are estimates, not provider invoices. Claude Desktop, Codex Desktop, Linux, and Windows are not supported in this first release.
+Costs are estimates, not provider invoices. See [ACCURACY.md](ACCURACY.md) for the exact accounting, forecast, median, context, and subagent methodology. Claude Desktop, Codex Desktop, Linux, and Windows are not supported in this first release.
 
 ## Privacy
 
 Konvu Telemetry has no account, API key, analytics service, or outbound network calls. It stores derived usage data in `~/.konvu/telemetry`; provider transcript files are never changed.
 
-See [SECURITY.md](SECURITY.md) for security reporting, [CONTRIBUTING.md](CONTRIBUTING.md) for development, and [ARCHITECTURE.md](ARCHITECTURE.md) for implementation details.
+See [SECURITY.md](SECURITY.md) for security reporting, [CONTRIBUTING.md](CONTRIBUTING.md) for development, [ARCHITECTURE.md](ARCHITECTURE.md) for implementation details, and [PERFORMANCE.md](PERFORMANCE.md) for reproducible resource measurements.
 
 ## License
 

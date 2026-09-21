@@ -10,12 +10,16 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from scripts.update_pricing import validated_payload
+
 from konvu_telemetry.analytics import (
     apply_notification_tracking,
     baseline_comparison,
     build_baselines,
     cumulative_median_checkpoints,
     deduplicate_usage_events,
+    forecast_backtest_sample,
+    load_baselines,
     scaled_precompact_forecast,
     single_configuration,
     task_series,
@@ -27,6 +31,8 @@ from konvu_telemetry.display import (
     record_claude_quotas,
 )
 from konvu_telemetry.fleet_telemetry import (
+    TranscriptTelemetry,
+    _comparable_forecast,
     _timestamp,
     enrich_snapshot,
     is_claude_prompt,
@@ -44,7 +50,7 @@ from konvu_telemetry.parsers import (
     transcript_session_id,
     user_prompt_times_by_session,
 )
-from konvu_telemetry.pricing import cost_status, event_cost
+from konvu_telemetry.pricing import cost_status, event_cost, load_pricing
 from konvu_telemetry.service import (
     collect_forever,
     load_health,
@@ -56,6 +62,107 @@ from konvu_telemetry.storage import parse_timestamp, session_path, transcript_fi
 
 
 class ServiceTests(unittest.TestCase):
+    def test_pricing_update_rejects_boolean_required_rates(self) -> None:
+        payload: dict[str, object] = {f"model-{index}": {} for index in range(1_000)}
+        payload["claude-sonnet-4-6"] = {
+            "input_cost_per_token": True,
+            "output_cost_per_token": 1,
+        }
+        payload["gpt-5.4"] = {
+            "input_cost_per_token": 1,
+            "output_cost_per_token": 1,
+        }
+        with self.assertRaises(ValueError):
+            validated_payload(json.dumps(payload).encode())
+
+    def test_previous_baseline_schema_is_rebuilt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            baseline_file = Path(directory) / "baselines.json"
+            baseline_file.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 7,
+                        "generated_at": "2026-01-01T00:00:00Z",
+                        "milestones": list(BASELINE_MILESTONES),
+                        "median_method": "monotonic_checkpoint_cohort_medians",
+                        "providers": {},
+                        "configurations": {},
+                        "forecasts": {},
+                    }
+                )
+            )
+            replacement = {"schema_version": 8, "providers": {}}
+            with (
+                patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+                patch(
+                    "konvu_telemetry.analytics.build_baselines",
+                    return_value=replacement,
+                ) as builder,
+            ):
+                loaded = load_baselines(1_767_225_700, {})
+        self.assertEqual(loaded, replacement)
+        builder.assert_called_once()
+
+    def test_pricing_is_cached_until_the_source_file_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            pricing_path = Path(directory) / "pricing.json"
+            pricing_path.write_text(
+                json.dumps(
+                    {
+                        "model": {
+                            "input_cost_per_token": 1,
+                            "output_cost_per_token": 2,
+                        }
+                    }
+                )
+            )
+            with patch.dict(
+                os.environ, {"KONVU_TELEMETRY_PRICING_PATH": str(pricing_path)}
+            ):
+                first = load_pricing()
+                second = load_pricing()
+                self.assertIs(first, second)
+                pricing_path.write_text(
+                    json.dumps(
+                        {
+                            "model": {
+                                "input_cost_per_token": 3,
+                                "output_cost_per_token": 4,
+                            }
+                        }
+                    )
+                )
+                refreshed = load_pricing()
+        self.assertIsNot(first, refreshed)
+        self.assertEqual(refreshed["model"]["input"], 3)
+
+    def test_invalid_price_rates_are_not_used(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            pricing_path = Path(directory) / "pricing.json"
+            pricing_path.write_text(
+                json.dumps(
+                    {
+                        "negative": {
+                            "input_cost_per_token": -1,
+                            "output_cost_per_token": 2,
+                        },
+                        "not-finite": {
+                            "input_cost_per_token": float("nan"),
+                            "output_cost_per_token": 2,
+                        },
+                        "valid": {
+                            "input_cost_per_token": 1,
+                            "output_cost_per_token": 2,
+                        },
+                    }
+                )
+            )
+            with patch.dict(
+                os.environ, {"KONVU_TELEMETRY_PRICING_PATH": str(pricing_path)}
+            ):
+                prices = load_pricing()
+        self.assertEqual(set(prices), {"valid"})
+
     def test_baseline_milestones_cover_long_sessions(self) -> None:
         self.assertEqual(
             BASELINE_MILESTONES,
@@ -598,26 +705,30 @@ class ServiceTests(unittest.TestCase):
             [(1.0, 1)] * 250,
             [(2.0, 2)] * 250,
             [(3.0, 3)] * 250,
+            [(4.0, 4)] * 250,
+            [(5.0, 5)] * 250,
             [(100.0, 100)] * 10,
         ]
         points = cumulative_median_checkpoints(series)
-        self.assertEqual(points[0]["sessions"], 4)
-        self.assertEqual(points[-1]["sessions"], 3)
-        self.assertEqual(points[0]["median_cost_usd"], 25.0)
-        self.assertEqual(points[1]["median_cost_usd"], 40.0)
+        self.assertEqual(points[0]["sessions"], 6)
+        self.assertEqual(points[-1]["sessions"], 5)
+        self.assertEqual(points[0]["median_cost_usd"], 35.0)
+        self.assertEqual(points[1]["median_cost_usd"], 60.0)
 
     def test_cumulative_median_never_decreases_when_cohort_changes(self) -> None:
         series = [
-            *[[(100.0, 100)] * 10 for _ in range(3)],
+            *[[(100.0, 100)] * 10 for _ in range(5)],
             [(1.0, 1)] * 20,
             [(2.0, 2)] * 20,
             [(3.0, 3)] * 20,
+            [(4.0, 4)] * 20,
+            [(5.0, 5)] * 20,
         ]
         points = cumulative_median_checkpoints(series)
-        self.assertEqual(points[0]["median_cost_usd"], 515.0)
-        self.assertEqual(points[1]["median_cost_usd"], 515.0)
-        self.assertEqual(points[0]["median_tokens"], 515)
-        self.assertEqual(points[1]["median_tokens"], 515)
+        self.assertEqual(points[0]["median_cost_usd"], 525.0)
+        self.assertEqual(points[1]["median_cost_usd"], 525.0)
+        self.assertEqual(points[0]["median_tokens"], 525)
+        self.assertEqual(points[1]["median_tokens"], 525)
 
     def test_incremental_reader_keeps_large_prompt_boundary_without_retaining_text(
         self,
@@ -947,14 +1058,74 @@ class ServiceTests(unittest.TestCase):
             self.assertIn(child, paths)
 
     def test_first_post_compact_forecast_scales_precompact_trend(self) -> None:
-        self.assertEqual(scaled_precompact_forecast([4.0, 6.0], 50, 100), 25.0)
+        self.assertEqual(scaled_precompact_forecast([4.0, 6.0, 5.0], 50, 100), 25.0)
+        self.assertIsNone(scaled_precompact_forecast([4.0, 6.0], 50, 100))
 
-    def test_baseline_comparison_interpolates_and_extrapolates_exact_task_counts(
+    def test_precompact_forecast_basis_is_labeled_separately(self) -> None:
+        session: dict[str, object] = {
+            "projected_next_10_tasks_usd": 25.0,
+            "compact_events": [{"timestamp": "2026-01-01T00:00:10Z"}],
+            "iterations": [
+                {"started_at": "2026-01-01T00:00:01Z", "priced": True},
+                {"started_at": "2026-01-01T00:00:02Z", "priced": True},
+                {"started_at": "2026-01-01T00:00:11Z", "priced": True},
+            ],
+        }
+        _comparable_forecast(session, [], False)
+        self.assertEqual(session["projected_next_10_tasks_usd"], 25.0)
+        self.assertEqual(
+            session["forecast_basis"]["method"], "context_scaled_precompact"
+        )
+        self.assertEqual(session["forecast_basis"]["sample_count"], 2)
+
+    def test_forecast_backtest_holds_out_the_final_ten_tasks(self) -> None:
+        self.assertEqual(forecast_backtest_sample([(1.0, 1)] * 20), (10.0, 10.0))
+        self.assertIsNone(forecast_backtest_sample([(1.0, 1)] * 19))
+
+    def test_forecast_uses_completed_matching_configuration_only(self) -> None:
+        session: dict[str, object] = {
+            "speed": "standard",
+            "iterations": [
+                {
+                    "started_at": f"2026-01-01T00:00:0{index}Z",
+                    "cost_usd": float(index + 1),
+                    "priced": True,
+                    "speed": "standard",
+                }
+                for index in range(4)
+            ],
+        }
+        telemetry = TranscriptTelemetry(
+            configurations=[(float(index), "model", "medium") for index in range(4)],
+            activity=[(float(index), "running", str(index)) for index in range(4)],
+            completions=[(float(index) + 0.5, str(index)) for index in range(3)],
+        )
+        with patch(
+            "konvu_telemetry.fleet_telemetry._timestamp",
+            side_effect=lambda value: (
+                float(str(value)[-3:-1]) if isinstance(value, str) else None
+            ),
+        ):
+            _comparable_forecast(session, [telemetry], True)
+            self.assertEqual(session["projected_next_10_tasks_usd"], 20.0)
+            self.assertEqual(session["forecast_basis"]["sample_count"], 3)
+            telemetry.configurations.append((3.0, "other-model", "medium"))
+            _comparable_forecast(session, [telemetry], True)
+        self.assertIsNone(session["projected_next_10_tasks_usd"])
+        self.assertEqual(session["forecast_basis"]["reason"], "unknown_configuration")
+
+    def test_baseline_comparison_interpolates_without_unbounded_extrapolation(
         self,
     ) -> None:
         baseline = {
             "providers": {
                 "claude": [
+                    {
+                        "iterations": 5,
+                        "sessions": "invalid",
+                        "median_cost_usd": 5.0,
+                        "median_tokens": 50,
+                    },
                     {
                         "iterations": 10,
                         "sessions": 8,
@@ -985,10 +1156,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(interpolated["median_tokens"], 250)
         self.assertEqual(interpolated["median_cost_usd"], 25.0)
         self.assertEqual(interpolated["cost_overhead_percent"], 0)
-        self.assertEqual(extrapolated["iterations"], 120)
-        self.assertEqual(extrapolated["median_tokens"], 2200)
-        self.assertEqual(extrapolated["median_cost_usd"], 220.0)
-        self.assertEqual(extrapolated["cost_overhead_percent"], 0)
+        self.assertIsNone(extrapolated)
 
     def test_baseline_text_reports_spend_when_priced_cost_is_available(self) -> None:
         text = baseline_text(
@@ -1074,6 +1242,8 @@ class ServiceTests(unittest.TestCase):
             ("model", "medium", "standard", series),
             ("model", "medium", "standard", series),
             ("model", "medium", "standard", series),
+            ("model", "medium", "standard", series),
+            ("model", "medium", "standard", series),
             (None, None, None, series),
         ]
         with (
@@ -1090,7 +1260,15 @@ class ServiceTests(unittest.TestCase):
         ):
             baseline = build_baselines(0, {})
         matched = baseline_comparison(
-            "codex", 10, 10, baseline, "model", "medium", "standard", cost_usd=10
+            "codex",
+            10,
+            10,
+            baseline,
+            "model",
+            "medium",
+            "standard",
+            cost_usd=10,
+            comparison_scope="model_effort_speed",
         )
         provider = baseline_comparison(
             "codex",
@@ -1104,7 +1282,15 @@ class ServiceTests(unittest.TestCase):
             comparison_scope="provider",
         )
         wrong_speed = baseline_comparison(
-            "codex", 10, 10, baseline, "model", "medium", "fast", cost_usd=10
+            "codex",
+            10,
+            10,
+            baseline,
+            "model",
+            "medium",
+            "fast",
+            cost_usd=10,
+            comparison_scope="model_effort_speed",
         )
         unavailable_match = baseline_comparison(
             "codex",
@@ -1131,9 +1317,9 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(matched["scope"], "model_effort_speed")
         self.assertEqual(matched["speed"], "standard")
         self.assertEqual(provider["scope"], "provider")
-        self.assertEqual(wrong_speed["scope"], "provider")
+        self.assertIsNone(wrong_speed)
         self.assertIsNone(unavailable_match)
-        self.assertEqual(extrapolated_match["median_cost_usd"], 20.0)
+        self.assertIsNone(extrapolated_match)
 
     def test_snapshot_exposes_only_uniform_comparison_configuration(self) -> None:
         session_id = "00000000-0000-0000-0000-000000000001"

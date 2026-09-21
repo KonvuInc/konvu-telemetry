@@ -8,9 +8,9 @@
 4. Set the same version in `setup.cfg`.
 5. Create and push an annotated tag: `git tag -a v0.1.0 -m "Konvu Telemetry v0.1.0" && git push origin v0.1.0`.
 6. Verify the GitHub release contains the wheel, source archive, and `SHA256SUMS`.
-7. Create the public `KonvuInc/homebrew-tap` repository with a formula whose source URL and SHA-256 match the source archive.
-8. Test `brew install konvuinc/tap/konvu-telemetry` and `konvu-telemetry setup` on clean Intel and Apple Silicon accounts.
-9. Remove the pre-release qualifier from the README install section.
+7. Verify each release artifact with `gh attestation verify <artifact> --repo KonvuInc/konvu-telemetry`.
+8. Update the Homebrew formula so its source URL and SHA-256 match the source archive.
+9. Test `brew install konvuinc/tap/konvu-telemetry` and `konvu-telemetry setup` on clean Intel and Apple Silicon accounts.
 
 ## Formula requirements
 

@@ -1,13 +1,15 @@
 # Contributing
 
-Run the same checks as CI before opening a pull request:
+Run the core CI checks before opening a pull request:
 
 ```sh
-python3 -m ruff check src tests
-python3 -m ruff format --check src tests
+python3 -m ruff check src tests scripts
+python3 -m ruff format --check src tests scripts
+python3 -m mypy src/konvu_telemetry
 python3 -m compileall -q src
 node --check src/konvu_telemetry/dashboard/fleet.js
 PYTHONPATH=src python3 -m unittest discover -s tests -v
+PYTHONPATH=src python3 scripts/benchmark.py --sessions 50 --prompts 20 --max-cold-seconds 5 --max-incremental-seconds 2 --max-peak-mib 64
 ```
 
 Changes must preserve the local-only contract: no transcript, prompt, source-code, or usage upload.

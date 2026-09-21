@@ -9,7 +9,7 @@ import math
 from pathlib import Path
 from typing import Literal
 
-from .config import FILE_CACHE_LIMIT
+from .config import FILE_CACHE_LIMIT, FORECAST_MIN_SAMPLES, FORECAST_WINDOW
 from .storage import claude_quota_path
 
 
@@ -444,9 +444,33 @@ def _comparable_forecast(
                 "priced": iteration.get("priced") is True,
             }
         )
-    latest = configurations[-1] if configurations else None
-    latest_model = latest[1] if latest else None
-    latest_effort = latest[2] if latest else None
+    latest_timestamp = configurations[-1][0] if configurations else None
+    latest_configurations = {
+        (model, effort)
+        for timestamp, model, effort in configurations
+        if timestamp == latest_timestamp
+    }
+    latest_model, latest_effort = (
+        next(iter(latest_configurations))
+        if len(latest_configurations) == 1
+        else (None, None)
+    )
+    latest_speed = session.get("speed")
+    compact_events = session.get("compact_events")
+    latest_compact = (
+        max(
+            (
+                timestamp
+                for event in compact_events
+                if isinstance(event, dict)
+                for timestamp in [_timestamp(event.get("timestamp"))]
+                if timestamp is not None
+            ),
+            default=None,
+        )
+        if isinstance(compact_events, list)
+        else None
+    )
     if latest_effort is not None:
         session["reasoning_effort"] = latest_effort
     comparable = [
@@ -456,35 +480,66 @@ def _comparable_forecast(
         and latest_effort is not None
         and iteration.get("model") == latest_model
         and iteration.get("reasoning_effort") == latest_effort
+        and iteration.get("speed") == latest_speed
+        and (
+            session.get("since_compact") is not True
+            or latest_compact is None
+            or (_timestamp(iteration.get("started_at")) or 0) > latest_compact
+        )
         and iteration.get("completed") is True
         and iteration.get("priced") is True
         and _number(iteration.get("cost_usd")) is not None
-    ][-10:]
+    ][-FORECAST_WINDOW:]
+    sufficient = len(comparable) >= FORECAST_MIN_SAMPLES
+    if not replace_forecast:
+        precompact_samples = sum(
+            1
+            for iteration in iterations
+            for started_at in [_timestamp(iteration.get("started_at"))]
+            if latest_compact is not None
+            and started_at is not None
+            and started_at <= latest_compact
+            and iteration.get("priced") is True
+        )
+        forecast = session.get("projected_next_10_tasks_usd")
+        session["forecast_basis"] = {
+            "method": "context_scaled_precompact",
+            "sample_count": precompact_samples,
+            "model": None,
+            "effort": None,
+            "speed": None,
+            "coverage": "fully_priced"
+            if isinstance(forecast, (int, float))
+            else "insufficient_history",
+            "reason": None
+            if isinstance(forecast, (int, float))
+            else "not_enough_precompact_prompts",
+        }
+        return
     session["forecast_basis"] = {
-        "method": "same_config_completed_prompts"
-        if replace_forecast
-        else "rolling_last_10_prompts",
+        "method": "same_config_completed_prompts",
         "sample_count": len(comparable),
         "model": latest_model,
         "effort": latest_effort,
-        "coverage": "fully_priced" if comparable else "unavailable",
+        "speed": latest_speed,
+        "coverage": "fully_priced" if sufficient else "insufficient_history",
         "reason": None
-        if comparable
+        if sufficient
         else "unknown_configuration"
-        if latest_model is None or latest_effort is None
-        else "no_comparable_completed_prompts",
+        if latest_model is None
+        or latest_effort is None
+        or not isinstance(latest_speed, str)
+        or not latest_speed
+        else "not_enough_comparable_completed_prompts",
     }
-    if replace_forecast:
-        session["projected_next_10_tasks_usd"] = (
-            round(
-                sum(float(row["cost_usd"]) for row in comparable)
-                / len(comparable)
-                * 10,
-                6,
-            )
-            if comparable
-            else None
+    session["projected_next_10_tasks_usd"] = (
+        round(
+            sum(float(row["cost_usd"]) for row in comparable) / len(comparable) * 10,
+            6,
         )
+        if sufficient
+        else None
+    )
 
 
 def enrich_snapshot(
@@ -539,8 +594,7 @@ def enrich_snapshot(
         _comparable_forecast(
             session,
             rows,
-            not isinstance(session.get("projected_next_10_tasks_usd"), (int, float))
-            and session.get("forecast_mode") != "warming_up",
+            session.get("forecast_mode") != "warming_up",
         )
         if session_provider == "codex":
             task_tools = {
