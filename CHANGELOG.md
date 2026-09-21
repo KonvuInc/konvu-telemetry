@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.1 - 2026-09-21
 
 - Alert on a session whenever its next-ten-prompt forecast exceeds $4, instead of also requiring cost to reach 3× the provider median. Sessions with no baseline, which could never alert before, now alert.
 - Only alert on sessions active within the last twenty minutes, matching the dashboard's live window.
