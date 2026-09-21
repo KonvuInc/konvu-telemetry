@@ -26,12 +26,11 @@ from .storage import (
 
 def has_usage_fields(raw: dict[str, object], *fields: str) -> bool:
     """Return whether a provider record explicitly supplied each required token field."""
-    return all(
-        isinstance(raw.get(field), (int, float))
-        and not isinstance(raw.get(field), bool)
-        and raw[field] >= 0
-        for field in fields
-    )
+    for field in fields:
+        value = raw.get(field)
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
+            return False
+    return True
 
 
 def is_human_claude_prompt(record: dict[str, object]) -> bool:
