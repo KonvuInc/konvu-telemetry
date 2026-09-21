@@ -28,6 +28,7 @@ from konvu_telemetry.models import Usage, UsageEvent
 from konvu_telemetry.parsers import (
     assistant_event,
     codex_events_in_file,
+    codex_subagent_parent,
     events_in_file,
     is_human_claude_prompt,
     spawned_agent_labels,
@@ -317,6 +318,7 @@ class ServiceTests(unittest.TestCase):
             "sessionId": "session",
             "agentId": "agent",
             "isSidechain": True,
+            "timestamp": "2026-01-01T00:00:00Z",
             "message": {
                 "role": "user",
                 "content": "Review the release checklist and report any blockers.",
@@ -327,8 +329,147 @@ class ServiceTests(unittest.TestCase):
             transcript.write_text(json.dumps(record) + "\n", encoding="utf-8")
             self.assertEqual(
                 spawned_agent_labels(transcript),
-                {("session", "agent"): "Review the release checklist and report any blockers."},
+                {
+                    ("session", "agent"): (
+                        "Review the release checklist and report any blockers."
+                    )
+                },
             )
+            self.assertEqual(
+                spawned_agent_times(transcript),
+                {("session", "agent"): 1767225600.0},
+            )
+
+    def test_codex_subagent_prefers_nickname_over_technical_path(self) -> None:
+        parent_id = "00000000-0000-0000-0000-000000000001"
+        child_id = "00000000-0000-0000-0000-000000000002"
+        record = {
+            "type": "session_meta",
+            "payload": {
+                "id": child_id,
+                "source": {
+                    "subagent": {
+                        "thread_spawn": {
+                            "parent_thread_id": parent_id,
+                            "agent_path": "/root/greptile_583",
+                            "agent_nickname": "Hubble",
+                        }
+                    }
+                },
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / f"rollout-{child_id}.jsonl"
+            transcript.write_text(json.dumps(record) + "\n", encoding="utf-8")
+            self.assertEqual(codex_subagent_parent(transcript), (parent_id, "Hubble"))
+
+    def test_codex_child_activity_keeps_its_parent_session_live(self) -> None:
+        parent_id = "00000000-0000-0000-0000-000000000001"
+        child_id = "00000000-0000-0000-0000-000000000002"
+
+        def token_count(timestamp: str) -> dict[str, object]:
+            return {
+                "timestamp": timestamp,
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "model": "model",
+                        "total_token_usage": {
+                            "total_tokens": 1,
+                            "input_tokens": 1,
+                            "cached_input_tokens": 0,
+                            "cache_write_input_tokens": 0,
+                            "output_tokens": 0,
+                        },
+                        "last_token_usage": {
+                            "input_tokens": 1,
+                            "cached_input_tokens": 0,
+                            "cache_write_input_tokens": 0,
+                            "output_tokens": 0,
+                        },
+                    },
+                },
+            }
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parent = root / f"rollout-{parent_id}.jsonl"
+            child = root / f"rollout-{child_id}.jsonl"
+            parent.write_text(
+                "\n".join(
+                    json.dumps(record)
+                    for record in [
+                        {
+                            "type": "session_meta",
+                            "payload": {"id": parent_id, "source": "cli"},
+                        },
+                        {
+                            "timestamp": "2026-01-01T00:00:00Z",
+                            "type": "event_msg",
+                            "payload": {"type": "task_started"},
+                        },
+                        token_count("2026-01-01T00:00:01Z"),
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            child.write_text(
+                "\n".join(
+                    json.dumps(record)
+                    for record in [
+                        {
+                            "type": "session_meta",
+                            "payload": {
+                                "id": child_id,
+                                "source": {
+                                    "subagent": {
+                                        "thread_spawn": {
+                                            "parent_thread_id": parent_id,
+                                            "agent_nickname": "Hubble",
+                                        }
+                                    }
+                                },
+                            },
+                        },
+                        token_count("2026-01-01T00:00:20Z"),
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            prices = {
+                "model": {
+                    "input": 1,
+                    "output": 1,
+                    "cache_write": 1,
+                    "cache_read": 1,
+                    "web_search": 0,
+                    "fast_multiplier": 1,
+                }
+            }
+            with (
+                patch("konvu_telemetry.snapshot.live_transcripts", return_value=[]),
+                patch(
+                    "konvu_telemetry.snapshot.live_codex_transcripts",
+                    return_value=[parent, child],
+                ),
+                patch("konvu_telemetry.snapshot.load_pricing", return_value=prices),
+                patch(
+                    "konvu_telemetry.snapshot.load_baselines",
+                    return_value={"providers": {}, "configurations": {}},
+                ),
+                patch("konvu_telemetry.snapshot.pinned_sessions", return_value=[]),
+                patch("konvu_telemetry.snapshot.enrich_snapshot"),
+                patch("konvu_telemetry.snapshot.locate_compactions"),
+                patch("konvu_telemetry.snapshot.apply_notification_tracking"),
+            ):
+                snapshot = build_snapshot(1767225630.0)
+        session = snapshot["sessions"][0]
+        self.assertEqual(session["last_activity_at"], "2026-01-01T00:00:20+00:00")
+        self.assertEqual(session["subagents"][0]["label"], "Hubble")
+        self.assertEqual(session["subagents"][0]["cost_usd"], 1.0)
+        self.assertEqual(session["subagent_cost_usd"], 1.0)
+        self.assertEqual(session["total_cost_usd"], 2.0)
 
     def test_long_context_and_fast_fallback_pricing_are_applied(self) -> None:
         prices = {

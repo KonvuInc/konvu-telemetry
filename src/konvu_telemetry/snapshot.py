@@ -410,7 +410,7 @@ def build_snapshot(
                     {
                         "id": agent_id,
                         "label": agent_spawn_labels.get(
-                            (session_id, agent_id), agent_id[:8]
+                            (session_id, agent_id), "Claude subagent"
                         ),
                         "entry_context_tokens": (
                             min(
@@ -564,7 +564,6 @@ def build_snapshot(
         child_costs = [event_cost(event, prices) for event in child_events]
         known_child_costs = [cost for cost in child_costs if cost is not None]
         child_entries = codex_subagent_entries.get(session_id, [])
-        last_event = events[-1]
         costs_by_task: dict[float, float] = defaultdict(float)
         starts = codex_task_boundaries.get(session_id, [])
         for event, cost in zip(events, codex_costs):
@@ -584,6 +583,7 @@ def build_snapshot(
         next_10_forecast = next_ten_forecast(task_costs, "codex")
         task_count = len(starts)
         all_events = [*events, *child_events]
+        last_event = max(all_events, key=lambda event: event.timestamp)
         total_tokens = sum(event.usage.total_tokens for event in all_events)
         total_cost_status, unpriced_event_count = cost_status(all_events, prices)
         if total_cost_status != "complete":
