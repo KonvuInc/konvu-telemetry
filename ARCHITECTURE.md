@@ -57,7 +57,7 @@ Raw transcripts remain in `~/.claude/projects` and `~/.codex/sessions`. Normaliz
 - Unknown billable models mark the session partial; their iterations are omitted from forecasts and cost comparisons while complete iterations remain usable.
 - Oversized transcript records are scanned with bounded prefix and suffix buffers; large payload text is not retained.
 - Dashboard responses use ETags, and the browser fetches detailed history only for the open session.
-- Hooks reuse collector output while its health record is fresh instead of forcing duplicate collection.
+- Hooks only read the collector's existing session output; they never force collection.
 - A second server cannot bind the same port and exits before starting another collector loop.
 
 JSON is sufficient for the first release because the process writes one bounded current snapshot, small state files, and one file per session. SQLite becomes useful when the product needs arbitrary historical queries, migrations, or concurrent writers.
