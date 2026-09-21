@@ -95,13 +95,14 @@ function activity(s) {
 function comparableRows(s) {
   const rows = series(s);
   const model = s.forecast_basis?.model || s.model,
-    effort = s.forecast_basis?.effort || s.reasoning_effort;
-  if (!model || !effort) return [];
+    effort = s.forecast_basis?.effort || s.reasoning_effort,
+    speed = s.forecast_basis?.speed || s.speed;
+  if (!model || !effort || !speed) return [];
   const recent = [];
   for (let i = rows.length - 1; i >= 0; i--) {
     const q = rows[i];
     if (i === rows.length - 1 && q.completed === false) continue;
-    if (q.completed !== true || q.priced !== true || q.model !== model || q.reasoning_effort !== effort) break;
+    if (q.completed !== true || q.priced !== true || q.model !== model || q.reasoning_effort !== effort || q.speed !== speed) break;
     recent.unshift(q);
   }
   return recent;
@@ -124,8 +125,8 @@ function assess(s) {
     label: c ? "No sharp cost rise" : "Limited comparison data",
     action: "Review session",
     evidence: c
-      ? "Recent prompts compared with earlier prompts in this session, on the same model and effort."
-      : "A cost trend needs six completed, priced prompts with recorded matching model and effort.",
+      ? "Recent prompts compared with earlier prompts in this session, on the same model, effort, and speed."
+      : "A cost trend needs six completed, priced prompts with recorded matching model, effort, and speed.",
     score: f || 0,
   };
   if (c && c.ratio >= 2 && c.after - c.before >= 0.1) {
@@ -133,7 +134,7 @@ function assess(s) {
     result.label = "Cost per prompt is rising";
     result.action = "Review the more expensive prompts";
     result.evidence =
-      "Last 3 prompts averaged " + money(c.after) + " vs " + money(c.before) + " before (" + c.ratio.toFixed(1) + "×), on the same model and effort.";
+      "Last 3 prompts averaged " + money(c.after) + " vs " + money(c.before) + " before (" + c.ratio.toFixed(1) + "×), on the same model, effort, and speed.";
     result.score = 100 + (f || 0);
   }
   const repeated = compacts(s).filter((e) => elapsed(e.timestamp) >= 0 && elapsed(e.timestamp) < 1800000);
@@ -346,7 +347,7 @@ function checkpointComparison(s) {
     first = points[0],
     last = points.at(-1);
   const median = medianCostAt(points, prompts);
-  if (prompts <= 0 || spent === null || !first || !last || !nonnegative(median) || median <= 0) return null;
+  if (prompts < first?.iterations || prompts > last?.iterations || spent === null || !nonnegative(median) || median <= 0) return null;
   return {
     ratio: spent / median,
     matched,
@@ -354,8 +355,6 @@ function checkpointComparison(s) {
     samples: prompts <= first.iterations ? first.sessions : last.sessions,
     actual: spent,
     median,
-    early: prompts < first.iterations,
-    extrapolated: prompts > last.iterations,
   };
 }
 function recordedBaselineComparison(s) {
@@ -383,15 +382,15 @@ function spendComparison(s) {
         prompts < 10
           ? "Median starts after 10 prompts"
           : state.baselineMode === "matched" && !configurationCurve(s)?.points.length
-            ? "Need 3 matching model + effort + speed sessions"
+            ? "Need " + baselineMinimumSessions() + " matching model + effort + speed sessions"
             : "Waiting for a comparable checkpoint",
       detail:
         prompts < 10
           ? "Your median has no checkpoint before 10 prompts yet."
-          : "A comparison needs recorded spend at the same iteration count as the selected median. Model, effort, and speed comparisons require at least three matching sessions.",
+          : "A comparison needs recorded spend at the same iteration count as the selected median. Model, effort, and speed comparisons require at least " + baselineMinimumSessions() + " matching sessions.",
     };
   }
-  const label = (c.matched ? "model + effort + speed median" : providerName(s.provider) + " general median") + (c.early ? " estimate" : "");
+  const label = c.matched ? "model + effort + speed median" : providerName(s.provider) + " general median";
   return {
     ratio: c.ratio,
     label: c.ratio.toFixed(2) + "× " + label,
@@ -407,13 +406,7 @@ function spendComparison(s) {
         " sessions in the last " +
         (state.payload?.baselines?.lookback_days || 60) +
         " days." +
-        (c.early
-          ? " This is prorated from the first 10-prompt checkpoint."
-          : c.extrapolated
-            ? " This extends the same median curve past its final checkpoint."
-            : c.matched
-              ? ""
-              : " General usage includes all models, efforts, and speeds within this provider."),
+        (c.matched ? "" : " General usage includes all models, efforts, and speeds within this provider."),
   };
 }
 function roundedDollarCeiling(value) {
@@ -581,11 +574,15 @@ function curvePoints(b) {
         .sort((a, b) => a.iterations - b.iterations)
     : [];
 }
+function baselineMinimumSessions() {
+  const value = state.payload?.baselines?.minimum_sessions;
+  return Number.isInteger(value) && value > 0 ? value : 5;
+}
 function configurationCurve(s) {
   const configs = state.payload?.baselines?.configurations?.[s.provider];
   if (!configs || typeof configs !== "object") return null;
   const match = Object.values(configs).find((b) => b && matchesConfiguration(s, b));
-  return match ? { ...match, points: curvePoints(match.checkpoints).filter((p) => p.sessions >= 3) } : null;
+  return match ? { ...match, points: curvePoints(match.checkpoints).filter((p) => p.sessions >= baselineMinimumSessions()) } : null;
 }
 function graphBaselines() {
   return ["claude", "codex"]
@@ -619,10 +616,11 @@ function medianCostAt(points, n) {
 function medianGeometry(points, xmax, ymax) {
   const rows = curvePoints(points);
   if (!rows.length) return null;
-  const xs = [0, ...rows.map((p) => p.iterations).filter((n) => n > 0 && n < xmax), xmax];
+  const endpointX = Math.min(xmax, rows.at(-1).iterations);
+  const xs = [0, ...rows.map((p) => p.iterations).filter((n) => n > 0 && n < endpointX), endpointX];
   const curve = xs.map((iterations) => ({ iterations, median_cost_usd: medianCostAt(rows, iterations) }));
-  let exitX = xmax;
-  if (medianCostAt(rows, xmax) > ymax) {
+  let exitX = endpointX;
+  if (medianCostAt(rows, endpointX) > ymax) {
     const lo = xs.reduce((acc, n) => (medianCostAt(rows, n) <= ymax ? n : acc), 0);
     const hi = xs.find((n) => medianCostAt(rows, n) > ymax);
     if (hi !== undefined) {

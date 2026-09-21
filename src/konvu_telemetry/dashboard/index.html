@@ -54,8 +54,8 @@
             <p id="notification-feedback" role="status"></p>
             <details class="notification-rules" open>
               <summary>When we notify you</summary>
-              <p>We alert at about 2× your usual token usage, based on model + effort history or your provider’s median.</p>
-              <p>Repeat alerts wait at least 5 minutes and require both spending and excess usage to rise. The $5 forecast icon is visual only.</p>
+              <p>We alert when recorded cost reaches at least 3× its matched local median and the next 10 prompts are forecast above $4.</p>
+              <p>Repeat alerts wait at least 10 minutes and require both spending and excess cost to rise.</p>
             </details>
           </section>
         </div>
@@ -70,7 +70,7 @@
             <h1>Live sessions</h1>
             <span id="live-count" class="live-count">0</span>
           </div>
-          <p class="live-caption">Activity in the last 20 minutes</p>
+          <p class="live-caption">Sessions with activity in the last 20 minutes; running and idle state uses a 5-minute freshness window.</p>
         </div>
         <div class="fleet-controls">
           <div class="provider-filter" role="group" aria-label="Filter by provider">

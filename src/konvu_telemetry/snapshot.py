@@ -26,6 +26,7 @@ from .analytics import (
 from .config import (
     ACTIVITY_FRESHNESS_SECONDS,
     DEFAULT_LIVE_WINDOW_SECONDS,
+    FORECAST_MIN_SAMPLES,
     FORECAST_WINDOW,
     ROLLING_WINDOW_SECONDS,
     SESSION_FILE_RETENTION_SECONDS,
@@ -216,8 +217,10 @@ def build_snapshot(
         completed_prompt_costs = [costs_by_prompt.get(start, 0.0) for start in starts]
         forecast_prompt_costs = completed_prompt_costs
         last_task_cost = completed_prompt_costs[-1] if completed_prompt_costs else 0.0
-        next_10_forecast: float | None = next_ten_forecast(
-            forecast_prompt_costs, "claude"
+        next_10_forecast: float | None = (
+            next_ten_forecast(forecast_prompt_costs, "claude")
+            if len(forecast_prompt_costs) >= FORECAST_MIN_SAMPLES
+            else None
         )
         last_prompt_start = starts[-1] if starts else None
         latest_compact = (
@@ -256,7 +259,7 @@ def build_snapshot(
                 else None
             )
             since_compact = True
-            if len(post_compact_costs) >= 3:
+            if len(post_compact_costs) >= FORECAST_MIN_SAMPLES:
                 next_10_forecast = next_ten_forecast(post_compact_costs, "claude")
                 forecast_mode = "post_compact"
             else:
@@ -333,7 +336,7 @@ def build_snapshot(
             cost_usd=comparison_cost,
             comparison_scope="model_effort_speed",
         )
-        claude_baseline = claude_configuration_baseline or claude_provider_baseline
+        claude_baseline = claude_configuration_baseline
         if since_compact and comparison_task_count < FORECAST_WINDOW:
             claude_baseline = None
             claude_provider_baseline = None
@@ -580,7 +583,11 @@ def build_snapshot(
                 costs_by_task[starts[task_index]] += cost
         task_costs = [costs_by_task.get(start, 0.0) for start in starts]
         last_task_cost = task_costs[-1] if task_costs else 0.0
-        next_10_forecast = next_ten_forecast(task_costs, "codex")
+        next_10_forecast = (
+            next_ten_forecast(task_costs, "codex")
+            if len(task_costs) >= FORECAST_MIN_SAMPLES
+            else None
+        )
         task_count = len(starts)
         all_events = [*events, *child_events]
         last_event = max(all_events, key=lambda event: event.timestamp)
@@ -617,7 +624,7 @@ def build_snapshot(
             cost_usd=sum(known_costs) + sum(known_child_costs),
             comparison_scope="model_effort_speed",
         )
-        codex_baseline = codex_configuration_baseline or codex_provider_baseline
+        codex_baseline = codex_configuration_baseline
         if total_cost_status != "complete":
             codex_baseline = None
             codex_provider_baseline = None
