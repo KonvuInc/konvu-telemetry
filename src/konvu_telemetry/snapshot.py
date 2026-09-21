@@ -63,6 +63,7 @@ from .pricing import (
     cost_status,
     event_cost,
     load_pricing,
+    requires_pricing,
 )
 from .storage import (
     home_dir,
@@ -253,7 +254,7 @@ def build_snapshot(
             starts = prompt_times.get(session_id, [])
             prompt_index = bisect_right(starts, attribution_time) - 1
             if cost is None:
-                if prompt_index >= 0:
+                if prompt_index >= 0 and requires_pricing(event):
                     unpriced_prompts.add(starts[prompt_index])
                 continue
             if prompt_index >= 0:
@@ -644,7 +645,7 @@ def build_snapshot(
         for event, cost in zip(events, codex_costs):
             task_index = bisect_right(starts, event.timestamp) - 1
             if cost is None:
-                if task_index >= 0:
+                if task_index >= 0 and requires_pricing(event):
                     unpriced_tasks.add(starts[task_index])
                 continue
             if task_index >= 0:
@@ -652,7 +653,7 @@ def build_snapshot(
         for event, cost in zip(child_events, child_costs):
             task_index = bisect_right(starts, event.timestamp) - 1
             if cost is None:
-                if task_index >= 0:
+                if task_index >= 0 and requires_pricing(event):
                     unpriced_tasks.add(starts[task_index])
                 continue
             if task_index >= 0:
