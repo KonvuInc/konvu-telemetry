@@ -66,9 +66,7 @@ def iteration_series(
     cumulative_cost = 0.0
     rows: list[dict[str, object]] = []
     for index, (start, cost) in enumerate(zip(starts, costs), start=1):
-        iteration_priced = (
-            priced[index - 1] if isinstance(priced, list) else priced
-        )
+        iteration_priced = priced[index - 1] if isinstance(priced, list) else priced
         end = starts[index] if index < len(starts) else float("inf")
         iteration_events = [
             event for event in main_events if start <= event.timestamp < end
@@ -89,9 +87,7 @@ def iteration_series(
             {
                 "iteration": index,
                 "started_at": datetime.fromtimestamp(start, timezone.utc).isoformat(),
-                "cost_usd": round(cost, 6)
-                if isinstance(cost, (int, float))
-                else None,
+                "cost_usd": round(cost, 6) if isinstance(cost, (int, float)) else None,
                 "cumulative_cost_usd": round(cumulative_cost, 6),
                 "priced": iteration_priced,
                 "context_tokens": context_event.usage.context_tokens

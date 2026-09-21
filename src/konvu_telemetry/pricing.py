@@ -213,7 +213,9 @@ def event_cost(event: UsageEvent, prices: dict[str, dict[str, float]]) -> float 
     cache_write_rate = rate_for("cache_write")
     cache_read_rate = rate_for("cache_read")
     web_search_rate = rates.get("web_search")
-    if event.usage.web_search_requests and not isinstance(web_search_rate, (int, float)):
+    if event.usage.web_search_requests and not isinstance(
+        web_search_rate, (int, float)
+    ):
         return None
     five_minute_cache_write = max(
         0, event.usage.cache_write_tokens - event.usage.cache_write_one_hour_tokens
@@ -241,8 +243,7 @@ def requires_pricing(event: UsageEvent) -> bool:
     """Return whether an event can contribute a nonzero cost to its session."""
     return not is_internal_codex_review(event) and (
         not event.usage.complete
-        or
-        event.usage.input_tokens > 0
+        or event.usage.input_tokens > 0
         or event.usage.output_tokens > 0
         or event.usage.reasoning_output_tokens > 0
         or event.usage.cache_write_tokens > 0

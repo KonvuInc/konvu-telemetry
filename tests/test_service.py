@@ -1801,9 +1801,7 @@ class ServiceTests(unittest.TestCase):
             [True, False, True],
         )
         self.assertEqual([row["cost_usd"] for row in rows], [1.0, None, 3.0])
-        self.assertEqual(
-            [row["cumulative_cost_usd"] for row in rows], [1.0, 1.0, 4.0]
-        )
+        self.assertEqual([row["cumulative_cost_usd"] for row in rows], [1.0, 1.0, 4.0])
         self.assertEqual([row["priced"] for row in rows], [True, False, True])
 
     def test_configuration_baseline_never_mislabels_mixed_or_fast_work(self) -> None:

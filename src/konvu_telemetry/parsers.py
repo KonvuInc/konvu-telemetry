@@ -272,7 +272,9 @@ def codex_events_in_file(file_path: Path) -> Iterator[UsageEvent]:
                 )
                 for key in previous:
                     previous[key] = as_number(total_usage.get(key))
-                usage_source = last_usage if isinstance(last_usage, dict) else total_usage
+                usage_source = (
+                    last_usage if isinstance(last_usage, dict) else total_usage
+                )
                 input_tokens = as_number(raw.get("input_tokens"))
                 cached_input_tokens = as_number(raw.get("cached_input_tokens"))
                 cache_write_tokens = min(
