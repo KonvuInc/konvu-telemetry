@@ -91,6 +91,10 @@ function liveWindowMs() {
   const seconds = state.payload?.live_activity_window_seconds;
   return (finite(seconds) && seconds > 0 ? seconds : 20 * 60) * 1000;
 }
+function liveWindowLabel() {
+  const minutes = Math.round(liveWindowMs() / 60000);
+  return minutes + (minutes === 1 ? " minute" : " minutes");
+}
 function activity(s) {
   const sinceActivity = elapsed(s.last_activity_at);
   const live = finite(sinceActivity) && sinceActivity >= -60000 && sinceActivity <= liveWindowMs();
@@ -358,9 +362,7 @@ function spendComparison(s) {
       ratio: null,
       label: "Collector has no comparable baseline",
       detail:
-        state.baselineMode === "matched"
-          ? "The collector recalculates this from your stored local median every six hours. Alerts use the general provider median."
-          : "The collector recalculates this from your stored local median every six hours. Alerts use this general provider median.",
+        "The collector recalculates this from your stored local median every six hours. Medians are a comparison only; alerts follow the next-ten-prompt forecast.",
     };
   }
   const label = c.matched ? "model + effort + speed median" : providerName(s.provider) + " general median";
@@ -368,8 +370,8 @@ function spendComparison(s) {
     ratio: c.ratio,
     label: c.ratio.toFixed(2) + "× " + label,
     detail: c.matched
-      ? "Current recorded spend against the matched local median. Alerts use the general provider median."
-      : "Current recorded spend against the same general provider median used in alerts.",
+      ? "Current recorded spend against the matched local median. Medians are a comparison only; alerts follow the next-ten-prompt forecast."
+      : "Current recorded spend against the general provider median. Medians are a comparison only; alerts follow the next-ten-prompt forecast.",
   };
 }
 function roundedDollarCeiling(value) {
@@ -1118,7 +1120,7 @@ function render() {
     ? state.view === "graph"
       ? fleetGraph(rows)
       : ledger(rows)
-    : '<div class="empty"><h3>No live sessions</h3><p>No activity in the last 20 minutes' +
+    : '<div class="empty"><h3>No live sessions</h3><p>No activity in the last ' + liveWindowLabel() +
       (state.provider !== "all" ? " for " + providerName(state.provider) : "") +
       ". New sessions appear automatically.</p></div>";
   renderAccounts();

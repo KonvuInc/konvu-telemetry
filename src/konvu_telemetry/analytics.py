@@ -271,11 +271,8 @@ def apply_notification_tracking(
             "last_forecast_usd": last_forecast,
         }
         state[key] = record
-        session["notification"] = {
-            **record,
-            "baseline_scope": "provider",
-            "overhead_percent": overhead,
-        }
+        # Display-only: the median no longer gates the alert.
+        session["notification"] = {**record, "overhead_percent": overhead}
     for provider, quotas in (account_quotas or {}).items():
         if not isinstance(provider, str) or not isinstance(quotas, dict):
             continue
