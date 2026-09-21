@@ -15,6 +15,7 @@ class Usage:
     web_search_requests: int
     speed: str
     reasoning_output_tokens: int = 0
+    complete: bool = True
 
     @property
     def total_tokens(self) -> int:
