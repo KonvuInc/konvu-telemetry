@@ -14,13 +14,12 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("state.refreshInFlight = true;", source)
         self.assertIn("finally {\n    state.refreshInFlight = false;", source)
 
-    def test_security_issue_link_uses_the_repository_owner(self) -> None:
-        source = (REPOSITORY / ".github/ISSUE_TEMPLATE/config.yml").read_text()
+    def test_security_reporting_uses_the_private_inbox(self) -> None:
+        issue_template = (REPOSITORY / ".github/ISSUE_TEMPLATE/config.yml").read_text()
+        security_policy = (REPOSITORY / "SECURITY.md").read_text()
 
-        self.assertIn(
-            "https://github.com/KonvuInc/konvu-telemetry/security/policy", source
-        )
-        self.assertNotIn("KonvuTeam/konvu-telemetry", source)
+        self.assertIn("mailto:security@konvu.com", issue_template)
+        self.assertIn("security@konvu.com", security_policy)
 
 
 if __name__ == "__main__":
