@@ -73,15 +73,13 @@ def load_pricing() -> dict[str, dict[str, float]]:
         output_number = nonnegative_number(output_rate)
         if input_number is None or output_number is None:
             continue
-        web_search_rate = values.get(
-            "webSearchCostPerRequest",
-            values.get(
-                "web_search_cost_per_request",
-                values.get("search_context_cost_per_query", 0.01),
-            ),
-        )
+        web_search_rate = values.get("webSearchCostPerRequest")
+        if web_search_rate is None:
+            web_search_rate = values.get("web_search_cost_per_request")
+        if web_search_rate is None:
+            web_search_rate = values.get("search_context_cost_per_query")
         if isinstance(web_search_rate, dict):
-            web_search_rate = web_search_rate.get("search_context_size_medium", 0.01)
+            web_search_rate = web_search_rate.get("search_context_size_medium")
         web_search_number = nonnegative_number(web_search_rate)
         fast_multiplier = nonnegative_number(values.get("fastMultiplier", 1.0))
         context_window = nonnegative_number(values.get("max_input_tokens", 0))
@@ -104,6 +102,8 @@ def load_pricing() -> dict[str, dict[str, float]]:
             else 0.0,
             "long_context_threshold": 0.0,
         }
+        if web_search_number is not None:
+            price["web_search"] = web_search_number
         for field, key in (
             ("input", "input_cost_per_token"),
             ("output", "output_cost_per_token"),
