@@ -267,16 +267,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(
             BASELINE_MILESTONES,
             (
-                10,
-                20,
-                30,
-                40,
-                50,
-                60,
-                70,
-                80,
-                90,
-                100,
+                *range(1, 101),
                 150,
                 200,
                 250,
@@ -960,8 +951,8 @@ class ServiceTests(unittest.TestCase):
         points = cumulative_median_checkpoints(series)
         self.assertEqual(points[0]["sessions"], 6)
         self.assertEqual(points[-1]["sessions"], 6)
-        self.assertEqual(points[0]["median_cost_usd"], 35.0)
-        self.assertEqual(points[1]["median_cost_usd"], 70.0)
+        self.assertEqual(points[9]["median_cost_usd"], 35.0)
+        self.assertEqual(points[19]["median_cost_usd"], 70.0)
 
     def test_cumulative_median_is_monotonic_across_all_sessions(self) -> None:
         series = [
@@ -973,10 +964,10 @@ class ServiceTests(unittest.TestCase):
             [(5.0, 5)] * 20,
         ]
         points = cumulative_median_checkpoints(series)
-        self.assertEqual(points[0]["median_cost_usd"], 525.0)
-        self.assertEqual(points[1]["median_cost_usd"], 550.0)
-        self.assertEqual(points[0]["median_tokens"], 525)
-        self.assertEqual(points[1]["median_tokens"], 550)
+        self.assertEqual(points[9]["median_cost_usd"], 525.0)
+        self.assertEqual(points[19]["median_cost_usd"], 550.0)
+        self.assertEqual(points[9]["median_tokens"], 525)
+        self.assertEqual(points[19]["median_tokens"], 550)
 
     def test_incremental_reader_keeps_large_prompt_boundary_without_retaining_text(
         self,
@@ -1751,6 +1742,32 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(interpolated["median_cost_usd"], 25.0)
         self.assertEqual(interpolated["cost_overhead_percent"], 0)
         self.assertIsNone(extrapolated)
+
+    def test_baseline_comparison_uses_an_exact_short_session_checkpoint(self) -> None:
+        baseline = {
+            "providers": {
+                "claude": [
+                    {
+                        "iterations": 1,
+                        "sessions": 8,
+                        "median_cost_usd": 1.0,
+                        "median_tokens": 100,
+                    },
+                    {
+                        "iterations": 6,
+                        "sessions": 8,
+                        "median_cost_usd": 6.0,
+                        "median_tokens": 600,
+                    },
+                ],
+            },
+            "configurations": {},
+        }
+        comparison = baseline_comparison("claude", 6, 600, baseline, cost_usd=6.0)
+        self.assertIsNotNone(comparison)
+        assert comparison is not None
+        self.assertEqual(comparison["iterations"], 6)
+        self.assertEqual(comparison["median_cost_usd"], 6.0)
 
     def test_baseline_text_reports_spend_when_priced_cost_is_available(self) -> None:
         text = baseline_text(
