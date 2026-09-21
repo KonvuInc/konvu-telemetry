@@ -14,11 +14,11 @@ Konvu Telemetry is one Python package with a single resident process. The proces
 
 1. `installer.py` installs a private launcher, merges supported integrations, and starts a per-user LaunchAgent.
 2. `service.py` owns the collector loop, health record, and localhost HTTP server.
-3. `live.py` incrementally reads appended transcript bytes and retains bounded in-memory state for active files.
+3. `live.py` and `fleet_telemetry.py` incrementally read appended transcript bytes and retain bounded metadata for active files.
 4. `parsers.py` converts provider records into the provider-neutral types in `models.py`.
 5. `pricing.py` applies the bundled local price table and marks missing prices explicitly.
-6. `analytics.py` derives prompt series, personal baselines, forecasts, compaction state, and alert decisions.
-7. `snapshot.py` assembles and atomically writes dashboard and per-session documents.
+6. `analytics.py` derives prompt series, personal baselines, forecasts, compaction state, and alert decisions. Expired valid baselines remain usable while one background refresh rebuilds them.
+7. `snapshot.py` writes a bounded dashboard summary plus detailed per-session documents. Unchanged detail documents are not rewritten.
 8. `display.py` renders the Claude status line and Codex Stop-hook output from per-session documents.
 9. `dashboard/` contains static HTML, CSS, JavaScript, and images served by the local process.
 
@@ -27,8 +27,8 @@ Konvu Telemetry is one Python package with a single resident process. The proces
 | Path | Purpose | Mode |
 | --- | --- | --- |
 | `~/.konvu/telemetry/konvu-launcher` | Absolute-path integration launcher | `0700` |
-| `~/.konvu/telemetry/live-sessions.json` | Current dashboard snapshot | `0600` |
-| `~/.konvu/telemetry/sessions/*.json` | Per-session display snapshots | `0600` |
+| `~/.konvu/telemetry/live-sessions.json` | Bounded summary of sessions active in the dashboard's 20-minute window | `0600` |
+| `~/.konvu/telemetry/sessions/*.json` | Per-session detail loaded on demand by the dashboard | `0600` |
 | `~/.konvu/telemetry/baselines.json` | Local historical medians | `0600` |
 | `~/.konvu/telemetry/health.json` | Collector freshness and last error | `0600` |
 | `~/.konvu/telemetry/notification-state.json` | Alert suppression state | `0600` |
@@ -55,6 +55,8 @@ Raw transcripts remain in `~/.claude/projects` and `~/.codex/sessions`. Normaliz
 - Uninstall refuses to delete the service definition when launchd still reports it running.
 - Unknown billable models suppress cost totals, forecasts, comparisons, and spend alerts.
 - Oversized transcript records are scanned with bounded prefix and suffix buffers; large payload text is not retained.
+- Dashboard responses use ETags, and the browser fetches detailed history only for the open session.
+- Hooks reuse collector output while its health record is fresh instead of forcing duplicate collection.
 - A second server cannot bind the same port and exits before starting another collector loop.
 
 JSON is sufficient for the first release because the process writes one bounded current snapshot, small state files, and one file per session. SQLite becomes useful when the product needs arbitrary historical queries, migrations, or concurrent writers.

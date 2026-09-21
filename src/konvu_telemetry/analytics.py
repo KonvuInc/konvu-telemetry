@@ -6,9 +6,11 @@ import json
 from bisect import bisect_right
 from collections import defaultdict
 from datetime import datetime, timezone
+import logging
 from pathlib import Path
 from statistics import median
-from typing import Iterator, Literal
+from threading import Lock, Thread
+from typing import Iterator, Literal, cast
 
 from .config import (
     ALERT_FORECAST_USD,
@@ -45,6 +47,9 @@ from .storage import (
     transcript_files,
     write_private_json,
 )
+
+LOGGER = logging.getLogger(__name__)
+_BASELINE_REFRESH_LOCK = Lock()
 
 
 def iteration_series(
@@ -206,7 +211,10 @@ def apply_notification_tracking(
     for session in sessions:
         session_id = session.get("id")
         provider = session.get("provider")
-        comparison = session.get("baseline")
+        comparisons = session.get("baselines")
+        comparison = (
+            comparisons.get("provider") if isinstance(comparisons, dict) else None
+        )
         if not isinstance(session_id, str) or not isinstance(provider, str):
             continue
         key = f"{provider}:{session_id}"
@@ -259,6 +267,8 @@ def apply_notification_tracking(
         session["notification"] = {
             "sequence": int(record.get("sequence", 0)),
             "hot": True,
+            "baseline_scope": "provider",
+            "overhead_percent": overhead,
             "last_notified_at": record.get("last_notified_at"),
             "last_cost_usd": record.get("last_cost_usd"),
             "last_overhead_percent": record.get("last_overhead_percent"),
@@ -825,11 +835,13 @@ def cumulative_median_checkpoints(
 
 
 def load_baselines(
-    now: float, prices: dict[str, dict[str, float]]
+    now: float,
+    prices: dict[str, dict[str, float]],
+    refresh_in_background: bool = False,
 ) -> dict[str, object]:
     """Reuse a recent baseline so the minute collector only reads active sessions."""
     try:
-        baseline = json.loads(baseline_path().read_text())
+        baseline = cast(dict[str, object], json.loads(baseline_path().read_text()))
         generated_at = (
             parse_timestamp(baseline.get("generated_at"))
             if isinstance(baseline, dict)
@@ -839,7 +851,7 @@ def load_baselines(
         configurations = (
             baseline.get("configurations") if isinstance(baseline, dict) else None
         )
-        if (
+        valid = (
             isinstance(baseline, dict)
             and baseline.get("schema_version") == BASELINE_SCHEMA_VERSION
             and baseline.get("milestones") == list(BASELINE_MILESTONES)
@@ -848,15 +860,37 @@ def load_baselines(
             and isinstance(forecasts, dict)
             and isinstance(configurations, dict)
             and generated_at is not None
-            and now - generated_at < BASELINE_REFRESH_SECONDS
-        ):
-            return baseline
+        )
+        if valid and generated_at is not None:
+            if now - generated_at < BASELINE_REFRESH_SECONDS:
+                return baseline
+            if refresh_in_background:
+                if _BASELINE_REFRESH_LOCK.acquire(blocking=False):
+                    try:
+                        Thread(
+                            target=_refresh_baselines,
+                            args=(now, prices),
+                            daemon=True,
+                        ).start()
+                    except RuntimeError:
+                        _BASELINE_REFRESH_LOCK.release()
+                        LOGGER.exception("Could not start background baseline refresh")
+                return baseline
     except (OSError, json.JSONDecodeError):
         pass
     baseline = build_baselines(now, prices)
     destination = baseline_path()
     write_private_json(destination, baseline)
     return baseline
+
+
+def _refresh_baselines(now: float, prices: dict[str, dict[str, float]]) -> None:
+    try:
+        write_private_json(baseline_path(), build_baselines(now, prices))
+    except Exception:
+        LOGGER.exception("Background baseline refresh failed")
+    finally:
+        _BASELINE_REFRESH_LOCK.release()
 
 
 def baseline_comparison(
