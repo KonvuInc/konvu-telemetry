@@ -312,6 +312,24 @@ class ServiceTests(unittest.TestCase):
                 {("session", "agent"): "Review tests"},
             )
 
+    def test_workflow_child_prompt_labels_a_claude_subagent(self) -> None:
+        record = {
+            "sessionId": "session",
+            "agentId": "agent",
+            "isSidechain": True,
+            "message": {
+                "role": "user",
+                "content": "Review the release checklist and report any blockers.",
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / "agent-agent.jsonl"
+            transcript.write_text(json.dumps(record) + "\n", encoding="utf-8")
+            self.assertEqual(
+                spawned_agent_labels(transcript),
+                {("session", "agent"): "Review the release checklist and report any blockers."},
+            )
+
     def test_long_context_and_fast_fallback_pricing_are_applied(self) -> None:
         prices = {
             "model": {
