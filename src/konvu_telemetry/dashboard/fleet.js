@@ -22,6 +22,7 @@ const state = {
   selected: null,
   chart: "cumulative",
   error: false,
+  refreshInFlight: false,
   snapshotEtag: null,
   detailRequest: 0,
   now: Date.now(),
@@ -1198,7 +1199,8 @@ function bindEvents() {
   });
 }
 async function refresh() {
-  if (axisDragging) return;
+  if (axisDragging || state.refreshInFlight) return;
+  state.refreshInFlight = true;
   try {
     const headers = state.snapshotEtag ? { "If-None-Match": state.snapshotEtag } : {};
     const response = await fetch("/api/live-sessions", { cache: "no-store", headers });
@@ -1217,6 +1219,8 @@ async function refresh() {
     browserAlerts(payload);
   } catch {
     state.error = true;
+  } finally {
+    state.refreshInFlight = false;
   }
   const active = document.activeElement,
     key = active?.dataset?.session,
