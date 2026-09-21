@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 import json
 import sys
 import time
+from datetime import datetime
 from urllib.request import Request, urlopen
 
 from .config import (
     ACTIVITY_FRESHNESS_SECONDS,
+    ALERT_QUOTA_5H_PERCENT,
+    ALERT_QUOTA_WEEKLY_PERCENT,
     ALLOWED_PROVIDERS,
     CODEX_DISPLAY_COST_THRESHOLD_USD,
     DASHBOARD_PORT,
@@ -113,9 +115,11 @@ def quota_usage_text(payload: dict[str, object]) -> str:
     weekly = percentage("seven_day")
     parts: list[str] = []
     if five_hour is not None:
-        parts.append(f"⏳ {five_hour}% 5-hour limit")
+        hot = "🔥 " if five_hour >= ALERT_QUOTA_5H_PERCENT else ""
+        parts.append(f"{hot}⏳ {five_hour}% 5-hour limit")
     if weekly is not None:
-        parts.append(f"📅 {weekly}% weekly limit")
+        hot = "🔥 " if weekly >= ALERT_QUOTA_WEEKLY_PERCENT else ""
+        parts.append(f"{hot}📅 {weekly}% weekly limit")
     return " · ".join(parts)
 
 
