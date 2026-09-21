@@ -53,7 +53,7 @@ Raw transcripts remain in `~/.claude/projects` and `~/.codex/sessions`. Normaliz
 - Writes use a temporary file and atomic replacement.
 - Setup validates configuration first and restores prior files and service state if any step fails.
 - Uninstall refuses to delete the service definition when launchd still reports it running.
-- Unknown billable models suppress cost totals, forecasts, comparisons, and spend alerts.
+- Unknown billable models mark the session partial; their iterations are omitted from forecasts and cost comparisons while complete iterations remain usable.
 - Oversized transcript records are scanned with bounded prefix and suffix buffers; large payload text is not retained.
 - Dashboard responses use ETags, and the browser fetches detailed history only for the open session.
 - Hooks reuse collector output while its health record is fresh instead of forcing duplicate collection.
