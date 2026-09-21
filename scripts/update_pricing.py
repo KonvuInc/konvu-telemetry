@@ -13,7 +13,12 @@ import re
 import tempfile
 from urllib.request import Request, urlopen
 
-SOURCE = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+# Update this reviewed commit in a normal pull request; never consume mutable upstream main.
+LITELLM_COMMIT = "29e924502434a29e822a562963790e53d92131b0"
+SOURCE = (
+    "https://raw.githubusercontent.com/BerriAI/litellm/"
+    f"{LITELLM_COMMIT}/model_prices_and_context_window.json"
+)
 MAX_PAYLOAD_BYTES = 20 * 1024 * 1024
 
 

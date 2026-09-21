@@ -1,0 +1,31 @@
+name: verify Homebrew formula
+
+on:
+  schedule:
+    - cron: "23 10 * * *"
+  workflow_dispatch:
+
+permissions:
+  attestations: read
+  contents: read
+
+jobs:
+  verify:
+    runs-on: macos-15
+    steps:
+      - name: Verify the tap installs the latest attested source archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
+          version=${tag#v}
+          temporary=$(mktemp -d)
+          trap 'rm -rf "$temporary"' EXIT
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS --dir "$temporary"
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "konvu_telemetry-${version}.tar.gz" --dir "$temporary"
+          gh attestation verify "$temporary/konvu_telemetry-${version}.tar.gz" --repo "$GITHUB_REPOSITORY"
+          expected=$(awk "/  konvu_telemetry-${version}.tar.gz$/ {print \$1}" "$temporary/SHA256SUMS")
+          test -n "$expected"
+          gh api 'repos/konvuinc/homebrew-tap/contents/Formula/konvu-telemetry.rb?ref=main' --jq .content | base64 -D > "$temporary/konvu-telemetry.rb"
+          grep -F "releases/download/${tag}/konvu_telemetry-${version}.tar.gz" "$temporary/konvu-telemetry.rb"
+          grep -F "sha256 \"${expected}\"" "$temporary/konvu-telemetry.rb"

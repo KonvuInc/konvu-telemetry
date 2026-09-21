@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from scripts.update_pricing import validated_payload
+from scripts.update_pricing import LITELLM_COMMIT, SOURCE, validated_payload
 
 from konvu_telemetry.analytics import (
     apply_notification_tracking,
@@ -121,6 +121,10 @@ class ServiceTests(unittest.TestCase):
                     codex_hook_transcript({"transcript_path": str(codex)}, other),
                     codex,
                 )
+
+    def test_pricing_source_is_pinned_to_a_reviewed_commit(self) -> None:
+        self.assertIn(f"/{LITELLM_COMMIT}/", SOURCE)
+        self.assertNotIn("/main/", SOURCE)
 
     def test_pricing_update_rejects_boolean_required_rates(self) -> None:
         payload: dict[str, object] = {f"model-{index}": {} for index in range(1_000)}
