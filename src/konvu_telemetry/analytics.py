@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 from statistics import median
-from typing import Iterator
+from typing import Iterator, Literal
 
 from .config import (
     ALERT_FORECAST_USD,
@@ -721,9 +721,13 @@ def baseline_comparison(
     speed: str = "standard",
     since_compact: bool = False,
     cost_usd: float | None = None,
+    comparison_scope: Literal["auto", "provider", "model_effort_speed"] = "auto",
 ) -> dict[str, object] | None:
     providers = baseline.get("providers")
-    checkpoints = providers.get(provider) if isinstance(providers, dict) else None
+    provider_checkpoints = (
+        providers.get(provider) if isinstance(providers, dict) else None
+    )
+    checkpoints = provider_checkpoints
     scope = "provider"
     configurations = baseline.get("configurations")
     provider_configurations = (
@@ -737,18 +741,23 @@ def baseline_comparison(
     config_checkpoints = (
         configuration.get("checkpoints") if isinstance(configuration, dict) else None
     )
-    provider_checkpoints = checkpoints
-    if isinstance(config_checkpoints, list):
-        config_eligible = [
+    config_eligible = (
+        [
             item
             for item in config_checkpoints
             if isinstance(item, dict)
             and isinstance(item.get("iterations"), int)
             and int(item.get("sessions", 0)) >= 3
         ]
-        if config_eligible:
-            checkpoints = config_eligible
-            scope = "model_effort_speed"
+        if isinstance(config_checkpoints, list)
+        else []
+    )
+    if comparison_scope == "model_effort_speed":
+        checkpoints = config_eligible
+        scope = "model_effort_speed"
+    elif comparison_scope == "auto" and config_eligible:
+        checkpoints = config_eligible
+        scope = "model_effort_speed"
     if not isinstance(checkpoints, list):
         return None
     eligible = [
@@ -759,7 +768,11 @@ def baseline_comparison(
     if not eligible:
         return None
     if task_count < min(int(item["iterations"]) for item in eligible):
-        if scope == "model_effort_speed" and isinstance(provider_checkpoints, list):
+        if (
+            comparison_scope == "auto"
+            and scope == "model_effort_speed"
+            and isinstance(provider_checkpoints, list)
+        ):
             checkpoints = provider_checkpoints
             scope = "provider"
             eligible = [
@@ -779,34 +792,17 @@ def baseline_comparison(
     upper = ordered[lower_index + 1] if lower_index + 1 < len(ordered) else None
     if task_count == int(lower["iterations"]):
         upper = lower
-    if (
-        upper is None
-        and len(ordered) == 1
-        and scope == "model_effort_speed"
-        and isinstance(provider_checkpoints, list)
-    ):
-        checkpoints = provider_checkpoints
-        scope = "provider"
-        eligible = [
-            item
-            for item in checkpoints
-            if isinstance(item, dict) and isinstance(item.get("iterations"), int)
-        ]
-        if not eligible or task_count < min(
-            int(item["iterations"]) for item in eligible
-        ):
-            return None
-        ordered = sorted(eligible, key=lambda item: int(item["iterations"]))
-        lower_index = (
-            bisect_right([int(item["iterations"]) for item in ordered], task_count) - 1
-        )
-        lower = ordered[lower_index]
-        upper = ordered[lower_index + 1] if lower_index + 1 < len(ordered) else None
-        if task_count == int(lower["iterations"]):
-            upper = lower
     if upper is None and len(ordered) > 1:
         lower = ordered[-2]
         upper = ordered[-1]
+    if upper is None and len(ordered) == 1:
+        upper = lower
+        lower = {
+            "iterations": 0,
+            "sessions": upper.get("sessions", 0),
+            "median_cost_usd": 0.0,
+            "median_tokens": 0,
+        }
     if upper is None:
         return None
 
@@ -816,7 +812,7 @@ def baseline_comparison(
     upper_tokens = upper.get("median_tokens")
     if (
         not isinstance(lower_tokens, int)
-        or lower_tokens <= 0
+        or lower_tokens < 0
         or not isinstance(upper_tokens, int)
         or upper_tokens <= 0
         or (upper_iterations <= lower_iterations and task_count != lower_iterations)
