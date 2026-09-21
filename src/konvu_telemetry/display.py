@@ -2,25 +2,82 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 import json
 import sys
 import time
+from datetime import datetime, timezone
 from urllib.request import Request, urlopen
 
 from .config import (
     ACTIVITY_FRESHNESS_SECONDS,
+    ALERT_QUOTA_5H_PERCENT,
+    ALERT_QUOTA_WEEKLY_PERCENT,
     ALLOWED_PROVIDERS,
     CODEX_DISPLAY_COST_THRESHOLD_USD,
     DASHBOARD_PORT,
 )
 from .parsers import codex_hook_transcript, codex_turn_tool_calls
 from .storage import (
+    claude_quota_path,
     codex_display_state_path,
     session_path,
     valid_session_id,
     write_private_json,
 )
+
+
+def record_claude_quotas(payload: dict[str, object], session_id: str) -> None:
+    """Persist fresh Claude quota windows reported to the status-line hook."""
+    if not valid_session_id(session_id):
+        return
+    rate_limits = payload.get("rate_limits")
+    if not isinstance(rate_limits, dict):
+        return
+    windows: list[dict[str, object]] = []
+    for name, minutes in (("five_hour", 5 * 60), ("seven_day", 7 * 24 * 60)):
+        raw_window = rate_limits.get(name)
+        if not isinstance(raw_window, dict):
+            continue
+        value = next(
+            (
+                raw_window.get(key)
+                for key in ("utilization", "used_percentage", "used_pct")
+                if isinstance(raw_window.get(key), (int, float))
+            ),
+            None,
+        )
+        if not isinstance(value, (int, float)):
+            continue
+        used_percent = value * 100 if 0 <= value <= 1 else value
+        if not 0 <= used_percent <= 100:
+            continue
+        resets_at = next(
+            (
+                raw_window.get(key)
+                for key in ("resets_at", "reset_at")
+                if isinstance(raw_window.get(key), str)
+            ),
+            None,
+        )
+        windows.append(
+            {
+                "limit_id": "default",
+                "session_id": session_id,
+                "window_minutes": minutes,
+                "used_percent": used_percent,
+                "remaining_percent": 100 - used_percent,
+                "resets_at": resets_at,
+            }
+        )
+    if windows:
+        write_private_json(
+            claude_quota_path(),
+            {
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+                "source": "claude_statusline",
+                "windows": windows,
+            },
+        )
 
 
 def money(value: object) -> str:
@@ -113,9 +170,11 @@ def quota_usage_text(payload: dict[str, object]) -> str:
     weekly = percentage("seven_day")
     parts: list[str] = []
     if five_hour is not None:
-        parts.append(f"⏳ {five_hour}% 5-hour limit")
+        hot = "🔥 " if five_hour >= ALERT_QUOTA_5H_PERCENT else ""
+        parts.append(f"{hot}⏳ {five_hour}% 5-hour limit")
     if weekly is not None:
-        parts.append(f"📅 {weekly}% weekly limit")
+        hot = "🔥 " if weekly >= ALERT_QUOTA_WEEKLY_PERCENT else ""
+        parts.append(f"{hot}📅 {weekly}% weekly limit")
     return " · ".join(parts)
 
 
@@ -162,6 +221,7 @@ def statusline() -> None:
     if not isinstance(session_id, str):
         print("Konvu live usage: collector starting")
         return
+    record_claude_quotas(payload, session_id)
     snapshot = refreshed_session("claude", session_id)
     if snapshot is None:
         print("Konvu live usage: collector starting")

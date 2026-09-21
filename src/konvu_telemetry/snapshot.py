@@ -726,7 +726,12 @@ def build_snapshot(
     }
     enrich_snapshot(snapshot, claude_transcripts, codex_transcripts, now)
     locate_compactions(snapshot)
-    apply_notification_tracking(sessions, now)
+    account_quotas = snapshot.get("account_quotas")
+    apply_notification_tracking(
+        sessions,
+        now,
+        account_quotas if isinstance(account_quotas, dict) else None,
+    )
     sessions.sort(
         key=lambda session: str(session.get("last_activity_at") or ""), reverse=True
     )

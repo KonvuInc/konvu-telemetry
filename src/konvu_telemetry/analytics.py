@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from bisect import bisect_right
 from collections import defaultdict
 from datetime import datetime, timezone
-import json
 from pathlib import Path
 from statistics import median
 from typing import Iterator, Literal
@@ -13,6 +13,8 @@ from typing import Iterator, Literal
 from .config import (
     ALERT_FORECAST_USD,
     ALERT_OVERHEAD_PERCENT,
+    ALERT_QUOTA_5H_PERCENT,
+    ALERT_QUOTA_WEEKLY_PERCENT,
     ALERT_RENOTIFY_SECONDS,
     BASELINE_LOOKBACK_SECONDS,
     BASELINE_MILESTONES,
@@ -169,7 +171,23 @@ def locate_compactions(snapshot: dict[str, object]) -> None:
         session["compact_events"] = located
 
 
-def apply_notification_tracking(sessions: list[dict[str, object]], now: float) -> None:
+def quota_alert_window(window: dict[str, object]) -> tuple[str, int] | None:
+    """Return the alert name and threshold for a supported quota window."""
+    minutes = window.get("window_minutes")
+    if not isinstance(minutes, (int, float)):
+        return None
+    if minutes == 5 * 60:
+        return "5-hour", ALERT_QUOTA_5H_PERCENT
+    if minutes == 7 * 24 * 60:
+        return "weekly", ALERT_QUOTA_WEEKLY_PERCENT
+    return None
+
+
+def apply_notification_tracking(
+    sessions: list[dict[str, object]],
+    now: float,
+    account_quotas: dict[str, object] | None = None,
+) -> None:
     """Persist alerts so repeated browser polls do not repeatedly notify the user."""
     try:
         raw_state = json.loads(notification_state_path().read_text())
@@ -236,6 +254,79 @@ def apply_notification_tracking(sessions: list[dict[str, object]], now: float) -
             "last_cost_usd": record.get("last_cost_usd"),
             "last_overhead_percent": record.get("last_overhead_percent"),
         }
+    for provider, quotas in (account_quotas or {}).items():
+        if not isinstance(provider, str) or not isinstance(quotas, dict):
+            continue
+        raw_windows = quotas.get("windows")
+        windows = (
+            [window for window in raw_windows if isinstance(window, dict)]
+            if isinstance(raw_windows, list)
+            else []
+        )
+        notifications: list[dict[str, object]] = []
+        for window in windows:
+            alert_window = quota_alert_window(window)
+            used_percent = window.get("used_percent")
+            if alert_window is None or not isinstance(used_percent, (int, float)):
+                continue
+            source_session_id = window.get("session_id")
+            target_session = next(
+                (
+                    session
+                    for session in sessions
+                    if session.get("provider") == provider
+                    and session.get("id") == source_session_id
+                ),
+                None,
+            )
+            if target_session is None or not isinstance(source_session_id, str):
+                continue
+            window_name, threshold = alert_window
+            limit_id = window.get("limit_id")
+            key = f"quota:{provider}:{limit_id if isinstance(limit_id, str) else 'default'}:{window_name}"
+            previous = state.get(key)
+            record = previous if isinstance(previous, dict) else {}
+            reset_at = window.get("resets_at")
+            reset_changed = (
+                isinstance(reset_at, str)
+                and isinstance(record.get("reset_at"), str)
+                and reset_at != record["reset_at"]
+            )
+            if used_percent < threshold:
+                record["hot"] = False
+                if isinstance(reset_at, str):
+                    record["reset_at"] = reset_at
+                state[key] = record
+                continue
+            last_notified_at = record.get("last_notified_at")
+            last_used_percent = record.get("last_used_percent")
+            first_alert = record.get("hot") is not True or reset_changed
+            rising = (
+                isinstance(last_used_percent, (int, float))
+                and used_percent > last_used_percent
+            )
+            may_renotify = (
+                isinstance(last_notified_at, (int, float))
+                and now - last_notified_at >= ALERT_RENOTIFY_SECONDS
+            )
+            if first_alert or (may_renotify and rising):
+                record["sequence"] = int(record.get("sequence", 0)) + 1
+                record["last_notified_at"] = now
+                record["last_used_percent"] = used_percent
+            record["hot"] = True
+            if isinstance(reset_at, str):
+                record["reset_at"] = reset_at
+            state[key] = record
+            notifications.append(
+                {
+                    "sequence": int(record.get("sequence", 0)),
+                    "hot": True,
+                    "window": window_name,
+                    "used_percent": round(used_percent),
+                    "session_id": source_session_id,
+                }
+            )
+        quotas["notifications"] = notifications
     write_private_json(notification_state_path(), state)
 
 

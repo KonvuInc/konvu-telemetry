@@ -1742,6 +1742,31 @@ function bindNotificationPanel() {
 
 function browserAlerts(payload) {
   if (notificationPermission() !== "granted") return;
+  for (const [provider, quotas] of Object.entries(payload.account_quotas || {})) {
+    for (const alert of quotas?.notifications || []) {
+      if (!alert?.hot || !Number.isInteger(alert.sequence) || alert.sequence < 1) continue;
+      const key = "konvu-quota-alert-" + provider + "-" + alert.window;
+      if (Number(localStorage.getItem(key) || 0) >= alert.sequence) continue;
+      localStorage.setItem(key, String(alert.sequence));
+      const notification = new Notification(
+        providerName(provider) + " " + alert.window + " limit at " + alert.used_percent + "%",
+        {
+          body: alert.used_percent + "% of your " + alert.window + " limit is used.",
+          icon: "/konvu-ghost.svg",
+          requireInteraction: true,
+          tag: key,
+        }
+      );
+      notification.onclick = () => {
+        window.focus();
+        const session = (payload.sessions || []).find(
+          (item) => item?.provider === provider && item?.id === alert.session_id
+        );
+        if (session) openSession(keyOf(session));
+        notification.close();
+      };
+    }
+  }
   for (const session of payload.sessions || []) {
     const alert = session.notification;
     if (!alert?.hot || !Number.isInteger(alert.sequence) || alert.sequence < 1) continue;
