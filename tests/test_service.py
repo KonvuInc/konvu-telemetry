@@ -439,6 +439,19 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(points[0]["median_cost_usd"], 25.0)
         self.assertEqual(points[1]["median_cost_usd"], 40.0)
 
+    def test_cumulative_median_never_decreases_when_cohort_changes(self) -> None:
+        series = [
+            *[[(100.0, 100)] * 10 for _ in range(3)],
+            [(1.0, 1)] * 20,
+            [(2.0, 2)] * 20,
+            [(3.0, 3)] * 20,
+        ]
+        points = cumulative_median_checkpoints(series)
+        self.assertEqual(points[0]["median_cost_usd"], 515.0)
+        self.assertEqual(points[1]["median_cost_usd"], 515.0)
+        self.assertEqual(points[0]["median_tokens"], 515)
+        self.assertEqual(points[1]["median_tokens"], 515)
+
     def test_incremental_reader_keeps_large_prompt_boundary_without_retaining_text(
         self,
     ) -> None:

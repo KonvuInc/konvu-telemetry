@@ -632,7 +632,7 @@ def build_baselines(
         "generated_at": datetime.fromtimestamp(now, timezone.utc).isoformat(),
         "lookback_days": BASELINE_LOOKBACK_SECONDS // 86400,
         "milestones": list(BASELINE_MILESTONES),
-        "median_method": "checkpoint_cohort_medians",
+        "median_method": "monotonic_checkpoint_cohort_medians",
         "providers": providers,
         "configurations": configurations,
         "forecasts": {
@@ -647,8 +647,10 @@ def build_baselines(
 def cumulative_median_checkpoints(
     series: list[list[tuple[float, int]]],
 ) -> list[dict[str, object]]:
-    """Return each checkpoint's true cumulative median over its reached-session cohort."""
+    """Return a monotonic cumulative median over each checkpoint's reached cohort."""
     checkpoints: list[dict[str, object]] = []
+    previous_cost = 0.0
+    previous_tokens = 0
     for iteration in BASELINE_MILESTONES:
         cohort = [row for row in series if len(row) >= iteration]
         values = [
@@ -660,16 +662,18 @@ def cumulative_median_checkpoints(
         ]
         if len(values) < 3:
             continue
+        median_cost = max(previous_cost, float(median(value[0] for value in values)))
+        median_tokens = max(previous_tokens, int(median(value[1] for value in values)))
         checkpoints.append(
             {
                 "iterations": iteration,
                 "sessions": len(values),
-                "median_cost_usd": round(
-                    float(median(value[0] for value in values)), 6
-                ),
-                "median_tokens": int(median(value[1] for value in values)),
+                "median_cost_usd": round(median_cost, 6),
+                "median_tokens": median_tokens,
             }
         )
+        previous_cost = median_cost
+        previous_tokens = median_tokens
     return checkpoints
 
 
@@ -692,7 +696,7 @@ def load_baselines(
             isinstance(baseline, dict)
             and baseline.get("schema_version") == BASELINE_SCHEMA_VERSION
             and baseline.get("milestones") == list(BASELINE_MILESTONES)
-            and baseline.get("median_method") == "checkpoint_cohort_medians"
+            and baseline.get("median_method") == "monotonic_checkpoint_cohort_medians"
             and isinstance(forecasts, dict)
             and isinstance(configurations, dict)
             and generated_at is not None
