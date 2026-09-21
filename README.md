@@ -21,7 +21,6 @@ Setup starts the local collector, opens the dashboard at `http://127.0.0.1:7824`
 ```sh
 konvu-telemetry dashboard  # Open the local dashboard
 konvu-telemetry status     # Check that collection is running
-konvu-telemetry uninstall  # Remove the service and Konvu-owned CLI integrations
 ```
 
 To update:
@@ -29,6 +28,13 @@ To update:
 ```sh
 brew upgrade konvu-telemetry
 konvu-telemetry setup
+```
+
+To remove it, clean up the service and integrations before removing the Homebrew package:
+
+```sh
+konvu-telemetry uninstall
+brew uninstall konvu-telemetry
 ```
 
 ## What it does

@@ -1,5 +1,6 @@
 import json
 import os
+import plistlib
 import subprocess
 import tempfile
 import unittest
@@ -127,8 +128,46 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(command, [str(path)])
             self.assertEqual(path.stat().st_mode & 0o777, 0o700)
             self.assertEqual(
-                path.read_text(), f'#!/bin/sh\nunset PYTHONPATH\nexec {console} "$@"\n'
+                path.read_text(),
+                "#!/bin/sh\n"
+                "unset PYTHONPATH\n"
+                f"[ -x {console} ] || exit 0\n"
+                f'exec {console} "$@"\n',
             )
+
+    def test_private_launcher_exits_cleanly_after_package_removal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            console = home / "bin" / "konvu"
+            console.parent.mkdir()
+            console.write_text("#!/bin/sh\nexit 0\n")
+            console.chmod(0o700)
+            with (
+                patch.object(installer.Path, "home", return_value=home),
+                patch.object(installer, "console_launcher", return_value=console),
+            ):
+                launcher = installer.install_launcher()
+            console.unlink()
+            result = subprocess.run([str(launcher), "statusline"], check=False)
+            self.assertEqual(result.returncode, 0)
+
+    def test_launch_agent_stops_restarting_after_package_removal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            console = home / "bin" / "konvu"
+            console.parent.mkdir()
+            console.write_text("#!/bin/sh\nexit 0\n")
+            console.chmod(0o700)
+            with (
+                patch.object(installer.Path, "home", return_value=home),
+                patch.object(installer, "console_launcher", return_value=console),
+                patch.object(installer.sys, "platform", "darwin"),
+                patch.object(installer, "stop_launch_agent"),
+                patch.object(installer, "start_launch_agent"),
+            ):
+                installer.install_launch_agent(60)
+                payload = plistlib.loads(installer.launch_agent_path().read_bytes())
+            self.assertEqual(payload["KeepAlive"], {"SuccessfulExit": False})
 
     def test_private_launcher_ignores_an_untrusted_working_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -209,3 +248,68 @@ class InstallerTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "still running"):
                     installer.uninstall()
             self.assertEqual(plist.read_bytes(), b"installed")
+
+    def test_setup_is_idempotent_and_uninstall_restores_existing_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            claude_path = home / ".claude" / "settings.json"
+            codex_path = home / ".codex" / "hooks.json"
+            claude_path.parent.mkdir()
+            codex_path.parent.mkdir()
+            original_statusline = {
+                "type": "command",
+                "command": "printf existing",
+                "refreshInterval": 10,
+            }
+            claude_path.write_text(json.dumps({"statusLine": original_statusline}))
+            codex_path.write_text(
+                json.dumps(
+                    {
+                        "hooks": {
+                            "Stop": [
+                                {"hooks": [{"type": "command", "command": "keep-me"}]}
+                            ]
+                        }
+                    }
+                )
+            )
+            console = home / "bin" / "konvu-telemetry"
+            console.parent.mkdir()
+            console.write_text("#!/bin/sh\nexit 0\n")
+            console.chmod(0o700)
+            with (
+                patch.object(installer.Path, "home", return_value=home),
+                patch.object(installer, "console_launcher", return_value=console),
+                patch.object(installer.sys, "platform", "darwin"),
+                patch.object(installer, "stop_launch_agent"),
+                patch.object(installer, "start_launch_agent"),
+            ):
+                installer.setup(30, False)
+                installer.setup(60, False)
+                installed = json.loads(codex_path.read_text())
+                self.assertEqual(len(installed["hooks"]["Stop"]), 2)
+                self.assertEqual(
+                    json.loads(installer.claude_statusline_state_path().read_text())[
+                        "statusLine"
+                    ],
+                    original_statusline,
+                )
+                result = installer.uninstall()
+                owned_paths = (
+                    installer.launch_agent_path(),
+                    installer.launcher_path(),
+                    installer.claude_statusline_path(),
+                    installer.claude_statusline_original_path(),
+                    installer.claude_statusline_state_path(),
+                )
+            self.assertEqual(result, {"claude_statusline": True, "codex_hook": True})
+            self.assertEqual(
+                json.loads(claude_path.read_text())["statusLine"], original_statusline
+            )
+            restored = json.loads(codex_path.read_text())
+            self.assertEqual(
+                restored["hooks"]["Stop"],
+                [{"hooks": [{"type": "command", "command": "keep-me"}]}],
+            )
+            for path in owned_paths:
+                self.assertFalse(path.exists())

@@ -87,7 +87,11 @@ def install_launcher() -> Path:
     try:
         target = shlex.quote(str(console_launcher()))
         temporary.write_text(
-            f'#!/bin/sh\nunset PYTHONPATH\nexec {target} "$@"\n', encoding="utf-8"
+            "#!/bin/sh\n"
+            "unset PYTHONPATH\n"
+            f"[ -x {target} ] || exit 0\n"
+            f'exec {target} "$@"\n',
+            encoding="utf-8",
         )
         temporary.chmod(0o700)
         os.replace(temporary, path)
@@ -238,11 +242,14 @@ def install_claude_statusline(
             "refreshInterval": 60,
         }
     )
-    if command is not None and not is_konvu_statusline(command):
+    wrapper_command = shlex.quote(str(claude_statusline_path()))
+    if command == wrapper_command:
+        statusline["command"] = wrapper_command
+    elif command is not None and not is_konvu_statusline(command):
         write_claude_statusline_wrapper(command)
         write_json(claude_statusline_state_path(), {"statusLine": existing})
-        statusline["command"] = shlex.quote(str(claude_statusline_path()))
-    elif command != shlex.quote(str(claude_statusline_path())):
+        statusline["command"] = wrapper_command
+    else:
         claude_statusline_path().unlink(missing_ok=True)
         claude_statusline_original_path().unlink(missing_ok=True)
         claude_statusline_state_path().unlink(missing_ok=True)
@@ -348,7 +355,7 @@ def install_launch_agent(interval: int, ensure_launcher: bool = True) -> None:
             str(max(1, interval)),
         ],
         "RunAtLoad": True,
-        "KeepAlive": True,
+        "KeepAlive": {"SuccessfulExit": False},
         "StandardOutPath": str(logs / "collector.log"),
         "StandardErrorPath": str(logs / "collector.error.log"),
     }
@@ -511,8 +518,14 @@ def uninstall() -> dict[str, bool]:
             "claude_statusline": remove_claude_statusline(create_backup=False),
             "codex_hook": remove_codex_hook(create_backup=False),
         }
-        launch_agent_path().unlink(missing_ok=True)
-        launcher_path().unlink(missing_ok=True)
+        for path in (
+            launch_agent_path(),
+            launcher_path(),
+            claude_statusline_path(),
+            claude_statusline_original_path(),
+            claude_statusline_state_path(),
+        ):
+            path.unlink(missing_ok=True)
         return result
     except Exception:
         restore_installation(states, states[-1].contents is not None)

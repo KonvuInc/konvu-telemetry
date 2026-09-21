@@ -14,8 +14,8 @@
 
 ## Formula requirements
 
-The formula should use the tagged source archive, depend on a Homebrew Python version supported by `python_requires`, install the package in an isolated virtual environment, and run `konvu-telemetry --help` in its test block. Do not install or start the LaunchAgent from the formula; the user controls that through `konvu-telemetry setup`.
+The formula should use the tagged source archive, depend on a Homebrew Python version supported by `python_requires`, install the package in an isolated virtual environment, and start an isolated server in its test block to verify `/healthz`. Do not install or start the LaunchAgent from the formula; the user controls that through `konvu-telemetry setup`.
 
 ## Rollback
 
-Delete a broken release only before announcing it, fix forward with a new version, and never move an existing tag. Users can stop integrations with `konvu-telemetry uninstall` before downgrading the formula.
+Delete a broken release only before announcing it, fix forward with a new version, and never move an existing tag. Users must run `konvu-telemetry uninstall` before downgrading or removing the formula so the installed binary can clean up its service and integrations.
