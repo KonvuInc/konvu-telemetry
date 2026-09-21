@@ -814,19 +814,21 @@ def build_baselines(
 def cumulative_median_checkpoints(
     series: list[list[tuple[float, int]]],
 ) -> list[dict[str, object]]:
-    """Return the actual cumulative median for each checkpoint's reached cohort."""
+    """Return cumulative medians across all recent sessions at every checkpoint."""
+    if len(series) < BASELINE_MIN_SESSIONS:
+        return []
+    observed_iterations = max((len(row) for row in series), default=0)
     checkpoints: list[dict[str, object]] = []
     for iteration in BASELINE_MILESTONES:
-        cohort = [row for row in series if len(row) >= iteration]
+        if iteration > observed_iterations:
+            break
         values = [
             (
-                sum(cost for cost, _ in row[:iteration]),
-                sum(tokens for _, tokens in row[:iteration]),
+                sum(cost for cost, _ in row[: min(iteration, len(row))]),
+                sum(tokens for _, tokens in row[: min(iteration, len(row))]),
             )
-            for row in cohort
+            for row in series
         ]
-        if len(values) < BASELINE_MIN_SESSIONS:
-            continue
         median_cost = float(median(value[0] for value in values))
         median_tokens = int(median(value[1] for value in values))
         checkpoints.append(
