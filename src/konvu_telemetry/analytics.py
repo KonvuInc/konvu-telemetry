@@ -13,6 +13,7 @@ from threading import Lock, Thread
 from typing import Iterator, Literal, cast
 
 from .config import (
+    ACTIVITY_CLOCK_SKEW_SECONDS,
     ALERT_FORECAST_RENOTIFY_SECONDS,
     ALERT_FORECAST_USD,
     ALERT_QUOTA_5H_PERCENT,
@@ -236,29 +237,38 @@ def apply_notification_tracking(
             else None
         )
         forecast = alert_number(session.get("projected_next_10_tasks_usd"))
+        basis = session.get("forecast_basis")
+        coverage = basis.get("coverage") if isinstance(basis, dict) else None
         last_activity = parse_timestamp(session.get("last_activity_at"))
         if (
             forecast is None
+            # A forecast borrowed from a median is display-only; the session has not earned it.
+            or coverage not in (None, "fully_priced")
             or session.get("cost_status") != "complete"
             or forecast <= ALERT_FORECAST_USD
             or last_activity is None
-            or now - last_activity > LIVE_ACTIVITY_SECONDS
+            # Bounded below too: a skewed future stamp must not pin a dead session live.
+            or not -ACTIVITY_CLOCK_SKEW_SECONDS
+            <= now - last_activity
+            <= LIVE_ACTIVITY_SECONDS
         ):
-            # Forget the alerted peak on cooldown so a later crossing alerts afresh.
+            # Forget the alerted peak, but keep the clock: the repeat floor spans cooldowns.
+            cooled = alert_number(record.get("last_notified_at"))
             record = {"sequence": int(record.get("sequence", 0)), "hot": False}
+            if cooled is not None:
+                record["last_notified_at"] = cooled
             state[key] = record
             session["notification"] = dict(record)
             continue
         sequence = int(record.get("sequence", 0))
         last_notified_at = alert_number(record.get("last_notified_at"))
         last_forecast = alert_number(record.get("last_forecast_usd"))
-        if last_notified_at is None or last_forecast is None:
-            # Records missing either half predate this rule and must alert afresh.
+        if last_notified_at is None:
             notify = True
         else:
-            notify = (
-                now - last_notified_at >= ALERT_FORECAST_RENOTIFY_SECONDS
-                and forecast >= last_forecast
+            # A forgotten peak re-arms the comparison but never skips the repeat floor.
+            notify = now - last_notified_at >= ALERT_FORECAST_RENOTIFY_SECONDS and (
+                last_forecast is None or forecast >= last_forecast
             )
         if notify:
             sequence += 1

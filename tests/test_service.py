@@ -2147,8 +2147,35 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(self.track_active(session, 100.0, path), 1)
             session["projected_next_10_tasks_usd"] = 1.0
             self.assertEqual(self.track_active(session, 100.0 + 60, path), 1)
+            # Re-arming forgets the $12 peak, so $5 alerts once the repeat floor passes.
             session["projected_next_10_tasks_usd"] = 5.0
-            self.assertEqual(self.track_active(session, 100.0 + 120, path), 2)
+            self.assertEqual(self.track_active(session, 100.0 + 5 * 60, path), 2)
+
+    def test_forecast_oscillating_across_the_threshold_respects_the_repeat_floor(
+        self,
+    ) -> None:
+        session = self.forecast_session(5.0)
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.alert_state_path(directory)
+            self.assertEqual(self.track_active(session, 100.0, path), 1)
+            for step, forecast in enumerate((3.9, 5.0, 3.9, 5.0), start=1):
+                session["projected_next_10_tasks_usd"] = forecast
+                sequence = self.track_active(session, 100.0 + step * 30, path)
+                self.assertEqual(sequence, 1)
+
+    def test_forecast_borrowed_from_a_median_does_not_alert(self) -> None:
+        session = self.forecast_session(40.0)
+        session["forecast_basis"] = {"coverage": "historical_fallback"}
+        with tempfile.TemporaryDirectory() as directory:
+            sequence = self.track(session, 100.0, self.alert_state_path(directory))
+        self.assertEqual(sequence, 0)
+        self.assertFalse(session["notification"]["hot"])
+
+    def test_future_activity_stamp_does_not_keep_a_session_live(self) -> None:
+        session = self.forecast_session(40.0, active_at=100.0 + 10 * 60)
+        with tempfile.TemporaryDirectory() as directory:
+            sequence = self.track(session, 100.0, self.alert_state_path(directory))
+        self.assertEqual(sequence, 0)
 
     def test_state_written_before_this_rule_alerts_afresh(self) -> None:
         session = self.forecast_session(12.0)
@@ -2167,7 +2194,9 @@ class ServiceTests(unittest.TestCase):
                     }
                 )
             )
-            self.assertEqual(self.track_active(session, 100.0 + 60, path), 4)
+            # The recorded clock still binds, so the upgrade cannot alert immediately.
+            self.assertEqual(self.track_active(session, 100.0 + 60, path), 3)
+            self.assertEqual(self.track_active(session, 100.0 + 5 * 60, path), 4)
 
     def test_quota_alerts_cross_threshold_then_renotify_only_when_rising(self) -> None:
         sessions = [{"id": "session", "provider": "codex"}]

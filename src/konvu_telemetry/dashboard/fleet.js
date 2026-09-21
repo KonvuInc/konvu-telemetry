@@ -1766,7 +1766,9 @@ function browserAlerts(payload) {
         " forecast for the next 10 prompts\n💸 $" +
         Number(session.total_cost_usd || 0).toFixed(1) +
         " spent so far" +
-        (finite(overhead) ? " · " + Math.round(overhead) + "% above your usual burn" : ""),
+        (finite(overhead)
+          ? " · " + Math.abs(Math.round(overhead)) + "% " + (overhead < 0 ? "below" : "above") + " your usual burn"
+          : ""),
       icon: "/konvu-ghost.svg",
       requireInteraction: true,
       tag: key,
