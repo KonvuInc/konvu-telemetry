@@ -36,6 +36,12 @@ def local_request_allowed(host: str, origin: str | None) -> bool:
     return host_name in LOCAL_HOSTS and (origin is None or origin_host in LOCAL_HOSTS)
 
 
+def open_dashboard(port: int) -> None:
+    """Open the resident local dashboard."""
+    webbrowser.open(f"http://127.0.0.1:{port}/")
+    print("Opening the Konvu dashboard")
+
+
 def write_health(
     now: float, error: str | None = None, interval_seconds: int | None = None
 ) -> None:
@@ -210,7 +216,7 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
         return
 
 
-def run_local_service(interval_seconds: int, port: int, open_browser: bool) -> None:
+def run_local_service(interval_seconds: int, port: int) -> None:
     """Run the collector and localhost dashboard together in one process."""
     directory = Path(__file__).with_name("dashboard")
     if not directory.is_dir():
@@ -227,10 +233,10 @@ def run_local_service(interval_seconds: int, port: int, open_browser: bool) -> N
         daemon=True,
     )
     collector.start()
-    url = f"http://127.0.0.1:{port}/"
-    if open_browser:
-        webbrowser.open(url)
-    print(f"Konvu dashboard running at {url}")
+    print(
+        f"Konvu dashboard running at http://127.0.0.1:{port}/; "
+        "use `konvu-telemetry dashboard` to open it"
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:
