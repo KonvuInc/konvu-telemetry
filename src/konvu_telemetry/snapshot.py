@@ -309,7 +309,7 @@ def build_snapshot(
             if baseline_configuration is not None
             else ("unknown", "standard", "standard")
         )
-        claude_baseline = baseline_comparison(
+        claude_provider_baseline = baseline_comparison(
             "claude",
             comparison_task_count,
             comparison_tokens,
@@ -319,12 +319,30 @@ def build_snapshot(
             speed=baseline_speed,
             since_compact=since_compact,
             cost_usd=comparison_cost,
+            comparison_scope="provider",
         )
+        claude_configuration_baseline = baseline_comparison(
+            "claude",
+            comparison_task_count,
+            comparison_tokens,
+            baselines,
+            model=baseline_model,
+            effort=baseline_effort,
+            speed=baseline_speed,
+            since_compact=since_compact,
+            cost_usd=comparison_cost,
+            comparison_scope="model_effort_speed",
+        )
+        claude_baseline = claude_configuration_baseline or claude_provider_baseline
         if since_compact and comparison_task_count < FORECAST_WINDOW:
             claude_baseline = None
+            claude_provider_baseline = None
+            claude_configuration_baseline = None
         if total_cost_status != "complete":
             next_10_forecast = None
             claude_baseline = None
+            claude_provider_baseline = None
+            claude_configuration_baseline = None
         sessions.append(
             {
                 "id": session_id,
@@ -370,6 +388,10 @@ def build_snapshot(
                 "since_compact": since_compact,
                 "last_task_tool_calls": last_task_tool_calls,
                 "baseline": claude_baseline,
+                "baselines": {
+                    "provider": claude_provider_baseline,
+                    "model_effort_speed": claude_configuration_baseline,
+                },
                 "context_tokens": context_event.usage.context_tokens,
                 "context_window_tokens": claude_context_window(
                     context_event.model, context_event.usage.context_tokens, prices
@@ -573,6 +595,33 @@ def build_snapshot(
             if baseline_configuration is not None
             else ("unknown", "standard", "standard")
         )
+        codex_provider_baseline = baseline_comparison(
+            "codex",
+            task_count,
+            total_tokens,
+            baselines,
+            model=baseline_model,
+            effort=baseline_effort,
+            speed=baseline_speed,
+            cost_usd=sum(known_costs) + sum(known_child_costs),
+            comparison_scope="provider",
+        )
+        codex_configuration_baseline = baseline_comparison(
+            "codex",
+            task_count,
+            total_tokens,
+            baselines,
+            model=baseline_model,
+            effort=baseline_effort,
+            speed=baseline_speed,
+            cost_usd=sum(known_costs) + sum(known_child_costs),
+            comparison_scope="model_effort_speed",
+        )
+        codex_baseline = codex_configuration_baseline or codex_provider_baseline
+        if total_cost_status != "complete":
+            codex_baseline = None
+            codex_provider_baseline = None
+            codex_configuration_baseline = None
         sessions.append(
             {
                 "id": session_id,
@@ -613,20 +662,11 @@ def build_snapshot(
                 )
                 if last_task_start is not None
                 else 0,
-                "baseline": baseline_comparison(
-                    "codex",
-                    task_count,
-                    total_tokens,
-                    baselines,
-                    model=baseline_model,
-                    effort=baseline_effort,
-                    speed=baseline_speed,
-                    cost_usd=sum(known_costs) + sum(known_child_costs)
-                    if total_cost_status == "complete"
-                    else None,
-                )
-                if total_cost_status == "complete"
-                else None,
+                "baseline": codex_baseline,
+                "baselines": {
+                    "provider": codex_provider_baseline,
+                    "model_effort_speed": codex_configuration_baseline,
+                },
                 "active_subagents": sum(
                     1 for _, _, _, is_live, _ in child_entries if is_live
                 ),

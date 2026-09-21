@@ -8,7 +8,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import median
-from typing import Iterator
+from typing import Iterator, Literal
 
 from .config import (
     ALERT_FORECAST_USD,
@@ -710,7 +710,7 @@ def build_baselines(
         "generated_at": datetime.fromtimestamp(now, timezone.utc).isoformat(),
         "lookback_days": BASELINE_LOOKBACK_SECONDS // 86400,
         "milestones": list(BASELINE_MILESTONES),
-        "median_method": "checkpoint_cohort_medians",
+        "median_method": "monotonic_checkpoint_cohort_medians",
         "providers": providers,
         "configurations": configurations,
         "forecasts": {
@@ -725,8 +725,10 @@ def build_baselines(
 def cumulative_median_checkpoints(
     series: list[list[tuple[float, int]]],
 ) -> list[dict[str, object]]:
-    """Return each checkpoint's true cumulative median over its reached-session cohort."""
+    """Return a monotonic cumulative median over each checkpoint's reached cohort."""
     checkpoints: list[dict[str, object]] = []
+    previous_cost = 0.0
+    previous_tokens = 0
     for iteration in BASELINE_MILESTONES:
         cohort = [row for row in series if len(row) >= iteration]
         values = [
@@ -738,16 +740,18 @@ def cumulative_median_checkpoints(
         ]
         if len(values) < 3:
             continue
+        median_cost = max(previous_cost, float(median(value[0] for value in values)))
+        median_tokens = max(previous_tokens, int(median(value[1] for value in values)))
         checkpoints.append(
             {
                 "iterations": iteration,
                 "sessions": len(values),
-                "median_cost_usd": round(
-                    float(median(value[0] for value in values)), 6
-                ),
-                "median_tokens": int(median(value[1] for value in values)),
+                "median_cost_usd": round(median_cost, 6),
+                "median_tokens": median_tokens,
             }
         )
+        previous_cost = median_cost
+        previous_tokens = median_tokens
     return checkpoints
 
 
@@ -770,7 +774,7 @@ def load_baselines(
             isinstance(baseline, dict)
             and baseline.get("schema_version") == BASELINE_SCHEMA_VERSION
             and baseline.get("milestones") == list(BASELINE_MILESTONES)
-            and baseline.get("median_method") == "checkpoint_cohort_medians"
+            and baseline.get("median_method") == "monotonic_checkpoint_cohort_medians"
             and isinstance(forecasts, dict)
             and isinstance(configurations, dict)
             and generated_at is not None
@@ -795,9 +799,13 @@ def baseline_comparison(
     speed: str = "standard",
     since_compact: bool = False,
     cost_usd: float | None = None,
+    comparison_scope: Literal["auto", "provider", "model_effort_speed"] = "auto",
 ) -> dict[str, object] | None:
     providers = baseline.get("providers")
-    checkpoints = providers.get(provider) if isinstance(providers, dict) else None
+    provider_checkpoints = (
+        providers.get(provider) if isinstance(providers, dict) else None
+    )
+    checkpoints = provider_checkpoints
     scope = "provider"
     configurations = baseline.get("configurations")
     provider_configurations = (
@@ -811,18 +819,23 @@ def baseline_comparison(
     config_checkpoints = (
         configuration.get("checkpoints") if isinstance(configuration, dict) else None
     )
-    provider_checkpoints = checkpoints
-    if isinstance(config_checkpoints, list):
-        config_eligible = [
+    config_eligible = (
+        [
             item
             for item in config_checkpoints
             if isinstance(item, dict)
             and isinstance(item.get("iterations"), int)
             and int(item.get("sessions", 0)) >= 3
         ]
-        if config_eligible:
-            checkpoints = config_eligible
-            scope = "model_effort_speed"
+        if isinstance(config_checkpoints, list)
+        else []
+    )
+    if comparison_scope == "model_effort_speed":
+        checkpoints = config_eligible
+        scope = "model_effort_speed"
+    elif comparison_scope == "auto" and config_eligible:
+        checkpoints = config_eligible
+        scope = "model_effort_speed"
     if not isinstance(checkpoints, list):
         return None
     eligible = [
@@ -833,7 +846,11 @@ def baseline_comparison(
     if not eligible:
         return None
     if task_count < min(int(item["iterations"]) for item in eligible):
-        if scope == "model_effort_speed" and isinstance(provider_checkpoints, list):
+        if (
+            comparison_scope == "auto"
+            and scope == "model_effort_speed"
+            and isinstance(provider_checkpoints, list)
+        ):
             checkpoints = provider_checkpoints
             scope = "provider"
             eligible = [
@@ -853,34 +870,17 @@ def baseline_comparison(
     upper = ordered[lower_index + 1] if lower_index + 1 < len(ordered) else None
     if task_count == int(lower["iterations"]):
         upper = lower
-    if (
-        upper is None
-        and len(ordered) == 1
-        and scope == "model_effort_speed"
-        and isinstance(provider_checkpoints, list)
-    ):
-        checkpoints = provider_checkpoints
-        scope = "provider"
-        eligible = [
-            item
-            for item in checkpoints
-            if isinstance(item, dict) and isinstance(item.get("iterations"), int)
-        ]
-        if not eligible or task_count < min(
-            int(item["iterations"]) for item in eligible
-        ):
-            return None
-        ordered = sorted(eligible, key=lambda item: int(item["iterations"]))
-        lower_index = (
-            bisect_right([int(item["iterations"]) for item in ordered], task_count) - 1
-        )
-        lower = ordered[lower_index]
-        upper = ordered[lower_index + 1] if lower_index + 1 < len(ordered) else None
-        if task_count == int(lower["iterations"]):
-            upper = lower
     if upper is None and len(ordered) > 1:
         lower = ordered[-2]
         upper = ordered[-1]
+    if upper is None and len(ordered) == 1:
+        upper = lower
+        lower = {
+            "iterations": 0,
+            "sessions": upper.get("sessions", 0),
+            "median_cost_usd": 0.0,
+            "median_tokens": 0,
+        }
     if upper is None:
         return None
 
@@ -890,7 +890,7 @@ def baseline_comparison(
     upper_tokens = upper.get("median_tokens")
     if (
         not isinstance(lower_tokens, int)
-        or lower_tokens <= 0
+        or lower_tokens < 0
         or not isinstance(upper_tokens, int)
         or upper_tokens <= 0
         or (upper_iterations <= lower_iterations and task_count != lower_iterations)
