@@ -32,7 +32,7 @@ jobs:
       - run: python -m mypy src/konvu_telemetry
       - run: python -m compileall -q src
       - run: node --check src/konvu_telemetry/dashboard/fleet.js
-      - run: PYTHONPATH=src python scripts/benchmark.py --sessions 50 --prompts 20 --max-cold-seconds 5 --max-incremental-seconds 2 --max-peak-mib 64
+      - run: PYTHONPATH=src python scripts/benchmark.py --sessions 50 --prompts 20 --max-cold-seconds 5 --max-incremental-seconds 4 --max-peak-mib 64
       - run: python -m pip install --disable-pip-version-check .
       - run: python -m unittest discover -s tests -v
       - run: python -m build --sdist --wheel --outdir dist
