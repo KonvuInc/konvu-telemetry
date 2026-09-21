@@ -87,9 +87,13 @@ function displayTitle(s) {
   }
   return title;
 }
+function liveWindowMs() {
+  const seconds = state.payload?.live_activity_window_seconds;
+  return (finite(seconds) && seconds > 0 ? seconds : 20 * 60) * 1000;
+}
 function activity(s) {
   const sinceActivity = elapsed(s.last_activity_at);
-  const live = finite(sinceActivity) && sinceActivity >= -60000 && sinceActivity <= 20 * 60000;
+  const live = finite(sinceActivity) && sinceActivity >= -60000 && sinceActivity <= liveWindowMs();
   const a = s.activity;
   if (a?.state === "running") return { live, label: "Running", kind: "running", explicit: true };
   if (a?.state === "idle") return { live, label: "Idle", kind: "idle", explicit: true };
@@ -1752,16 +1756,15 @@ function browserAlerts(payload) {
     const key = "konvu-alert-" + session.provider + "-" + session.id;
     if (Number(localStorage.getItem(key) || 0) >= alert.sequence) continue;
     localStorage.setItem(key, String(alert.sequence));
-    const overhead = Math.round(alert.overhead_percent || 0);
+    const overhead = alert.overhead_percent;
     const notification = new Notification(providerName(session.provider) + " session running hot", {
       body:
-        "💸 $" +
-        Number(session.total_cost_usd || 0).toFixed(1) +
-        " total · $" +
+        "🔥 $" +
         Number(session.projected_next_10_tasks_usd || 0).toFixed(1) +
-        " for the next 10 prompts\n🔥 " +
-        overhead +
-        "% above your usual burn",
+        " forecast for the next 10 prompts\n💸 $" +
+        Number(session.total_cost_usd || 0).toFixed(1) +
+        " spent so far" +
+        (finite(overhead) ? " · " + Math.round(overhead) + "% above your usual burn" : ""),
       icon: "/konvu-ghost.svg",
       requireInteraction: true,
       tag: key,

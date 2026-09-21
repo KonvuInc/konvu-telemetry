@@ -28,6 +28,7 @@ from konvu_telemetry.analytics import (
     task_series,
 )
 from konvu_telemetry.config import (
+    ALERT_FORECAST_USD,
     BASELINE_MILESTONES,
     BASELINE_MIN_SESSIONS,
     BASELINE_SCHEMA_VERSION,
@@ -1993,7 +1994,7 @@ class ServiceTests(unittest.TestCase):
             "model_effort_speed",
         )
 
-    def test_linear_priced_spend_at_nearby_task_counts_never_alerts(self) -> None:
+    def test_sessions_without_a_forecast_never_alert(self) -> None:
         baseline = {
             "providers": {
                 "claude": [
@@ -2038,15 +2039,8 @@ class ServiceTests(unittest.TestCase):
         )
 
     def test_partial_cost_session_does_not_trigger_hot_alert(self) -> None:
-        sessions = [
-            {
-                "id": "session",
-                "provider": "claude",
-                "total_cost_usd": 12.0,
-                "cost_status": "partial",
-                "baselines": {"provider": {"token_overhead_percent": 150}},
-            }
-        ]
+        sessions = [self.forecast_session(40.0)]
+        sessions[0]["cost_status"] = "partial"
         with tempfile.TemporaryDirectory() as directory:
             state_path = Path(directory) / "notifications.json"
             with patch(
@@ -2056,54 +2050,124 @@ class ServiceTests(unittest.TestCase):
                 apply_notification_tracking(sessions, 100.0)
         self.assertEqual(sessions[0]["notification"], {"sequence": 0, "hot": False})
 
-    def test_alerts_require_high_overhead_and_forecast_then_wait_ten_minutes(
-        self,
-    ) -> None:
-        session = {
-            "id": "session",
-            "provider": "claude",
-            "total_cost_usd": 10.0,
-            "projected_next_10_tasks_usd": 4.01,
-            "cost_status": "complete",
-            "baseline": {"cost_overhead_percent": 10},
-            "baselines": {"provider": {"cost_overhead_percent": 200}},
-        }
-        with tempfile.TemporaryDirectory() as directory:
-            state_path = Path(directory) / "notifications.json"
-            with patch(
-                "konvu_telemetry.analytics.notification_state_path",
-                return_value=state_path,
-            ):
-                apply_notification_tracking([session], 100.0)
-                self.assertEqual(session["notification"]["sequence"], 1)
-                self.assertEqual(session["notification"]["baseline_scope"], "provider")
-                self.assertEqual(session["notification"]["overhead_percent"], 200)
-                session["total_cost_usd"] = 11.0
-                session["baselines"] = {"provider": {"cost_overhead_percent": 210}}
-                apply_notification_tracking([session], 100.0 + 9 * 60)
-                self.assertEqual(session["notification"]["sequence"], 1)
-                apply_notification_tracking([session], 100.0 + 10 * 60)
-        self.assertEqual(session["notification"]["sequence"], 2)
+    def alert_state_path(self, directory: str) -> Path:
+        return Path(directory) / "notifications.json"
 
-    def test_hot_alerts_ignore_matched_median_when_provider_median_is_normal(
-        self,
-    ) -> None:
-        session = {
+    def forecast_session(
+        self, forecast: float, active_at: float = 100.0
+    ) -> dict[str, object]:
+        return {
             "id": "session",
             "provider": "claude",
             "total_cost_usd": 10.0,
-            "projected_next_10_tasks_usd": 4.01,
+            "projected_next_10_tasks_usd": forecast,
             "cost_status": "complete",
-            "baseline": {"cost_overhead_percent": 999},
-            "baselines": {"provider": {"cost_overhead_percent": 199}},
+            "last_activity_at": datetime.fromtimestamp(
+                active_at, timezone.utc
+            ).isoformat(),
         }
+
+    def track(self, session: dict[str, object], now: float, state_path: Path) -> int:
+        with patch(
+            "konvu_telemetry.analytics.notification_state_path",
+            return_value=state_path,
+        ):
+            apply_notification_tracking([session], now)
+        return int(session["notification"]["sequence"])
+
+    def track_active(
+        self, session: dict[str, object], now: float, state_path: Path
+    ) -> int:
+        """Track a session still spending, so its activity keeps pace with the clock."""
+        session["last_activity_at"] = datetime.fromtimestamp(
+            now, timezone.utc
+        ).isoformat()
+        return self.track(session, now, state_path)
+
+    def test_forecast_at_or_below_threshold_does_not_alert(self) -> None:
+        session = self.forecast_session(ALERT_FORECAST_USD)
         with tempfile.TemporaryDirectory() as directory:
-            with patch(
-                "konvu_telemetry.analytics.notification_state_path",
-                return_value=Path(directory) / "notifications.json",
-            ):
-                apply_notification_tracking([session], 100.0)
-        self.assertEqual(session["notification"], {"sequence": 0, "hot": False})
+            sequence = self.track(session, 100.0, self.alert_state_path(directory))
+        self.assertEqual(sequence, 0)
+        self.assertFalse(session["notification"]["hot"])
+
+    def test_forecast_above_threshold_alerts_without_any_baseline(self) -> None:
+        session = self.forecast_session(ALERT_FORECAST_USD + 0.01)
+        with tempfile.TemporaryDirectory() as directory:
+            sequence = self.track(session, 100.0, self.alert_state_path(directory))
+        self.assertEqual(sequence, 1)
+        self.assertTrue(session["notification"]["hot"])
+
+    def test_spend_below_the_median_still_alerts_on_a_high_forecast(self) -> None:
+        session = self.forecast_session(40.0)
+        session["baselines"] = {"provider": {"cost_overhead_percent": -80}}
+        with tempfile.TemporaryDirectory() as directory:
+            sequence = self.track(session, 100.0, self.alert_state_path(directory))
+        self.assertEqual(sequence, 1)
+        self.assertEqual(session["notification"]["overhead_percent"], -80)
+
+    def test_session_idle_past_the_live_window_does_not_alert(self) -> None:
+        session = self.forecast_session(40.0)
+        with tempfile.TemporaryDirectory() as directory:
+            sequence = self.track(
+                session, 100.0 + 21 * 60, self.alert_state_path(directory)
+            )
+        self.assertEqual(sequence, 0)
+        self.assertFalse(session["notification"]["hot"])
+
+    def test_session_without_recorded_activity_does_not_alert(self) -> None:
+        session = self.forecast_session(40.0)
+        del session["last_activity_at"]
+        with tempfile.TemporaryDirectory() as directory:
+            sequence = self.track(session, 100.0, self.alert_state_path(directory))
+        self.assertEqual(sequence, 0)
+
+    def test_sustained_forecast_renotifies_only_after_five_minutes(self) -> None:
+        session = self.forecast_session(12.0)
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.alert_state_path(directory)
+            self.assertEqual(self.track_active(session, 100.0, path), 1)
+            self.assertEqual(self.track_active(session, 100.0 + 4 * 60, path), 1)
+            self.assertEqual(self.track_active(session, 100.0 + 5 * 60, path), 2)
+
+    def test_forecast_brought_down_stops_renotifying_until_it_recovers(self) -> None:
+        session = self.forecast_session(12.0)
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.alert_state_path(directory)
+            self.assertEqual(self.track_active(session, 100.0, path), 1)
+            session["projected_next_10_tasks_usd"] = 6.0
+            self.assertEqual(self.track_active(session, 100.0 + 10 * 60, path), 1)
+            session["projected_next_10_tasks_usd"] = 12.0
+            self.assertEqual(self.track_active(session, 100.0 + 20 * 60, path), 2)
+
+    def test_cooling_below_threshold_rearms_the_next_crossing(self) -> None:
+        session = self.forecast_session(12.0)
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.alert_state_path(directory)
+            self.assertEqual(self.track_active(session, 100.0, path), 1)
+            session["projected_next_10_tasks_usd"] = 1.0
+            self.assertEqual(self.track_active(session, 100.0 + 60, path), 1)
+            session["projected_next_10_tasks_usd"] = 5.0
+            self.assertEqual(self.track_active(session, 100.0 + 120, path), 2)
+
+    def test_state_written_before_this_rule_alerts_afresh(self) -> None:
+        session = self.forecast_session(12.0)
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.alert_state_path(directory)
+            path.write_text(
+                json.dumps(
+                    {
+                        "claude:session": {
+                            "sequence": 3,
+                            "hot": True,
+                            "last_notified_at": 100.0,
+                            "last_cost_usd": 9.0,
+                            "last_overhead_percent": 250,
+                        }
+                    }
+                )
+            )
+            self.assertEqual(self.track_active(session, 100.0 + 60, path), 4)
 
     def test_quota_alerts_cross_threshold_then_renotify_only_when_rising(self) -> None:
         sessions = [{"id": "session", "provider": "codex"}]

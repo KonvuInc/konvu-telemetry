@@ -20,7 +20,7 @@ The next-ten forecast first uses the mean cost of up to ten completed, fully pri
 
 Personal baselines use the median cumulative cost and token traffic of sessions that reached the same checkpoint during the last 30 days. At least five sessions are required. Each checkpoint reports its actual reached-session cohort, so adjacent values can change when the cohort changes. Values are interpolated only between measured checkpoints and are suppressed outside the observed range.
 
-Hot-session alerts compare recorded cost with the general provider median. The model, effort, and speed median remains available as a separate dashboard comparison and does not drive alerts.
+Hot-session alerts are driven by the next-ten forecast alone: a session alerts when it was active within the last twenty minutes, its cost is fully priced, and that forecast exceeds $4. Medians drive no alert; both the general provider median and the model, effort, and speed median remain dashboard comparisons only. Because the forecast needs no baseline, short sessions that never reach a median checkpoint still alert.
 
 Run `konvu-telemetry backtest-next-ten` against local Claude history to inspect rolling forecast error. Run `python3 scripts/benchmark.py` for a synthetic performance receipt that never reads real transcripts.
 
