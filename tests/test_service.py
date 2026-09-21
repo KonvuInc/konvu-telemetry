@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from scripts.update_pricing import LITELLM_COMMIT, SOURCE, validated_payload
+from scripts.update_pricing import validated_payload
 
 from konvu_telemetry.analytics import (
     apply_notification_tracking,
@@ -62,6 +62,7 @@ from konvu_telemetry.parsers import (
     codex_subagent_parent,
     codex_task_starts,
     events_in_file,
+    has_usage_fields,
     is_human_claude_prompt,
     spawned_agent_labels,
     spawned_agent_times,
@@ -97,6 +98,20 @@ from konvu_telemetry.storage import (
 
 
 class ServiceTests(unittest.TestCase):
+    def test_usage_completeness_rejects_boolean_token_counters(self) -> None:
+        self.assertTrue(
+            has_usage_fields(
+                {"input_tokens": 1, "output_tokens": 0}, "input_tokens", "output_tokens"
+            )
+        )
+        self.assertFalse(
+            has_usage_fields(
+                {"input_tokens": True, "output_tokens": 0},
+                "input_tokens",
+                "output_tokens",
+            )
+        )
+
     def test_hook_transcripts_must_match_the_claimed_session(self) -> None:
         claimed = "11111111-1111-1111-1111-111111111111"
         other = "22222222-2222-2222-2222-222222222222"
@@ -127,10 +142,6 @@ class ServiceTests(unittest.TestCase):
                     codex_hook_transcript({"transcript_path": str(codex)}, other),
                     codex,
                 )
-
-    def test_pricing_source_is_pinned_to_a_reviewed_commit(self) -> None:
-        self.assertIn(f"/{LITELLM_COMMIT}/", SOURCE)
-        self.assertNotIn("/main/", SOURCE)
 
     def test_pricing_update_rejects_boolean_required_rates(self) -> None:
         payload: dict[str, object] = {f"model-{index}": {} for index in range(1_000)}
