@@ -199,7 +199,7 @@ def is_konvu_statusline(value: object) -> bool:
 
 def is_konvu_hook(value: object, command: str) -> bool:
     """Return whether a command is one specific Konvu hook entry."""
-    if not is_konvu_command(value):
+    if not isinstance(value, str) or not is_konvu_command(value):
         return False
     try:
         arguments = shlex.split(value)
