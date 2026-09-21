@@ -439,6 +439,19 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(points[0]["median_cost_usd"], 25.0)
         self.assertEqual(points[1]["median_cost_usd"], 40.0)
 
+    def test_cumulative_median_never_decreases_when_cohort_changes(self) -> None:
+        series = [
+            *[[(100.0, 100)] * 10 for _ in range(3)],
+            [(1.0, 1)] * 20,
+            [(2.0, 2)] * 20,
+            [(3.0, 3)] * 20,
+        ]
+        points = cumulative_median_checkpoints(series)
+        self.assertEqual(points[0]["median_cost_usd"], 515.0)
+        self.assertEqual(points[1]["median_cost_usd"], 515.0)
+        self.assertEqual(points[0]["median_tokens"], 515)
+        self.assertEqual(points[1]["median_tokens"], 515)
+
     def test_incremental_reader_keeps_large_prompt_boundary_without_retaining_text(
         self,
     ) -> None:
@@ -912,12 +925,48 @@ class ServiceTests(unittest.TestCase):
         matched = baseline_comparison(
             "codex", 10, 10, baseline, "model", "medium", "standard", cost_usd=10
         )
+        provider = baseline_comparison(
+            "codex",
+            10,
+            10,
+            baseline,
+            "model",
+            "medium",
+            "standard",
+            cost_usd=10,
+            comparison_scope="provider",
+        )
         wrong_speed = baseline_comparison(
             "codex", 10, 10, baseline, "model", "medium", "fast", cost_usd=10
         )
+        unavailable_match = baseline_comparison(
+            "codex",
+            10,
+            10,
+            baseline,
+            "model",
+            "medium",
+            "fast",
+            cost_usd=10,
+            comparison_scope="model_effort_speed",
+        )
+        extrapolated_match = baseline_comparison(
+            "codex",
+            20,
+            20,
+            baseline,
+            "model",
+            "medium",
+            "standard",
+            cost_usd=20,
+            comparison_scope="model_effort_speed",
+        )
         self.assertEqual(matched["scope"], "model_effort_speed")
         self.assertEqual(matched["speed"], "standard")
+        self.assertEqual(provider["scope"], "provider")
         self.assertEqual(wrong_speed["scope"], "provider")
+        self.assertIsNone(unavailable_match)
+        self.assertEqual(extrapolated_match["median_cost_usd"], 20.0)
 
     def test_snapshot_exposes_only_uniform_comparison_configuration(self) -> None:
         session_id = "00000000-0000-0000-0000-000000000001"
@@ -965,6 +1014,12 @@ class ServiceTests(unittest.TestCase):
                     "konvu_telemetry.snapshot.load_baselines",
                     return_value={"providers": {}, "configurations": {}},
                 ),
+                patch(
+                    "konvu_telemetry.snapshot.baseline_comparison",
+                    side_effect=lambda *_args, comparison_scope="auto", **_kwargs: {
+                        "scope": comparison_scope
+                    },
+                ),
                 patch("konvu_telemetry.snapshot.pinned_sessions", return_value=[]),
                 patch("konvu_telemetry.snapshot.enrich_snapshot"),
                 patch("konvu_telemetry.snapshot.locate_compactions"),
@@ -976,6 +1031,12 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(
             session["comparison_configuration"],
             {"model": "model", "effort": "medium", "speed": "fast"},
+        )
+        self.assertEqual(session["baseline"]["scope"], "model_effort_speed")
+        self.assertEqual(session["baselines"]["provider"]["scope"], "provider")
+        self.assertEqual(
+            session["baselines"]["model_effort_speed"]["scope"],
+            "model_effort_speed",
         )
 
     def test_linear_priced_spend_at_nearby_task_counts_never_alerts(self) -> None:

@@ -359,7 +359,8 @@ function checkpointComparison(s) {
   };
 }
 function recordedBaselineComparison(s) {
-  const baseline = s.baseline;
+  const scope = state.baselineMode === "matched" ? "model_effort_speed" : "provider";
+  const baseline = s.baselines?.[scope] || (s.baseline?.scope === scope ? s.baseline : null);
   const overhead = baseline?.cost_overhead_percent;
   if (!finite(overhead)) return null;
   const ratio = 1 + overhead / 100;
@@ -373,7 +374,7 @@ function recordedBaselineComparison(s) {
   };
 }
 function spendComparison(s) {
-  const c = (state.baselineMode === "matched" ? recordedBaselineComparison(s) : null) || checkpointComparison(s);
+  const c = recordedBaselineComparison(s) || checkpointComparison(s);
   if (!c) {
     const prompts = Number(s.task_count || 0);
     return {
