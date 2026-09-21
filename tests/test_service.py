@@ -948,7 +948,7 @@ class ServiceTests(unittest.TestCase):
         self.assertTrue(is_human_claude_prompt(record))
         self.assertTrue(is_claude_prompt(record))
 
-    def test_cumulative_median_uses_the_actual_checkpoint_cohort(self) -> None:
+    def test_cumulative_median_keeps_finished_sessions_in_the_population(self) -> None:
         series = [
             [(1.0, 1)] * 250,
             [(2.0, 2)] * 250,
@@ -959,11 +959,11 @@ class ServiceTests(unittest.TestCase):
         ]
         points = cumulative_median_checkpoints(series)
         self.assertEqual(points[0]["sessions"], 6)
-        self.assertEqual(points[-1]["sessions"], 5)
+        self.assertEqual(points[-1]["sessions"], 6)
         self.assertEqual(points[0]["median_cost_usd"], 35.0)
-        self.assertEqual(points[1]["median_cost_usd"], 60.0)
+        self.assertEqual(points[1]["median_cost_usd"], 70.0)
 
-    def test_cumulative_median_reports_the_actual_changed_cohort(self) -> None:
+    def test_cumulative_median_is_monotonic_across_all_sessions(self) -> None:
         series = [
             *[[(100.0, 100)] * 10 for _ in range(5)],
             [(1.0, 1)] * 20,
@@ -974,9 +974,9 @@ class ServiceTests(unittest.TestCase):
         ]
         points = cumulative_median_checkpoints(series)
         self.assertEqual(points[0]["median_cost_usd"], 525.0)
-        self.assertEqual(points[1]["median_cost_usd"], 60.0)
+        self.assertEqual(points[1]["median_cost_usd"], 550.0)
         self.assertEqual(points[0]["median_tokens"], 525)
-        self.assertEqual(points[1]["median_tokens"], 60)
+        self.assertEqual(points[1]["median_tokens"], 550)
 
     def test_incremental_reader_keeps_large_prompt_boundary_without_retaining_text(
         self,
