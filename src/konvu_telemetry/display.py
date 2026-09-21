@@ -202,7 +202,13 @@ def recorded_quota_usage_text(provider: str) -> str:
         used = window.get("used_percent")
         if not isinstance(minutes, (int, float)) or not isinstance(used, (int, float)):
             continue
-        label = "5-hour" if minutes == 300 else "weekly" if minutes == 10_080 else f"{round(minutes / 60)}-hour"
+        label = (
+            "5-hour"
+            if minutes == 300
+            else "weekly"
+            if minutes == 10_080
+            else f"{round(minutes / 60)}-hour"
+        )
         parts.append(f"{round(min(100, max(0, used)))}% {label} limit")
     return " · ".join(parts)
 
