@@ -54,9 +54,9 @@ _BASELINE_REFRESH_LOCK = Lock()
 
 def iteration_series(
     starts: list[float],
-    costs: list[float],
+    costs: list[float | None],
     events: list[UsageEvent],
-    priced: bool = True,
+    priced: bool | list[bool] = True,
 ) -> list[dict[str, object]]:
     """Build the cumulative, per-iteration usage history used by the dashboard."""
     main_events = sorted(
@@ -66,6 +66,7 @@ def iteration_series(
     cumulative_cost = 0.0
     rows: list[dict[str, object]] = []
     for index, (start, cost) in enumerate(zip(starts, costs), start=1):
+        iteration_priced = priced[index - 1] if isinstance(priced, list) else priced
         end = starts[index] if index < len(starts) else float("inf")
         iteration_events = [
             event for event in main_events if start <= event.timestamp < end
@@ -76,7 +77,8 @@ def iteration_series(
             if iteration_events
             else (prior_events[-1] if prior_events else None)
         )
-        cumulative_cost += cost
+        if isinstance(cost, (int, float)):
+            cumulative_cost += cost
         configuration = single_configuration(iteration_events)
         model, effort, speed = (
             configuration if configuration is not None else (None, None, None)
@@ -85,9 +87,9 @@ def iteration_series(
             {
                 "iteration": index,
                 "started_at": datetime.fromtimestamp(start, timezone.utc).isoformat(),
-                "cost_usd": round(cost, 6),
+                "cost_usd": round(cost, 6) if isinstance(cost, (int, float)) else None,
                 "cumulative_cost_usd": round(cumulative_cost, 6),
-                "priced": priced,
+                "priced": iteration_priced,
                 "context_tokens": context_event.usage.context_tokens
                 if context_event
                 else 0,
@@ -787,7 +789,7 @@ def build_baselines(
         "lookback_days": BASELINE_LOOKBACK_SECONDS // 86400,
         "minimum_sessions": BASELINE_MIN_SESSIONS,
         "milestones": list(BASELINE_MILESTONES),
-        "median_method": "monotonic_checkpoint_cohort_medians",
+        "median_method": "checkpoint_cohort_medians",
         "providers": providers,
         "configurations": configurations,
         "forecasts": {
@@ -804,10 +806,8 @@ def build_baselines(
 def cumulative_median_checkpoints(
     series: list[list[tuple[float, int]]],
 ) -> list[dict[str, object]]:
-    """Return a monotonic cumulative median over each checkpoint's reached cohort."""
+    """Return the actual cumulative median for each checkpoint's reached cohort."""
     checkpoints: list[dict[str, object]] = []
-    previous_cost = 0.0
-    previous_tokens = 0
     for iteration in BASELINE_MILESTONES:
         cohort = [row for row in series if len(row) >= iteration]
         values = [
@@ -819,8 +819,8 @@ def cumulative_median_checkpoints(
         ]
         if len(values) < BASELINE_MIN_SESSIONS:
             continue
-        median_cost = max(previous_cost, float(median(value[0] for value in values)))
-        median_tokens = max(previous_tokens, int(median(value[1] for value in values)))
+        median_cost = float(median(value[0] for value in values))
+        median_tokens = int(median(value[1] for value in values))
         checkpoints.append(
             {
                 "iterations": iteration,
@@ -829,8 +829,6 @@ def cumulative_median_checkpoints(
                 "median_tokens": median_tokens,
             }
         )
-        previous_cost = median_cost
-        previous_tokens = median_tokens
     return checkpoints
 
 
@@ -856,7 +854,7 @@ def load_baselines(
             and baseline.get("schema_version") == BASELINE_SCHEMA_VERSION
             and baseline.get("milestones") == list(BASELINE_MILESTONES)
             and baseline.get("minimum_sessions") == BASELINE_MIN_SESSIONS
-            and baseline.get("median_method") == "monotonic_checkpoint_cohort_medians"
+            and baseline.get("median_method") == "checkpoint_cohort_medians"
             and isinstance(forecasts, dict)
             and isinstance(configurations, dict)
             and generated_at is not None

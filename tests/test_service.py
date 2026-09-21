@@ -21,6 +21,7 @@ from konvu_telemetry.analytics import (
     cumulative_median_checkpoints,
     deduplicate_usage_events,
     forecast_backtest_sample,
+    iteration_series,
     load_baselines,
     scaled_precompact_forecast,
     single_configuration,
@@ -38,11 +39,13 @@ from konvu_telemetry.display import (
     record_claude_quotas,
     refreshed_session,
 )
+from konvu_telemetry.exporter import normalized_event
 from konvu_telemetry.fleet_telemetry import (
     _CACHE as TELEMETRY_CACHE,
     TranscriptTelemetry,
     _comparable_forecast,
     _timestamp,
+    _quota_windows,
     enrich_snapshot,
     is_claude_prompt,
     parse_telemetry,
@@ -51,10 +54,12 @@ from konvu_telemetry.live import CodexLiveFile, IncrementalLiveState
 from konvu_telemetry.models import Usage, UsageEvent
 from konvu_telemetry.parsers import (
     assistant_event,
+    claude_client_in_file,
     claude_hook_transcript,
     codex_events_in_file,
     codex_hook_transcript,
     codex_subagent_parent,
+    codex_task_starts,
     events_in_file,
     is_human_claude_prompt,
     spawned_agent_labels,
@@ -144,7 +149,7 @@ class ServiceTests(unittest.TestCase):
                         "schema_version": 8,
                         "generated_at": "2026-09-21T00:00:00Z",
                         "milestones": list(BASELINE_MILESTONES),
-                        "median_method": "monotonic_checkpoint_cohort_medians",
+                        "median_method": "checkpoint_cohort_medians",
                         "providers": {},
                         "configurations": {},
                         "forecasts": {},
@@ -332,7 +337,10 @@ class ServiceTests(unittest.TestCase):
 
     def test_codex_cumulative_checkpoints_become_deltas(self) -> None:
         def checkpoint(
-            total: int, input_tokens: int, output_tokens: int
+            total: int,
+            input_tokens: int,
+            output_tokens: int,
+            reasoning_output_tokens: int,
         ) -> dict[str, object]:
             return {
                 "timestamp": "2026-01-01T00:00:00Z",
@@ -346,14 +354,14 @@ class ServiceTests(unittest.TestCase):
                             "cached_input_tokens": 0,
                             "cache_write_input_tokens": 0,
                             "output_tokens": output_tokens,
-                            "reasoning_output_tokens": 0,
+                            "reasoning_output_tokens": reasoning_output_tokens,
                         },
                         "last_token_usage": {
                             "input_tokens": input_tokens,
                             "cached_input_tokens": 0,
                             "cache_write_input_tokens": 0,
                             "output_tokens": output_tokens,
-                            "reasoning_output_tokens": 0,
+                            "reasoning_output_tokens": reasoning_output_tokens,
                         },
                         "model_context_window": 258_400,
                     },
@@ -367,14 +375,45 @@ class ServiceTests(unittest.TestCase):
             transcript.write_text(
                 "\n".join(
                     json.dumps(record)
-                    for record in [checkpoint(12, 10, 2), checkpoint(27, 12, 3)]
+                    for record in [checkpoint(15, 10, 2, 3), checkpoint(34, 12, 3, 4)]
                 )
             )
             events = list(codex_events_in_file(transcript))
-        self.assertEqual([event.usage.total_tokens for event in events], [12, 15])
+        self.assertEqual([event.usage.output_tokens for event in events], [2, 3])
+        self.assertEqual(
+            [event.usage.reasoning_output_tokens for event in events], [3, 4]
+        )
+        self.assertEqual([event.usage.total_tokens for event in events], [15, 19])
         self.assertEqual(
             [event.context_window_tokens for event in events], [258_400, 258_400]
         )
+
+    def test_codex_user_messages_are_task_boundaries_without_task_started(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / "rollout-session.jsonl"
+            transcript.write_text(
+                "\n".join(
+                    json.dumps(record)
+                    for record in (
+                        {
+                            "timestamp": "2026-01-01T00:00:00Z",
+                            "type": "event_msg",
+                            "payload": {"type": "user_message", "message": "one"},
+                        },
+                        {
+                            "timestamp": "2026-01-01T00:01:00Z",
+                            "type": "event_msg",
+                            "payload": {
+                                "type": "message",
+                                "role": "user",
+                                "content": "two",
+                            },
+                        },
+                    )
+                )
+            )
+            starts = codex_task_starts(transcript)
+        self.assertEqual(starts, [1767225600.0, 1767225660.0])
 
     def test_one_hour_claude_cache_write_uses_the_higher_rate(self) -> None:
         event = UsageEvent(
@@ -405,6 +444,116 @@ class ServiceTests(unittest.TestCase):
             ),
             160.0,
         )
+
+    def test_codex_reasoning_output_is_priced_and_exported(self) -> None:
+        event = UsageEvent(
+            provider="codex",
+            session_id="session",
+            message_id="message",
+            timestamp=0,
+            model="gpt-test",
+            usage=Usage(0, 2, 0, 0, 0, 0, "standard", 3),
+            tool_calls=0,
+            is_subagent=False,
+            agent_id=None,
+            effort="high",
+        )
+        prices = {
+            "gpt-test": {
+                "input": 1,
+                "output": 2,
+                "cache_write": 1,
+                "cache_read": 1,
+                "web_search": 0,
+                "fast_multiplier": 1,
+            }
+        }
+
+        self.assertEqual(event_cost(event, prices), 10.0)
+        exported = normalized_event(event, prices)
+        self.assertEqual(exported["tokens"]["reasoning_output"], 3)
+        self.assertEqual(exported["reasoning_effort"], "high")
+        self.assertEqual(exported["speed"], "standard")
+        self.assertTrue(exported["usage_complete"])
+
+    def test_missing_billable_usage_is_not_reported_as_a_complete_cost(self) -> None:
+        event = assistant_event(
+            {
+                "timestamp": "2026-01-01T00:00:00Z",
+                "sessionId": "session",
+                "message": {
+                    "id": "message",
+                    "role": "assistant",
+                    "model": "claude-test",
+                    "usage": {"input_tokens": 10},
+                },
+            }
+        )
+        self.assertIsNotNone(event)
+        assert event is not None
+        self.assertFalse(event.usage.complete)
+        self.assertEqual(
+            cost_status(
+                [event],
+                {
+                    "claude-test": {
+                        "input": 1,
+                        "output": 1,
+                        "cache_write": 1,
+                        "cache_read": 1,
+                        "fast_multiplier": 1,
+                    }
+                },
+            ),
+            ("unavailable", 1),
+        )
+
+    def test_codex_checkpoint_identity_deduplicates_replayed_rollouts(self) -> None:
+        first = UsageEvent(
+            "codex",
+            "session",
+            "session:100",
+            1,
+            "model",
+            Usage(1, 0, 0, 0, 0, 0, "standard"),
+            0,
+            False,
+            None,
+            "standard",
+        )
+        replay = UsageEvent(
+            "codex",
+            "session",
+            "session:100",
+            2,
+            "model",
+            Usage(1, 0, 0, 0, 0, 0, "standard"),
+            0,
+            False,
+            None,
+            "standard",
+        )
+        self.assertEqual(deduplicate_usage_events([first, replay]), [first])
+
+    def test_ratio_quota_values_are_normalized_to_percent(self) -> None:
+        windows = _quota_windows(
+            {"primary": {"used_percent": 0.8, "window_minutes": 300}}, 0
+        )
+        self.assertEqual(windows[0]["used_percent"], 80.0)
+
+    def test_claude_sdk_client_is_explicitly_attributed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / "session.jsonl"
+            transcript.write_text(
+                json.dumps(
+                    {
+                        "sessionId": "session",
+                        "entrypoint": "sdk-cli",
+                    }
+                )
+            )
+            clients = claude_client_in_file(transcript)
+        self.assertEqual(clients, {"session": "sdk"})
 
     def test_claude_tool_results_do_not_create_prompt_boundaries(self) -> None:
         records = [
@@ -798,7 +947,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(points[0]["median_cost_usd"], 35.0)
         self.assertEqual(points[1]["median_cost_usd"], 60.0)
 
-    def test_cumulative_median_never_decreases_when_cohort_changes(self) -> None:
+    def test_cumulative_median_reports_the_actual_changed_cohort(self) -> None:
         series = [
             *[[(100.0, 100)] * 10 for _ in range(5)],
             [(1.0, 1)] * 20,
@@ -809,9 +958,9 @@ class ServiceTests(unittest.TestCase):
         ]
         points = cumulative_median_checkpoints(series)
         self.assertEqual(points[0]["median_cost_usd"], 525.0)
-        self.assertEqual(points[1]["median_cost_usd"], 525.0)
+        self.assertEqual(points[1]["median_cost_usd"], 60.0)
         self.assertEqual(points[0]["median_tokens"], 525)
-        self.assertEqual(points[1]["median_tokens"], 525)
+        self.assertEqual(points[1]["median_tokens"], 60)
 
     def test_incremental_reader_keeps_large_prompt_boundary_without_retaining_text(
         self,
@@ -1051,7 +1200,7 @@ class ServiceTests(unittest.TestCase):
             "generated_at": "2026-01-01T00:00:00+00:00",
             "forecasts": {},
             "configurations": {},
-            "median_method": "monotonic_checkpoint_cohort_medians",
+            "median_method": "checkpoint_cohort_medians",
         }
         new = {**old, "generated_at": "2026-01-02T00:00:00+00:00"}
         with tempfile.TemporaryDirectory() as directory:
@@ -1083,7 +1232,7 @@ class ServiceTests(unittest.TestCase):
             "generated_at": "2026-01-01T00:00:00+00:00",
             "forecasts": {},
             "configurations": {},
-            "median_method": "monotonic_checkpoint_cohort_medians",
+            "median_method": "checkpoint_cohort_medians",
         }
         with tempfile.TemporaryDirectory() as directory:
             destination = Path(directory) / "baselines.json"
@@ -1640,6 +1789,17 @@ class ServiceTests(unittest.TestCase):
             [(1.0, 1), (0.0, 0), (2.0, 2)],
         )
 
+    def test_incomplete_iteration_is_omitted_without_resetting_history(self) -> None:
+        rows = iteration_series(
+            [1.0, 2.0, 3.0],
+            [1.0, None, 3.0],
+            [],
+            [True, False, True],
+        )
+        self.assertEqual([row["cost_usd"] for row in rows], [1.0, None, 3.0])
+        self.assertEqual([row["cumulative_cost_usd"] for row in rows], [1.0, 1.0, 4.0])
+        self.assertEqual([row["priced"] for row in rows], [True, False, True])
+
     def test_configuration_baseline_never_mislabels_mixed_or_fast_work(self) -> None:
         standard = UsageEvent(
             "codex",
@@ -1770,7 +1930,11 @@ class ServiceTests(unittest.TestCase):
                     "id": "message",
                     "role": "assistant",
                     "model": "model",
-                    "usage": {"input_tokens": 1, "speed": "fast"},
+                    "usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 0,
+                        "speed": "fast",
+                    },
                 },
             },
         ]

@@ -73,15 +73,13 @@ def load_pricing() -> dict[str, dict[str, float]]:
         output_number = nonnegative_number(output_rate)
         if input_number is None or output_number is None:
             continue
-        web_search_rate = values.get(
-            "webSearchCostPerRequest",
-            values.get(
-                "web_search_cost_per_request",
-                values.get("search_context_cost_per_query", 0.01),
-            ),
-        )
+        web_search_rate = values.get("webSearchCostPerRequest")
+        if web_search_rate is None:
+            web_search_rate = values.get("web_search_cost_per_request")
+        if web_search_rate is None:
+            web_search_rate = values.get("search_context_cost_per_query")
         if isinstance(web_search_rate, dict):
-            web_search_rate = web_search_rate.get("search_context_size_medium", 0.01)
+            web_search_rate = web_search_rate.get("search_context_size_medium")
         web_search_number = nonnegative_number(web_search_rate)
         fast_multiplier = nonnegative_number(values.get("fastMultiplier", 1.0))
         context_window = nonnegative_number(values.get("max_input_tokens", 0))
@@ -96,7 +94,6 @@ def load_pricing() -> dict[str, dict[str, float]]:
             "cache_read": cache_read_number
             if cache_read_number is not None
             else input_number * 0.1,
-            "web_search": web_search_number if web_search_number is not None else 0.01,
             "fast_multiplier": fast_multiplier
             if fast_multiplier is not None and fast_multiplier > 0
             else 1.0,
@@ -105,6 +102,8 @@ def load_pricing() -> dict[str, dict[str, float]]:
             else 0.0,
             "long_context_threshold": 0.0,
         }
+        if web_search_number is not None:
+            price["web_search"] = web_search_number
         for field, key in (
             ("input", "input_cost_per_token"),
             ("output", "output_cost_per_token"),
@@ -178,6 +177,8 @@ def cache_read_rate(model: str, prices: dict[str, dict[str, float]]) -> float | 
 
 
 def event_cost(event: UsageEvent, prices: dict[str, dict[str, float]]) -> float | None:
+    if not event.usage.complete:
+        return None
     rates = price_for(event.model, prices)
     if rates is None:
         return None
@@ -211,16 +212,22 @@ def event_cost(event: UsageEvent, prices: dict[str, dict[str, float]]) -> float 
     output_rate = rate_for("output")
     cache_write_rate = rate_for("cache_write")
     cache_read_rate = rate_for("cache_read")
+    web_search_rate = rates.get("web_search")
+    if event.usage.web_search_requests and not isinstance(
+        web_search_rate, (int, float)
+    ):
+        return None
     five_minute_cache_write = max(
         0, event.usage.cache_write_tokens - event.usage.cache_write_one_hour_tokens
     )
     return (
         event.usage.input_tokens * input_rate
-        + event.usage.output_tokens * output_rate
+        + (event.usage.output_tokens + event.usage.reasoning_output_tokens)
+        * output_rate
         + five_minute_cache_write * cache_write_rate
         + event.usage.cache_write_one_hour_tokens * cache_write_rate * 1.6
         + event.usage.cache_read_tokens * cache_read_rate
-        + event.usage.web_search_requests * rates.get("web_search", 0.01)
+        + event.usage.web_search_requests * float(web_search_rate or 0)
     )
 
 
@@ -235,8 +242,10 @@ def is_internal_codex_review(event: UsageEvent) -> bool:
 def requires_pricing(event: UsageEvent) -> bool:
     """Return whether an event can contribute a nonzero cost to its session."""
     return not is_internal_codex_review(event) and (
-        event.usage.input_tokens > 0
+        not event.usage.complete
+        or event.usage.input_tokens > 0
         or event.usage.output_tokens > 0
+        or event.usage.reasoning_output_tokens > 0
         or event.usage.cache_write_tokens > 0
         or event.usage.cache_read_tokens > 0
         or event.usage.web_search_requests > 0

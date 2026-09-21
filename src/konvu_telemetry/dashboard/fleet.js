@@ -70,7 +70,7 @@ const cost = (s) => (!nonnegative(s.total_cost_usd) || s.cost_status === "unavai
 const forecast = (s) => (cost(s) !== null && nonnegative(s.projected_next_10_tasks_usd) ? s.projected_next_10_tasks_usd : null);
 const context = (s) =>
   nonnegative(s.context_tokens) && finite(s.context_window_tokens) && s.context_window_tokens > 0
-    ? Math.min(100, (s.context_tokens / s.context_window_tokens) * 100)
+    ? (s.context_tokens / s.context_window_tokens) * 100
     : null;
 const count = (s) => (Number.isInteger(s.task_count) && s.task_count >= 0 ? s.task_count : series(s).length);
 const startTime = (s) => s.session_started_at || series(s)[0]?.started_at || null;
@@ -321,7 +321,7 @@ function donut(s) {
     ' context tokens"><svg viewBox="0 0 38 38" aria-hidden="true"><circle class="donut-track" cx="19" cy="19" r="15"/><circle class="donut-fill" style="stroke:' +
     contextColor(pct) +
     '" cx="19" cy="19" r="15" stroke-dasharray="' +
-    (c * (pct ?? 0)) / 100 +
+    (c * Math.min(100, pct ?? 0)) / 100 +
     " " +
     c +
     '" transform="rotate(-90 19 19)"/></svg><span style="color:' +
@@ -1498,6 +1498,7 @@ function tokenBreakdown(s) {
       ["Cache reads", u.cache_read, COLORS.mint],
       ["Cache writes", u.cache_write, COLORS.muted],
       ["Output", u.output, COLORS.pink],
+      ["Reasoning output", u.reasoning_output, COLORS.orange],
     ];
   const total = parts.reduce((a, p) => a + (nonnegative(p[1]) ? p[1] : 0), 0);
   return (
