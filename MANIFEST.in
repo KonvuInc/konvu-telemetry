@@ -1,0 +1,10 @@
+include ARCHITECTURE.md
+include CHANGELOG.md
+include CONTRIBUTING.md
+include LICENSE
+include NOTICE
+include README.md
+include RELEASING.md
+include SECURITY.md
+recursive-include src/konvu_telemetry/dashboard *
+include src/konvu_telemetry/pricing.json

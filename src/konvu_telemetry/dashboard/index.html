@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Konvu · Live sessions</title>
+    <link rel="icon" href="/favicon.svg" />
+    <link rel="stylesheet" href="/fleet.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="brand"><img src="/konvu-ghost.svg" alt="Konvu" /><strong>Coding Agents monitoring</strong></div>
+      <div class="top-actions">
+        <span class="freshness" id="freshness"></span>
+        <div class="notification-wrap">
+          <button
+            id="konvu-alert-control"
+            class="notification-bell"
+            aria-label="Notification settings"
+            aria-expanded="false"
+            aria-controls="notification-panel"
+            title="Notifications"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" /></svg><i aria-hidden="true"></i>
+          </button>
+          <section id="notification-panel" role="dialog" aria-labelledby="notification-title" hidden>
+            <div class="notification-heading">
+              <h2 id="notification-title">Notifications</h2>
+              <button id="notification-close" aria-label="Close notification settings">×</button>
+            </div>
+            <p id="notification-status" class="notification-status" role="status"></p>
+            <p class="notification-intro">Browser alerts bring you back to a session that needs a look.</p>
+            <ol class="notification-steps">
+              <li>
+                <strong>Allow this site to notify you.</strong>
+                <p id="notification-help"></p>
+                <button id="notification-enable" class="notification-primary">Allow notifications</button>
+              </li>
+              <li>
+                <strong>Allow alerts on your computer.</strong>
+                <p>On Mac: System Settings → Notifications → your browser or this website → Allow notifications. Make sure Focus isn’t silencing it.</p>
+                <a href="https://support.apple.com/guide/mac-help/mchl205da693/mac" target="_blank" rel="noopener noreferrer">Notification settings guide ↗</a>
+              </li>
+              <li>
+                <strong>Keep this dashboard open.</strong>
+                <p>Another tab is fine. Keep the browser running and your computer awake.</p>
+              </li>
+              <li>
+                <strong>Check that a test reaches you.</strong>
+                <div class="notification-test-actions"><button id="notification-test" class="notification-secondary">Send test notification</button></div>
+                <p id="notification-delivery"></p>
+              </li>
+            </ol>
+            <p id="notification-feedback" role="status"></p>
+            <details class="notification-rules" open>
+              <summary>When we notify you</summary>
+              <p>We alert at about 2× your usual token usage, based on model + effort history or your provider’s median.</p>
+              <p>Repeat alerts wait at least 5 minutes and require both spending and excess usage to rise. The $5 forecast icon is visual only.</p>
+            </details>
+          </section>
+        </div>
+      </div>
+    </header>
+    <div id="account-strip" hidden></div>
+    <main>
+      <div class="fleet-toolbar">
+        <div>
+          <div class="fleet-title">
+            <i id="live-dot" class="live-dot" aria-hidden="true"></i>
+            <h1>Live sessions</h1>
+            <span id="live-count" class="live-count">0</span>
+          </div>
+          <p class="live-caption">Activity in the last 20 minutes</p>
+        </div>
+        <div class="fleet-controls">
+          <div class="provider-filter" role="group" aria-label="Filter by provider">
+            <button data-provider="all" aria-pressed="true">All agents</button
+            ><button data-provider="claude" aria-pressed="false"><img src="/claude.png" alt="" />Claude</button
+            ><button data-provider="codex" aria-pressed="false"><img src="/codex.png" alt="" />Codex</button>
+          </div>
+          <button id="view-switch" class="view-switch">View as graph</button>
+        </div>
+      </div>
+      <div id="ledger-toolbar" class="ledger-toolbar">
+        <div class="ledger-layout-note">
+          <span
+            >Solid purple is spent; lavender hatching is the next 10 prompts. Bars share a dollar scale, rounded up from the largest visible session plus
+            forecast.</span
+          >
+        </div>
+        <div id="ledger-controls" class="ledger-controls" role="group" aria-label="Ledger filters">
+          <label class="comparison-control"
+            >Compare
+            <select id="baseline-mode" aria-label="Comparison baseline">
+              <option value="matched">Same model × effort × speed</option>
+              <option value="provider">General usage median</option>
+            </select></label
+          ><label class="sort-control"
+            >Sort
+            <select id="sort" aria-label="Sort sessions">
+              <option value="activity">Last activity</option>
+              <option value="spent">Most spent</option>
+              <option value="forecast">Highest forecast</option>
+            </select></label
+          >
+        </div>
+      </div>
+      <div id="fleet"></div>
+    </main>
+    <div id="graph-tooltip" role="tooltip" hidden></div>
+    <div id="backdrop" hidden></div>
+    <section id="inspector" role="dialog" aria-modal="true" aria-labelledby="inspector-title" hidden>
+      <div class="inspector-top"><span>Session inspector</span><button id="close" aria-label="Close session inspector">×</button></div>
+      <div id="inspector-body"></div>
+    </section>
+    <script src="/fleet.js"></script>
+  </body>
+</html>
