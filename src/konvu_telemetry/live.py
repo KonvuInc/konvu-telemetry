@@ -305,6 +305,16 @@ class IncrementalLiveState:
             ):
                 agent_id = tool_result.get("agentId")
                 if isinstance(agent_id, str) and agent_id:
+                    state.spawns[(session_id, agent_id)] = timestamp
+            elif (
+                isinstance(message, dict)
+                and record.get("isSidechain") is True
+                and isinstance(session_id, str)
+                and timestamp is not None
+                and message.get("role") == "user"
+            ):
+                agent_id = record.get("agentId")
+                if isinstance(agent_id, str) and agent_id:
                     state.spawns.setdefault((session_id, agent_id), timestamp)
             event = assistant_event(record)
             if event is not None and event.message_id is not None:
@@ -366,10 +376,10 @@ class IncrementalLiveState:
                         else subagent.get("other")
                     )
                     label = (
-                        path_label
+                        nickname
+                        if isinstance(nickname, str) and nickname
+                        else path_label
                         if isinstance(path_label, str) and path_label
-                        else nickname
-                        if isinstance(nickname, str)
                         else "subagent"
                     )
                     if (

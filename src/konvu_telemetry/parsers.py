@@ -602,10 +602,10 @@ def codex_subagent_parent(file_path: Path) -> tuple[str, str] | None:
                     path = spawned.get("agent_path")
                     nickname = spawned.get("agent_nickname")
                     label = (
-                        path
+                        nickname
+                        if isinstance(nickname, str) and nickname
+                        else path
                         if isinstance(path, str) and path
-                        else nickname
-                        if isinstance(nickname, str)
                         else "subagent"
                     )
                 else:
@@ -681,7 +681,7 @@ def user_prompt_times_by_session(file_path: Path) -> dict[str, list[float]]:
 
 @file_cached
 def spawned_agent_times(file_path: Path) -> dict[tuple[str, str], float]:
-    """Read Claude's recorded Agent/Task spawn result for each child agent."""
+    """Read Claude child spawn times, including workflow child assignments."""
     spawned: dict[tuple[str, str], float] = {}
     try:
         with file_path.open("r", encoding="utf-8", errors="replace") as transcript:
@@ -695,14 +695,21 @@ def spawned_agent_times(file_path: Path) -> dict[tuple[str, str], float]:
                 tool_result = record.get("toolUseResult")
                 session_id = record.get("sessionId")
                 timestamp = parse_timestamp(record.get("timestamp"))
-                if (
-                    not isinstance(tool_result, dict)
-                    or not isinstance(session_id, str)
-                    or timestamp is None
-                ):
+                if not isinstance(session_id, str) or timestamp is None:
                     continue
-                agent_id = tool_result.get("agentId")
-                if isinstance(agent_id, str) and agent_id:
+                if isinstance(tool_result, dict):
+                    agent_id = tool_result.get("agentId")
+                    if isinstance(agent_id, str) and agent_id:
+                        spawned[(session_id, agent_id)] = timestamp
+                    continue
+                message = record.get("message")
+                agent_id = record.get("agentId")
+                if (
+                    record.get("isSidechain") is True
+                    and isinstance(agent_id, str)
+                    and isinstance(message, dict)
+                    and message.get("role") == "user"
+                ):
                     spawned.setdefault((session_id, agent_id), timestamp)
     except OSError:
         return spawned
@@ -711,7 +718,7 @@ def spawned_agent_times(file_path: Path) -> dict[tuple[str, str], float]:
 
 @file_cached
 def spawned_agent_labels(file_path: Path) -> dict[tuple[str, str], str]:
-    """Return the human task description assigned to each Claude subagent."""
+    """Return each Claude subagent's task description or initial assignment."""
     labels: dict[tuple[str, str], str] = {}
     try:
         with file_path.open("r", encoding="utf-8", errors="replace") as transcript:
@@ -720,17 +727,29 @@ def spawned_agent_labels(file_path: Path) -> dict[tuple[str, str], str]:
                     record = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                tool_result = (
-                    record.get("toolUseResult") if isinstance(record, dict) else None
-                )
-                session_id = (
-                    record.get("sessionId") if isinstance(record, dict) else None
-                )
-                if not isinstance(tool_result, dict) or not isinstance(session_id, str):
+                if not isinstance(record, dict):
                     continue
-                agent_id = tool_result.get("agentId")
-                label = session_title(tool_result.get("description"))
-                if isinstance(agent_id, str) and label:
+                session_id = record.get("sessionId")
+                if not isinstance(session_id, str):
+                    continue
+                tool_result = record.get("toolUseResult")
+                if isinstance(tool_result, dict):
+                    agent_id = tool_result.get("agentId")
+                    label = session_title(tool_result.get("description"))
+                    if isinstance(agent_id, str) and label:
+                        labels[(session_id, agent_id)] = label
+                    continue
+                message = record.get("message")
+                agent_id = record.get("agentId")
+                if (
+                    record.get("isSidechain") is not True
+                    or not isinstance(agent_id, str)
+                    or not isinstance(message, dict)
+                    or message.get("role") != "user"
+                ):
+                    continue
+                label = session_title(message.get("content"))
+                if label:
                     labels.setdefault((session_id, agent_id), label)
     except OSError:
         return labels
