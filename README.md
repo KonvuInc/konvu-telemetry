@@ -1,6 +1,6 @@
 # Konvu Telemetry
 
-See what Claude Code and Codex CLI are costing while you work.
+See what Claude Code, Claude Code Desktop, Codex CLI, and Codex Desktop are costing while you work.
 
 Konvu Telemetry reads the session data already on your Mac and shows local spend, context use, forecasts, subagents, and usage trends in a dashboard and CLI status line. Your prompts, code, transcripts, and usage data stay on your machine.
 
@@ -14,7 +14,7 @@ brew install konvuinc/tap/konvu-telemetry
 konvu-telemetry setup
 ```
 
-Setup starts the local collector, opens the dashboard at `http://127.0.0.1:7824`, and adds the Claude Code status line and Codex CLI hook where available. In Codex, open `/hooks` in a new session and trust the Konvu hook.
+Setup starts the local collector, opens the dashboard at `http://127.0.0.1:7824`, and adds the Claude Code status line plus Stop hooks shared by Claude Code Desktop, Codex CLI, and Codex Desktop. Restart both desktop apps after setup; in Codex, open `/hooks` and trust the Konvu hook.
 
 ## Use it
 
@@ -39,12 +39,12 @@ brew uninstall konvu-telemetry
 
 ## What it does
 
-- Tracks Claude Code and Codex CLI sessions from their local transcripts.
+- Tracks Claude Code, Claude Code Desktop, Codex CLI, and Codex Desktop sessions from their local transcripts.
 - Estimates spend from bundled model pricing and shows forecasts based on local history.
 - Runs only on your Mac and serves the dashboard only at `127.0.0.1`.
 - Uses browser notifications only when you enable them in the local dashboard.
 
-Costs are estimates, not provider invoices. See [ACCURACY.md](ACCURACY.md) for the exact accounting, forecast, median, context, and subagent methodology. Claude Desktop, Codex Desktop, Linux, and Windows are not supported in this first release.
+Costs are estimates, not provider invoices. See [ACCURACY.md](ACCURACY.md) for the exact accounting, forecast, median, context, and subagent methodology. Linux and Windows are not supported in this first release.
 
 ## Privacy
 

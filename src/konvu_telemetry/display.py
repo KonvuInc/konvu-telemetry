@@ -399,6 +399,34 @@ def codex_hook() -> None:
     print(json.dumps({"systemMessage": "\n" + "\n".join(lines)}))
 
 
+def claude_hook() -> None:
+    """Return a compact usage message for a Claude Code Desktop session."""
+    try:
+        payload = json.load(sys.stdin)
+    except json.JSONDecodeError:
+        return
+    if not isinstance(payload, dict):
+        return
+    session_id = payload.get("session_id")
+    if not isinstance(session_id, str) or not valid_session_id(session_id):
+        return
+    session = refreshed_session("claude", session_id)
+    if not isinstance(session, dict):
+        return
+    total_cost = session.get("total_cost_usd")
+    if not isinstance(total_cost, (int, float)):
+        return
+    lines = [
+        "Konvu usage",
+        f"💸 {money(total_cost)} total",
+        f"🧠 {context_usage_text(session)}",
+    ]
+    norm = baseline_text(session)
+    if norm:
+        lines.append(norm)
+    print(json.dumps({"systemMessage": "\n".join(lines)}))
+
+
 def refreshed_session(provider: str, session_id: str) -> dict[str, object] | None:
     """Ask the resident collector to incrementally refresh one rendered session."""
     if provider not in ALLOWED_PROVIDERS or not valid_session_id(session_id):

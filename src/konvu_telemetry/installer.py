@@ -197,6 +197,17 @@ def is_konvu_statusline(value: object) -> bool:
     return command in {launcher_path(), claude_statusline_path()}
 
 
+def is_konvu_hook(value: object, command: str) -> bool:
+    """Return whether a command is one specific Konvu hook entry."""
+    if not isinstance(value, str) or not is_konvu_command(value):
+        return False
+    try:
+        arguments = shlex.split(value)
+    except ValueError:
+        return False
+    return arguments[1:] == [command]
+
+
 def write_claude_statusline_wrapper(command: str) -> None:
     """Write private scripts that replay an existing status line before telemetry."""
     original = claude_statusline_original_path()
@@ -279,7 +290,9 @@ def install_codex_hook(
         if not isinstance(commands, list):
             continue
         for hook in commands:
-            if isinstance(hook, dict) and is_konvu_command(hook.get("command")):
+            if isinstance(hook, dict) and is_konvu_hook(
+                hook.get("command"), "codex-hook"
+            ):
                 if create_backup:
                     backup(path)
                 hook["type"] = "command"
@@ -292,11 +305,60 @@ def install_codex_hook(
     stop_groups.append(
         {
             "hooks": [
-                {"type": "command", "command": desired, "timeout": HOOK_TIMEOUT_SECONDS}
+                {
+                    "type": "command",
+                    "command": desired,
+                    "timeout": HOOK_TIMEOUT_SECONDS,
+                }
             ]
         }
     )
     write_json(path, document)
+    return "installed"
+
+
+def install_claude_desktop_hook(
+    ensure_launcher: bool = True, create_backup: bool = True
+) -> Literal["installed", "updated"]:
+    """Register a Stop hook shared by Claude Code Desktop sessions."""
+    if ensure_launcher:
+        install_launcher()
+    path = Path.home() / ".claude" / "settings.json"
+    settings = load_json_object(path)
+    hooks = settings.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        raise ValueError(f"Expected hooks to be an object in {path}")
+    stop_groups = hooks.setdefault("Stop", [])
+    if not isinstance(stop_groups, list):
+        raise ValueError(f"Expected hooks.Stop to be an array in {path}")
+    desired = command_text("claude-hook")
+    for group in stop_groups:
+        if not isinstance(group, dict):
+            continue
+        commands = group.get("hooks")
+        if not isinstance(commands, list):
+            continue
+        for hook in commands:
+            if isinstance(hook, dict) and is_konvu_hook(
+                hook.get("command"), "claude-hook"
+            ):
+                if create_backup:
+                    backup(path)
+                hook["type"] = "command"
+                hook["command"] = desired
+                hook["timeout"] = HOOK_TIMEOUT_SECONDS
+                write_json(path, settings)
+                return "updated"
+    if create_backup:
+        backup(path)
+    stop_groups.append(
+        {
+            "hooks": [
+                {"type": "command", "command": desired, "timeout": HOOK_TIMEOUT_SECONDS}
+            ]
+        }
+    )
+    write_json(path, settings)
     return "installed"
 
 
@@ -380,7 +442,13 @@ def integration_paths() -> tuple[Path, Path]:
 
 def validate_integrations() -> None:
     claude_path, codex_path = integration_paths()
-    load_json_object(claude_path)
+    settings = load_json_object(claude_path)
+    claude_hooks = settings.get("hooks", {})
+    if not isinstance(claude_hooks, dict):
+        raise ValueError(f"Expected hooks to be an object in {claude_path}")
+    claude_stop_groups = claude_hooks.get("Stop", [])
+    if not isinstance(claude_stop_groups, list):
+        raise ValueError(f"Expected hooks.Stop to be an array in {claude_path}")
     document = load_json_object(codex_path)
     hooks = document.get("hooks", {})
     if not isinstance(hooks, dict):
@@ -418,6 +486,9 @@ def setup(interval: int, open_browser: bool) -> dict[str, str]:
     try:
         install_launcher()
         claude = install_claude_statusline(ensure_launcher=False, create_backup=False)
+        claude_desktop = install_claude_desktop_hook(
+            ensure_launcher=False, create_backup=False
+        )
         codex = install_codex_hook(ensure_launcher=False, create_backup=False)
         install_launch_agent(interval, ensure_launcher=False)
     except Exception:
@@ -430,8 +501,12 @@ def setup(interval: int, open_browser: bool) -> dict[str, str]:
         webbrowser.open(dashboard)
     return {
         "claude_statusline": claude,
+        "claude_desktop_hook": claude_desktop,
         "codex_hook": codex,
-        "codex_hook_review": "Open /hooks in a new Codex CLI session and trust Konvu Telemetry before it can run.",
+        "desktop_hook_review": (
+            "Restart Claude Desktop and Codex Desktop. In Codex, open /hooks and "
+            "trust Konvu Telemetry before it can run."
+        ),
         "dashboard": dashboard,
     }
 
@@ -482,7 +557,10 @@ def remove_codex_hook(create_backup: bool = True) -> bool:
         retained = [
             hook
             for hook in commands
-            if not (isinstance(hook, dict) and is_konvu_command(hook.get("command")))
+            if not (
+                isinstance(hook, dict)
+                and is_konvu_hook(hook.get("command"), "codex-hook")
+            )
         ]
         if retained:
             next_group = dict(group)
@@ -494,6 +572,44 @@ def remove_codex_hook(create_backup: bool = True) -> bool:
         backup(path)
     hooks["Stop"] = kept
     write_json(path, document)
+    return True
+
+
+def remove_claude_desktop_hook(create_backup: bool = True) -> bool:
+    """Remove only Konvu's Claude Code Desktop Stop hook."""
+    path = Path.home() / ".claude" / "settings.json"
+    settings = load_json_object(path)
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict) or not isinstance(hooks.get("Stop"), list):
+        return False
+    original = hooks["Stop"]
+    kept: list[object] = []
+    for group in original:
+        if not isinstance(group, dict):
+            kept.append(group)
+            continue
+        commands = group.get("hooks")
+        if not isinstance(commands, list):
+            kept.append(group)
+            continue
+        retained = [
+            hook
+            for hook in commands
+            if not (
+                isinstance(hook, dict)
+                and is_konvu_hook(hook.get("command"), "claude-hook")
+            )
+        ]
+        if retained:
+            next_group = dict(group)
+            next_group["hooks"] = retained
+            kept.append(next_group)
+    if kept == original:
+        return False
+    if create_backup:
+        backup(path)
+    hooks["Stop"] = kept
+    write_json(path, settings)
     return True
 
 
@@ -516,6 +632,7 @@ def uninstall() -> dict[str, bool]:
         stop_launch_agent()
         result = {
             "claude_statusline": remove_claude_statusline(create_backup=False),
+            "claude_desktop_hook": remove_claude_desktop_hook(create_backup=False),
             "codex_hook": remove_codex_hook(create_backup=False),
         }
         for path in (

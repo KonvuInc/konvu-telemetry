@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timezone
+from io import StringIO
 import os
 import sys
 import tempfile
@@ -32,6 +33,7 @@ from konvu_telemetry.config import (
 )
 from konvu_telemetry.display import (
     baseline_text,
+    claude_hook,
     quota_usage_text,
     record_claude_quotas,
     refreshed_session,
@@ -1136,6 +1138,29 @@ class ServiceTests(unittest.TestCase):
                 )
         self.assertEqual(payload, {"id": "fallback"})
         request.assert_called_once()
+
+    def test_claude_desktop_hook_returns_a_usage_message(self) -> None:
+        session_id = "00000000-0000-0000-0000-000000000001"
+        stdout = StringIO()
+        with (
+            patch.object(
+                sys, "stdin", StringIO(json.dumps({"session_id": session_id}))
+            ),
+            patch.object(sys, "stdout", stdout),
+            patch(
+                "konvu_telemetry.display.refreshed_session",
+                return_value={
+                    "total_cost_usd": 1.25,
+                    "context_tokens": 500,
+                    "context_window_tokens": 1000,
+                },
+            ),
+        ):
+            claude_hook()
+        self.assertEqual(
+            json.loads(stdout.getvalue()),
+            {"systemMessage": "Konvu usage\n💸 $1.2 total\n🧠 50% context"},
+        )
 
     def test_task_series_preserves_empty_prompts(self) -> None:
         event = UsageEvent(

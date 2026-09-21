@@ -41,11 +41,17 @@ class InstallerTests(unittest.TestCase):
                 patch.object(installer, "console_launcher", return_value=console),
             ):
                 self.assertEqual(installer.install_claude_statusline(), "installed")
+                self.assertEqual(installer.install_claude_desktop_hook(), "installed")
                 self.assertEqual(installer.install_codex_hook(), "installed")
             settings = json.loads((claude / "settings.json").read_text())
             hooks = json.loads((codex / "hooks.json").read_text())
             self.assertIn(installer.LAUNCHER_NAME, settings["statusLine"]["command"])
             self.assertNotIn("-I", settings["statusLine"]["command"])
+            self.assertEqual(settings["hooks"]["Stop"][0]["hooks"][0]["timeout"], 5)
+            self.assertIn(
+                installer.LAUNCHER_NAME,
+                settings["hooks"]["Stop"][0]["hooks"][0]["command"],
+            )
             self.assertEqual(
                 hooks["hooks"]["Stop"][0]["hooks"][0]["command"], "keep-me"
             )
@@ -103,6 +109,40 @@ class InstallerTests(unittest.TestCase):
                 "printf existing:; cat",
             )
             self.assertFalse(wrapper.exists())
+
+    def test_claude_desktop_hook_update_and_removal_keep_other_hooks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            claude = home / ".claude"
+            claude.mkdir()
+            console = home / "bin" / "konvu"
+            console.parent.mkdir()
+            console.write_text("#!/bin/sh\nexit 0\n")
+            console.chmod(0o700)
+            path = claude / "settings.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "hooks": {
+                            "Stop": [
+                                {"hooks": [{"type": "command", "command": "keep-me"}]}
+                            ]
+                        }
+                    }
+                )
+            )
+            with (
+                patch.object(installer.Path, "home", return_value=home),
+                patch.object(installer, "console_launcher", return_value=console),
+            ):
+                self.assertEqual(installer.install_claude_desktop_hook(), "installed")
+                self.assertEqual(installer.install_claude_desktop_hook(), "updated")
+                self.assertTrue(installer.remove_claude_desktop_hook())
+            groups = json.loads(path.read_text())["hooks"]["Stop"]
+            self.assertEqual(
+                groups,
+                [{"hooks": [{"type": "command", "command": "keep-me"}]}],
+            )
 
     def test_similar_command_name_is_not_treated_as_konvu_owned(self) -> None:
         self.assertFalse(installer.is_konvu_command("/tmp/not-konvu-launcher-helper"))
@@ -302,7 +342,14 @@ class InstallerTests(unittest.TestCase):
                     installer.claude_statusline_original_path(),
                     installer.claude_statusline_state_path(),
                 )
-            self.assertEqual(result, {"claude_statusline": True, "codex_hook": True})
+            self.assertEqual(
+                result,
+                {
+                    "claude_statusline": True,
+                    "claude_desktop_hook": True,
+                    "codex_hook": True,
+                },
+            )
             self.assertEqual(
                 json.loads(claude_path.read_text())["statusLine"], original_statusline
             )
