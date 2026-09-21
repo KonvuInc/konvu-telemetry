@@ -58,7 +58,12 @@ from konvu_telemetry.parsers import (
     transcript_session_id,
     user_prompt_times_by_session,
 )
-from konvu_telemetry.pricing import cost_status, event_cost, load_pricing
+from konvu_telemetry.pricing import (
+    claude_context_window,
+    cost_status,
+    event_cost,
+    load_pricing,
+)
 from konvu_telemetry.service import (
     DashboardRequestHandler,
     collect_forever,
@@ -183,6 +188,25 @@ class ServiceTests(unittest.TestCase):
                 prices = load_pricing()
         self.assertEqual(set(prices), {"valid"})
 
+    def test_claude_context_window_uses_the_full_published_input_capacity(self) -> None:
+        prices = {
+            "claude-test": {
+                "context_window_tokens": 1_000_000.0,
+            },
+            "claude-small": {
+                "context_window_tokens": 16_384.0,
+            },
+        }
+
+        self.assertEqual(claude_context_window("claude-test", prices), 1_000_000)
+        self.assertEqual(claude_context_window("claude-small", prices), 16_384)
+        self.assertIsNone(claude_context_window("unknown", prices))
+        self.assertIsNone(
+            claude_context_window(
+                "invalid", {"invalid": {"context_window_tokens": float("inf")}}
+            )
+        )
+
     def test_baseline_milestones_cover_long_sessions(self) -> None:
         self.assertEqual(
             BASELINE_MILESTONES,
@@ -296,6 +320,7 @@ class ServiceTests(unittest.TestCase):
                             "output_tokens": output_tokens,
                             "reasoning_output_tokens": 0,
                         },
+                        "model_context_window": 258_400,
                     },
                 },
             }
@@ -312,6 +337,9 @@ class ServiceTests(unittest.TestCase):
             )
             events = list(codex_events_in_file(transcript))
         self.assertEqual([event.usage.total_tokens for event in events], [12, 15])
+        self.assertEqual(
+            [event.context_window_tokens for event in events], [258_400, 258_400]
+        )
 
     def test_one_hour_claude_cache_write_uses_the_higher_rate(self) -> None:
         event = UsageEvent(

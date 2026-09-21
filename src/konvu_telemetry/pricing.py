@@ -152,18 +152,18 @@ def price_for(
 
 def claude_context_window(
     model: str,
-    observed_tokens: int,
     prices: dict[str, dict[str, float]] | None = None,
-) -> int:
-    """Use model pricing metadata for the session context window."""
+) -> int | None:
+    """Return the model's published input-context capacity when known."""
     rates = price_for(model, prices or {})
     advertised = rates.get("context_window_tokens") if rates else 0
-    window = (
+    return (
         int(advertised)
-        if isinstance(advertised, (int, float)) and advertised >= 200_000
-        else 200_000
+        if isinstance(advertised, (int, float))
+        and math.isfinite(advertised)
+        and advertised >= 1
+        else None
     )
-    return window if observed_tokens > 200_000 else 200_000
 
 
 def cache_read_rate(model: str, prices: dict[str, dict[str, float]]) -> float | None:

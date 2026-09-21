@@ -63,7 +63,6 @@ from .pricing import (
     cost_status,
     event_cost,
     load_pricing,
-    price_for,
 )
 from .storage import (
     home_dir,
@@ -356,6 +355,7 @@ def build_snapshot(
         task_count = len(starts)
         main_thread_events = [event for event in events if not event.is_subagent]
         context_event = main_thread_events[-1] if main_thread_events else last_event
+        context_window = claude_context_window(context_event.model, prices)
         baseline_events = [
             event
             for event in main_thread_events
@@ -451,12 +451,10 @@ def build_snapshot(
                     "model_effort_speed": claude_configuration_baseline,
                 },
                 "context_tokens": context_event.usage.context_tokens,
-                "context_window_tokens": claude_context_window(
-                    context_event.model, context_event.usage.context_tokens, prices
+                "context_window_tokens": context_window,
+                "context_window_source": (
+                    "model_pricing" if context_window is not None else "unavailable"
                 ),
-                "context_window_source": "model_pricing"
-                if price_for(context_event.model, prices)
-                else "estimated",
                 "cache_read_usd_per_mtok": cache_read_rate(context_event.model, prices),
                 "active_subagents": sum(
                     1 for agent_id in all_subagent_ids if statuses.get(agent_id, False)
