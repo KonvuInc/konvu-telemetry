@@ -29,6 +29,7 @@ from .config import (
     DEFAULT_LIVE_WINDOW_SECONDS,
     FORECAST_MIN_SAMPLES,
     FORECAST_WINDOW,
+    LIVE_ACTIVITY_SECONDS,
     MAX_CONTEXT_HISTORY_POINTS,
     MAX_SUMMARY_ITERATION_POINTS,
     ROLLING_WINDOW_SECONDS,
@@ -817,6 +818,7 @@ def build_snapshot(
     snapshot = {
         "generated_at": datetime.fromtimestamp(now, timezone.utc).isoformat(),
         "liveness_window_seconds": DEFAULT_LIVE_WINDOW_SECONDS,
+        "live_activity_window_seconds": LIVE_ACTIVITY_SECONDS,
         "baselines": baselines,
         "sessions": sessions,
     }

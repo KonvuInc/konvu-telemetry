@@ -13,11 +13,12 @@ from threading import Lock, Thread
 from typing import Iterator, Literal, cast
 
 from .config import (
+    ACTIVITY_CLOCK_SKEW_SECONDS,
+    ALERT_FORECAST_RENOTIFY_SECONDS,
     ALERT_FORECAST_USD,
-    ALERT_OVERHEAD_PERCENT,
     ALERT_QUOTA_5H_PERCENT,
+    ALERT_QUOTA_RENOTIFY_SECONDS,
     ALERT_QUOTA_WEEKLY_PERCENT,
-    ALERT_RENOTIFY_SECONDS,
     BASELINE_LOOKBACK_SECONDS,
     BASELINE_MIN_SESSIONS,
     BASELINE_MILESTONES,
@@ -25,6 +26,7 @@ from .config import (
     BASELINE_SCHEMA_VERSION,
     FORECAST_WINDOW,
     FORECAST_MIN_SAMPLES,
+    LIVE_ACTIVITY_SECONDS,
 )
 from .models import UsageEvent
 from .parsers import (
@@ -199,6 +201,13 @@ def quota_alert_window(window: dict[str, object]) -> tuple[str, int] | None:
     return None
 
 
+def alert_number(value: object) -> float | None:
+    """Return a real number, rejecting booleans and everything non-numeric."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
 def apply_notification_tracking(
     sessions: list[dict[str, object]],
     now: float,
@@ -227,54 +236,53 @@ def apply_notification_tracking(
             if isinstance(comparison, dict)
             else None
         )
-        cost = session.get("total_cost_usd")
-        forecast = session.get("projected_next_10_tasks_usd")
-        cost_status_value = session.get("cost_status")
+        forecast = alert_number(session.get("projected_next_10_tasks_usd"))
+        basis = session.get("forecast_basis")
+        coverage = basis.get("coverage") if isinstance(basis, dict) else None
+        last_activity = parse_timestamp(session.get("last_activity_at"))
         if (
-            not isinstance(overhead, (int, float))
-            or not isinstance(cost, (int, float))
-            or not isinstance(forecast, (int, float))
-            or cost_status_value != "complete"
-            or overhead < ALERT_OVERHEAD_PERCENT
+            forecast is None
+            # A forecast borrowed from a median is display-only; the session has not earned it.
+            or coverage not in (None, "fully_priced")
+            or session.get("cost_status") != "complete"
             or forecast <= ALERT_FORECAST_USD
+            or last_activity is None
+            # Bounded below too: a skewed future stamp must not pin a dead session live.
+            or not -ACTIVITY_CLOCK_SKEW_SECONDS
+            <= now - last_activity
+            <= LIVE_ACTIVITY_SECONDS
         ):
-            record["hot"] = False
+            # Forget the alerted peak, but keep the clock: the repeat floor spans cooldowns.
+            cooled = alert_number(record.get("last_notified_at"))
+            record = {"sequence": int(record.get("sequence", 0)), "hot": False}
+            if cooled is not None:
+                record["last_notified_at"] = cooled
             state[key] = record
-            session["notification"] = {
-                "sequence": int(record.get("sequence", 0)),
-                "hot": False,
-            }
+            session["notification"] = dict(record)
             continue
-        last_notified_at = record.get("last_notified_at")
-        last_cost = record.get("last_cost_usd")
-        last_overhead = record.get("last_overhead_percent")
-        first_alert = not isinstance(last_notified_at, (int, float))
-        rising = (
-            isinstance(last_cost, (int, float))
-            and isinstance(last_overhead, (int, float))
-            and cost > last_cost
-            and overhead > last_overhead
-        )
-        may_renotify = (
-            isinstance(last_notified_at, (int, float))
-            and now - last_notified_at >= ALERT_RENOTIFY_SECONDS
-        )
-        if first_alert or (may_renotify and rising):
-            record["sequence"] = int(record.get("sequence", 0)) + 1
-            record["last_notified_at"] = now
-            record["last_cost_usd"] = cost
-            record["last_overhead_percent"] = overhead
-        record["hot"] = True
-        state[key] = record
-        session["notification"] = {
-            "sequence": int(record.get("sequence", 0)),
+        sequence = int(record.get("sequence", 0))
+        last_notified_at = alert_number(record.get("last_notified_at"))
+        last_forecast = alert_number(record.get("last_forecast_usd"))
+        if last_notified_at is None:
+            notify = True
+        else:
+            # A forgotten peak re-arms the comparison but never skips the repeat floor.
+            notify = now - last_notified_at >= ALERT_FORECAST_RENOTIFY_SECONDS and (
+                last_forecast is None or forecast >= last_forecast
+            )
+        if notify:
+            sequence += 1
+            last_notified_at = now
+            last_forecast = forecast
+        record = {
+            "sequence": sequence,
             "hot": True,
-            "baseline_scope": "provider",
-            "overhead_percent": overhead,
-            "last_notified_at": record.get("last_notified_at"),
-            "last_cost_usd": record.get("last_cost_usd"),
-            "last_overhead_percent": record.get("last_overhead_percent"),
+            "last_notified_at": last_notified_at,
+            "last_forecast_usd": last_forecast,
         }
+        state[key] = record
+        # Display-only: the median no longer gates the alert.
+        session["notification"] = {**record, "overhead_percent": overhead}
     for provider, quotas in (account_quotas or {}).items():
         if not isinstance(provider, str) or not isinstance(quotas, dict):
             continue
@@ -328,7 +336,7 @@ def apply_notification_tracking(
             )
             may_renotify = (
                 isinstance(last_notified_at, (int, float))
-                and now - last_notified_at >= ALERT_RENOTIFY_SECONDS
+                and now - last_notified_at >= ALERT_QUOTA_RENOTIFY_SECONDS
             )
             if first_alert or (may_renotify and rising):
                 record["sequence"] = int(record.get("sequence", 0)) + 1

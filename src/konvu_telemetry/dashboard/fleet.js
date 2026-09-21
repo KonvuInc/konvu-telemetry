@@ -87,9 +87,17 @@ function displayTitle(s) {
   }
   return title;
 }
+function liveWindowMs() {
+  const seconds = state.payload?.live_activity_window_seconds;
+  return (finite(seconds) && seconds > 0 ? seconds : 20 * 60) * 1000;
+}
+function liveWindowLabel() {
+  const minutes = Math.round(liveWindowMs() / 60000);
+  return minutes + (minutes === 1 ? " minute" : " minutes");
+}
 function activity(s) {
   const sinceActivity = elapsed(s.last_activity_at);
-  const live = finite(sinceActivity) && sinceActivity >= -60000 && sinceActivity <= 20 * 60000;
+  const live = finite(sinceActivity) && sinceActivity >= -60000 && sinceActivity <= liveWindowMs();
   const a = s.activity;
   if (a?.state === "running") return { live, label: "Running", kind: "running", explicit: true };
   if (a?.state === "idle") return { live, label: "Idle", kind: "idle", explicit: true };
@@ -354,9 +362,7 @@ function spendComparison(s) {
       ratio: null,
       label: "Collector has no comparable baseline",
       detail:
-        state.baselineMode === "matched"
-          ? "The collector recalculates this from your stored local median every six hours. Alerts use the general provider median."
-          : "The collector recalculates this from your stored local median every six hours. Alerts use this general provider median.",
+        "The collector recalculates this from your stored local median every six hours. Medians are a comparison only; alerts follow the next-ten-prompt forecast.",
     };
   }
   const label = c.matched ? "model + effort + speed median" : providerName(s.provider) + " general median";
@@ -364,8 +370,8 @@ function spendComparison(s) {
     ratio: c.ratio,
     label: c.ratio.toFixed(2) + "× " + label,
     detail: c.matched
-      ? "Current recorded spend against the matched local median. Alerts use the general provider median."
-      : "Current recorded spend against the same general provider median used in alerts.",
+      ? "Current recorded spend against the matched local median. Medians are a comparison only; alerts follow the next-ten-prompt forecast."
+      : "Current recorded spend against the general provider median. Medians are a comparison only; alerts follow the next-ten-prompt forecast.",
   };
 }
 function roundedDollarCeiling(value) {
@@ -1114,7 +1120,7 @@ function render() {
     ? state.view === "graph"
       ? fleetGraph(rows)
       : ledger(rows)
-    : '<div class="empty"><h3>No live sessions</h3><p>No activity in the last 20 minutes' +
+    : '<div class="empty"><h3>No live sessions</h3><p>No activity in the last ' + liveWindowLabel() +
       (state.provider !== "all" ? " for " + providerName(state.provider) : "") +
       ". New sessions appear automatically.</p></div>";
   renderAccounts();
@@ -1752,16 +1758,17 @@ function browserAlerts(payload) {
     const key = "konvu-alert-" + session.provider + "-" + session.id;
     if (Number(localStorage.getItem(key) || 0) >= alert.sequence) continue;
     localStorage.setItem(key, String(alert.sequence));
-    const overhead = Math.round(alert.overhead_percent || 0);
+    const overhead = alert.overhead_percent;
     const notification = new Notification(providerName(session.provider) + " session running hot", {
       body:
-        "💸 $" +
-        Number(session.total_cost_usd || 0).toFixed(1) +
-        " total · $" +
+        "🔥 $" +
         Number(session.projected_next_10_tasks_usd || 0).toFixed(1) +
-        " for the next 10 prompts\n🔥 " +
-        overhead +
-        "% above your usual burn",
+        " forecast for the next 10 prompts\n💸 $" +
+        Number(session.total_cost_usd || 0).toFixed(1) +
+        " spent so far" +
+        (finite(overhead)
+          ? " · " + Math.abs(Math.round(overhead)) + "% " + (overhead < 0 ? "below" : "above") + " your usual burn"
+          : ""),
       icon: "/konvu-ghost.svg",
       requireInteraction: true,
       tag: key,

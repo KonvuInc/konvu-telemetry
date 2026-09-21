@@ -8,6 +8,7 @@ Konvu Telemetry is one Python package with a single resident process. The proces
 - The dashboard server binds only to IPv4 loopback and rejects non-local `Host` and `Origin` values.
 - The package has no runtime Python dependencies and contains no outbound network client.
 - Browser notifications require an open dashboard tab and browser permission.
+- A session alerts when it was active in the last twenty minutes, its cost is complete, and its next-ten-prompt forecast exceeds `ALERT_FORECAST_USD`. It alerts again only after `ALERT_FORECAST_RENOTIFY_SECONDS` and only if the forecast has not fallen since the last alert; falling to or below the threshold re-arms it.
 - Claude and Codex integrations read precomputed session files; they do not parse transcripts in a hook invocation.
 
 ## Runtime flow
