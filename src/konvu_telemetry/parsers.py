@@ -28,7 +28,9 @@ def has_usage_fields(raw: dict[str, object], *fields: str) -> bool:
     """Return whether a provider record explicitly supplied each required token field."""
     for field in fields:
         value = raw.get(field)
-        if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return False
+        if value < 0:
             return False
     return True
 
