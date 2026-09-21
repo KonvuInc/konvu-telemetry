@@ -14,12 +14,14 @@ class Usage:
     cache_read_tokens: int
     web_search_requests: int
     speed: str
+    reasoning_output_tokens: int = 0
 
     @property
     def total_tokens(self) -> int:
         return (
             self.input_tokens
             + self.output_tokens
+            + self.reasoning_output_tokens
             + self.cache_write_tokens
             + self.cache_read_tokens
         )

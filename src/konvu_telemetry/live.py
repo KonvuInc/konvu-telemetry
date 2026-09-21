@@ -289,6 +289,8 @@ class IncrementalLiveState:
                     state.clients[session_id] = "desktop"
                 elif entrypoint == "cli" and session_id not in state.clients:
                     state.clients[session_id] = "cli"
+                elif entrypoint == "sdk-cli" and session_id not in state.clients:
+                    state.clients[session_id] = "sdk"
             if (
                 record.get("type") == "system"
                 and record.get("subtype") == "compact_boundary"
@@ -503,6 +505,7 @@ class IncrementalLiveState:
                         cached_input_tokens,
                         0,
                         state.speed,
+                        as_number(raw.get("reasoning_output_tokens")),
                     ),
                     0,
                     False,

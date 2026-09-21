@@ -287,6 +287,9 @@ def codex_events_in_file(file_path: Path) -> Iterator[UsageEvent]:
                         cache_read_tokens=cached_input_tokens,
                         web_search_requests=0,
                         speed=session_speed,
+                        reasoning_output_tokens=as_number(
+                            raw.get("reasoning_output_tokens")
+                        ),
                     ),
                     tool_calls=0,
                     is_subagent=False,
@@ -519,6 +522,8 @@ def claude_client_in_file(file_path: Path) -> dict[str, str]:
                     clients[session_id] = "desktop"
                 elif entrypoint == "cli" and session_id not in clients:
                     clients[session_id] = "cli"
+                elif entrypoint == "sdk-cli" and session_id not in clients:
+                    clients[session_id] = "sdk"
     except OSError:
         return clients
     return clients

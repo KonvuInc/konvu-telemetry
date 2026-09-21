@@ -38,6 +38,7 @@ from konvu_telemetry.display import (
     record_claude_quotas,
     refreshed_session,
 )
+from konvu_telemetry.exporter import normalized_event
 from konvu_telemetry.fleet_telemetry import (
     _CACHE as TELEMETRY_CACHE,
     TranscriptTelemetry,
@@ -51,6 +52,7 @@ from konvu_telemetry.live import CodexLiveFile, IncrementalLiveState
 from konvu_telemetry.models import Usage, UsageEvent
 from konvu_telemetry.parsers import (
     assistant_event,
+    claude_client_in_file,
     claude_hook_transcript,
     codex_events_in_file,
     codex_hook_transcript,
@@ -336,7 +338,10 @@ class ServiceTests(unittest.TestCase):
 
     def test_codex_cumulative_checkpoints_become_deltas(self) -> None:
         def checkpoint(
-            total: int, input_tokens: int, output_tokens: int
+            total: int,
+            input_tokens: int,
+            output_tokens: int,
+            reasoning_output_tokens: int,
         ) -> dict[str, object]:
             return {
                 "timestamp": "2026-01-01T00:00:00Z",
@@ -350,14 +355,14 @@ class ServiceTests(unittest.TestCase):
                             "cached_input_tokens": 0,
                             "cache_write_input_tokens": 0,
                             "output_tokens": output_tokens,
-                            "reasoning_output_tokens": 0,
+                            "reasoning_output_tokens": reasoning_output_tokens,
                         },
                         "last_token_usage": {
                             "input_tokens": input_tokens,
                             "cached_input_tokens": 0,
                             "cache_write_input_tokens": 0,
                             "output_tokens": output_tokens,
-                            "reasoning_output_tokens": 0,
+                            "reasoning_output_tokens": reasoning_output_tokens,
                         },
                         "model_context_window": 258_400,
                     },
@@ -371,11 +376,15 @@ class ServiceTests(unittest.TestCase):
             transcript.write_text(
                 "\n".join(
                     json.dumps(record)
-                    for record in [checkpoint(12, 10, 2), checkpoint(27, 12, 3)]
+                    for record in [checkpoint(15, 10, 2, 3), checkpoint(34, 12, 3, 4)]
                 )
             )
             events = list(codex_events_in_file(transcript))
-        self.assertEqual([event.usage.total_tokens for event in events], [12, 15])
+        self.assertEqual([event.usage.output_tokens for event in events], [2, 3])
+        self.assertEqual(
+            [event.usage.reasoning_output_tokens for event in events], [3, 4]
+        )
+        self.assertEqual([event.usage.total_tokens for event in events], [15, 19])
         self.assertEqual(
             [event.context_window_tokens for event in events], [258_400, 258_400]
         )
@@ -409,6 +418,50 @@ class ServiceTests(unittest.TestCase):
             ),
             160.0,
         )
+
+    def test_codex_reasoning_output_is_priced_and_exported(self) -> None:
+        event = UsageEvent(
+            provider="codex",
+            session_id="session",
+            message_id="message",
+            timestamp=0,
+            model="gpt-test",
+            usage=Usage(0, 2, 0, 0, 0, 0, "standard", 3),
+            tool_calls=0,
+            is_subagent=False,
+            agent_id=None,
+            effort="high",
+        )
+        prices = {
+            "gpt-test": {
+                "input": 1,
+                "output": 2,
+                "cache_write": 1,
+                "cache_read": 1,
+                "web_search": 0,
+                "fast_multiplier": 1,
+            }
+        }
+
+        self.assertEqual(event_cost(event, prices), 10.0)
+        exported = normalized_event(event, prices)
+        self.assertEqual(exported["tokens"]["reasoning_output"], 3)
+        self.assertEqual(exported["reasoning_effort"], "high")
+        self.assertEqual(exported["speed"], "standard")
+
+    def test_claude_sdk_client_is_explicitly_attributed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / "session.jsonl"
+            transcript.write_text(
+                json.dumps(
+                    {
+                        "sessionId": "session",
+                        "entrypoint": "sdk-cli",
+                    }
+                )
+            )
+            clients = claude_client_in_file(transcript)
+        self.assertEqual(clients, {"session": "sdk"})
 
     def test_claude_tool_results_do_not_create_prompt_boundaries(self) -> None:
         records = [
