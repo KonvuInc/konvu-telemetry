@@ -9,7 +9,13 @@ import math
 from pathlib import Path
 from typing import Literal
 
-from .config import FILE_CACHE_LIMIT, FORECAST_MIN_SAMPLES, FORECAST_WINDOW
+from .config import (
+    FILE_CACHE_LIMIT,
+    FORECAST_MIN_SAMPLES,
+    FORECAST_WINDOW,
+    MAX_PARSED_RECORD_BYTES,
+)
+from .live import IncrementalLiveState
 from .storage import claude_quota_path
 
 
@@ -40,9 +46,20 @@ class TranscriptTelemetry:
         default_factory=dict
     )
     task_tools: dict[float, int] = field(default_factory=dict)
+    latest_task: float | None = None
+    last_compacted: float | None = None
 
 
-_CACHE: dict[tuple[str, str], tuple[int, int, TranscriptTelemetry]] = {}
+@dataclass
+class TelemetryCacheEntry:
+    identity: tuple[int, int]
+    offset: int
+    size: int
+    mtime_ns: int
+    telemetry: TranscriptTelemetry
+
+
+_CACHE: dict[tuple[str, str], TelemetryCacheEntry] = {}
 
 
 def _number(value: object) -> float | None:
@@ -155,20 +172,57 @@ def _claude_quota_snapshot(now: float) -> dict[str, object] | None:
     }
 
 
-def _read_telemetry(path: Path, provider: Provider) -> TranscriptTelemetry:
-    result = TranscriptTelemetry()
-    result.is_subagent = provider == "claude" and (
-        path.parent.name == "subagents" or path.name.startswith("agent-")
-    )
-    latest_task: float | None = None
-    last_compacted: float | None = None
+def _read_telemetry(
+    path: Path,
+    provider: Provider,
+    result: TranscriptTelemetry | None = None,
+    offset: int = 0,
+) -> tuple[TranscriptTelemetry, int]:
+    result = result or TranscriptTelemetry()
+    next_offset = offset
+    if offset == 0:
+        result.is_subagent = provider == "claude" and (
+            path.parent.name == "subagents" or path.name.startswith("agent-")
+        )
     try:
-        with path.open(encoding="utf-8", errors="replace") as transcript:
-            for line in transcript:
-                try:
-                    record = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
+        with path.open("rb") as transcript:
+            transcript.seek(offset)
+            while True:
+                start = transcript.tell()
+                raw_line = transcript.readline(MAX_PARSED_RECORD_BYTES + 1)
+                if not raw_line:
+                    break
+                oversized = False
+                if not raw_line.endswith(b"\n"):
+                    if len(raw_line) <= MAX_PARSED_RECORD_BYTES:
+                        transcript.seek(start)
+                        break
+                    oversized = True
+                    prefix = raw_line[:MAX_PARSED_RECORD_BYTES]
+                    suffix = b""
+                    while True:
+                        remainder = transcript.readline(MAX_PARSED_RECORD_BYTES + 1)
+                        if not remainder:
+                            transcript.seek(start)
+                            return result, start
+                        suffix = (suffix + remainder)[-MAX_PARSED_RECORD_BYTES:]
+                        if remainder.endswith(b"\n"):
+                            break
+                    raw_line = prefix + suffix
+                next_offset = transcript.tell()
+                if oversized:
+                    record = (
+                        IncrementalLiveState._lightweight_claude_prompt(raw_line)
+                        if provider == "claude"
+                        else IncrementalLiveState._lightweight_codex_item(raw_line)
+                    )
+                    if record is None:
+                        continue
+                else:
+                    try:
+                        record = json.loads(raw_line)
+                    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+                        continue
                 if not isinstance(record, dict):
                     continue
                 timestamp = _timestamp(record.get("timestamp"))
@@ -288,27 +342,28 @@ def _read_telemetry(path: Path, provider: Provider) -> TranscriptTelemetry:
                         )
                     )
                     if event_type == "task_started":
-                        latest_task = timestamp
+                        result.latest_task = timestamp
                         result.task_tools.setdefault(timestamp, 0)
                     elif event_type == "task_complete":
                         result.completions.append(
                             (timestamp, turn_id if isinstance(turn_id, str) else None)
                         )
-                if event_type == "item_completed" and latest_task is not None:
+                if event_type == "item_completed" and result.latest_task is not None:
                     item = payload.get("item")
                     if (
                         isinstance(item, dict)
                         and isinstance(item.get("type"), str)
                         and item["type"] in CODEX_TOOL_ITEMS
                     ):
-                        result.task_tools[latest_task] += 1
+                        result.task_tools[result.latest_task] += 1
                 if record_type == "compacted":
                     result.compactions.append(
                         {"timestamp": _iso(timestamp), "source": "codex_compacted"}
                     )
-                    last_compacted = timestamp
+                    result.last_compacted = timestamp
                 elif event_type == "context_compacted" and (
-                    last_compacted is None or not 0 <= timestamp - last_compacted <= 1
+                    result.last_compacted is None
+                    or not 0 <= timestamp - result.last_compacted <= 1
                 ):
                     result.compactions.append(
                         {
@@ -332,21 +387,33 @@ def _read_telemetry(path: Path, provider: Provider) -> TranscriptTelemetry:
                             )
     except (OSError, UnicodeError):
         pass
-    return result
+    return result, next_offset
 
 
 def parse_telemetry(path: Path, provider: Provider) -> TranscriptTelemetry:
-    """Cache sanitized metadata until a transcript's size or mtime changes."""
+    """Incrementally cache sanitized metadata for one append-only transcript."""
     try:
         stat = path.stat()
     except OSError:
         return TranscriptTelemetry()
     key = provider, str(path)
+    identity = stat.st_dev, stat.st_ino
     cached = _CACHE.get(key)
-    if cached is not None and cached[:2] == (stat.st_size, stat.st_mtime_ns):
-        return cached[2]
-    parsed = _read_telemetry(path, provider)
-    _CACHE[key] = stat.st_size, stat.st_mtime_ns, parsed
+    if (
+        cached is not None
+        and cached.identity == identity
+        and stat.st_size >= cached.size
+    ):
+        if cached.size == stat.st_size and cached.mtime_ns == stat.st_mtime_ns:
+            return cached.telemetry
+        parsed, offset = _read_telemetry(
+            path, provider, cached.telemetry, cached.offset
+        )
+    else:
+        parsed, offset = _read_telemetry(path, provider)
+    _CACHE[key] = TelemetryCacheEntry(
+        identity, offset, stat.st_size, stat.st_mtime_ns, parsed
+    )
     if len(_CACHE) > FILE_CACHE_LIMIT:
         _CACHE.pop(next(iter(_CACHE)), None)
     return parsed
@@ -619,6 +686,12 @@ def enrich_snapshot(
         ("claude", claude_paths),
         ("codex", codex_paths),
     )
+    active_cache_keys = {
+        (provider, str(path)) for provider, paths in sources for path in paths
+    }
+    for key in list(_CACHE):
+        if key not in active_cache_keys:
+            _CACHE.pop(key, None)
     for provider, paths in sources:
         for path in paths:
             row = parse_telemetry(path, provider)

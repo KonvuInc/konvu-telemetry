@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 import os
 import sys
 import tempfile
@@ -6,7 +7,7 @@ from threading import Lock
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -24,18 +25,25 @@ from konvu_telemetry.analytics import (
     single_configuration,
     task_series,
 )
-from konvu_telemetry.config import BASELINE_MILESTONES
+from konvu_telemetry.config import (
+    BASELINE_MILESTONES,
+    BASELINE_MIN_SESSIONS,
+    BASELINE_SCHEMA_VERSION,
+)
 from konvu_telemetry.display import (
     baseline_text,
     quota_usage_text,
     record_claude_quotas,
+    refreshed_session,
 )
 from konvu_telemetry.fleet_telemetry import (
+    _CACHE as TELEMETRY_CACHE,
     TranscriptTelemetry,
     _comparable_forecast,
     _timestamp,
     enrich_snapshot,
     is_claude_prompt,
+    parse_telemetry,
 )
 from konvu_telemetry.live import CodexLiveFile, IncrementalLiveState
 from konvu_telemetry.models import Usage, UsageEvent
@@ -52,13 +60,25 @@ from konvu_telemetry.parsers import (
 )
 from konvu_telemetry.pricing import cost_status, event_cost, load_pricing
 from konvu_telemetry.service import (
+    DashboardRequestHandler,
     collect_forever,
     load_health,
     local_request_allowed,
     write_health,
 )
-from konvu_telemetry.snapshot import build_snapshot
-from konvu_telemetry.storage import parse_timestamp, session_path, transcript_files
+from konvu_telemetry.snapshot import (
+    build_snapshot,
+    sampled_rows,
+    sampled_rows_with_tail,
+    summary_snapshot,
+    write_snapshot,
+)
+from konvu_telemetry.storage import (
+    parse_timestamp,
+    session_path,
+    transcript_files,
+    write_private_json_if_changed,
+)
 
 
 class ServiceTests(unittest.TestCase):
@@ -776,6 +796,319 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(first.prompts["session"], [1767225600.0])
         self.assertEqual(len(second.events), 2)
 
+    def test_fleet_telemetry_incrementally_reads_bounded_appends(self) -> None:
+        session_id = "00000000-0000-0000-0000-000000000001"
+        prompt = {
+            "type": "user",
+            "message": {"role": "user", "content": "x" * 1_000_000},
+            "timestamp": "2026-01-01T00:00:00Z",
+            "sessionId": session_id,
+        }
+        completion = {
+            "type": "system",
+            "subtype": "turn_duration",
+            "timestamp": "2026-01-01T00:00:01Z",
+            "sessionId": session_id,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / f"{session_id}.jsonl"
+            transcript.write_text(json.dumps(prompt) + "\n")
+            TELEMETRY_CACHE.clear()
+            first = parse_telemetry(transcript, "claude")
+            self.assertEqual(first.activity, [(1767225600.0, "running", None)])
+            first_offset = TELEMETRY_CACHE[("claude", str(transcript))].offset
+            with transcript.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(completion) + "\n")
+            second = parse_telemetry(transcript, "claude")
+        self.assertIs(first, second)
+        self.assertEqual(second.activity[-1], (1767225601.0, "idle", None))
+        self.assertEqual(second.completions, [(1767225601.0, None)])
+        self.assertGreater(
+            TELEMETRY_CACHE[("claude", str(transcript))].offset, first_offset
+        )
+
+    def test_fleet_telemetry_waits_for_complete_appended_record(self) -> None:
+        session_id = "00000000-0000-0000-0000-000000000001"
+        record = json.dumps(
+            {
+                "type": "system",
+                "subtype": "turn_duration",
+                "timestamp": "2026-01-01T00:00:01Z",
+                "sessionId": session_id,
+            }
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / f"{session_id}.jsonl"
+            transcript.write_text(record[:20])
+            TELEMETRY_CACHE.clear()
+            first = parse_telemetry(transcript, "claude")
+            self.assertEqual(first.completions, [])
+            self.assertEqual(TELEMETRY_CACHE[("claude", str(transcript))].offset, 0)
+            with transcript.open("a", encoding="utf-8") as handle:
+                handle.write(record[20:] + "\n")
+            second = parse_telemetry(transcript, "claude")
+        self.assertIs(first, second)
+        self.assertEqual(second.completions, [(1767225601.0, None)])
+
+    def test_fleet_telemetry_resets_after_truncation(self) -> None:
+        session_id = "00000000-0000-0000-0000-000000000001"
+        first_record = {
+            "type": "system",
+            "subtype": "turn_duration",
+            "timestamp": "2026-01-01T00:00:01Z",
+            "sessionId": session_id,
+            "padding": "x" * 100,
+        }
+        second_record = {
+            "type": "system",
+            "subtype": "turn_duration",
+            "timestamp": "2026-01-01T00:00:02Z",
+            "sessionId": session_id,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / f"{session_id}.jsonl"
+            transcript.write_text(json.dumps(first_record) + "\n")
+            TELEMETRY_CACHE.clear()
+            first = parse_telemetry(transcript, "claude")
+            transcript.write_text(json.dumps(second_record) + "\n")
+            second = parse_telemetry(transcript, "claude")
+        self.assertIsNot(first, second)
+        self.assertEqual(second.completions, [(1767225602.0, None)])
+
+    def test_fleet_telemetry_resets_when_rewrite_stays_above_read_offset(
+        self,
+    ) -> None:
+        session_id = "00000000-0000-0000-0000-000000000001"
+        old_record = {
+            "type": "system",
+            "subtype": "turn_duration",
+            "timestamp": "2026-01-01T00:00:01Z",
+            "sessionId": session_id,
+        }
+        new_record = {
+            "type": "system",
+            "subtype": "turn_duration",
+            "timestamp": "2026-01-01T00:00:02Z",
+            "sessionId": session_id,
+            "padding": "y" * 300,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / f"{session_id}.jsonl"
+            transcript.write_bytes(
+                (json.dumps(old_record) + "\n").encode() + b"x" * 1_000
+            )
+            TELEMETRY_CACHE.clear()
+            first = parse_telemetry(transcript, "claude")
+            cached = TELEMETRY_CACHE[("claude", str(transcript))]
+            self.assertGreater(cached.size, cached.offset)
+            transcript.write_text(json.dumps(new_record) + "\n")
+            self.assertGreater(transcript.stat().st_size, cached.offset)
+            second = parse_telemetry(transcript, "claude")
+        self.assertIsNot(first, second)
+        self.assertEqual(second.completions, [(1767225602.0, None)])
+
+    def test_snapshot_summary_bounds_history_and_keeps_endpoints(self) -> None:
+        rows = [{"iteration": index} for index in range(1_000)]
+        sampled = sampled_rows(rows, 40)
+        recent = sampled_rows_with_tail(rows, 40, 6)
+        summary = summary_snapshot(
+            {
+                "generated_at": "2026-01-01T00:20:00Z",
+                "sessions": [
+                    {
+                        "last_activity_at": "2026-01-01T00:10:00Z",
+                        "iterations": rows,
+                        "context_history": rows,
+                        "subagents": rows,
+                    }
+                ],
+            }
+        )
+        session = summary["sessions"][0]
+        self.assertEqual(len(sampled), 40)
+        self.assertEqual((sampled[0], sampled[-1]), (rows[0], rows[-1]))
+        self.assertEqual(recent[-6:], rows[-6:])
+        self.assertEqual(len(session["iterations"]), 40)
+        self.assertNotIn("context_history", session)
+        self.assertNotIn("subagents", session)
+
+    def test_snapshot_summary_excludes_sessions_outside_dashboard_window(self) -> None:
+        summary = summary_snapshot(
+            {
+                "generated_at": "2026-01-01T00:20:01Z",
+                "sessions": [
+                    {"id": "recent", "last_activity_at": "2026-01-01T00:00:01Z"},
+                    {"id": "stale", "last_activity_at": "2026-01-01T00:00:00Z"},
+                ],
+            }
+        )
+        self.assertEqual([session["id"] for session in summary["sessions"]], ["recent"])
+
+    def test_snapshot_is_not_published_when_detail_write_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "live-sessions.json"
+            destination.write_text('{"old":true}')
+            with (
+                patch(
+                    "konvu_telemetry.snapshot.snapshot_path",
+                    return_value=destination,
+                ),
+                patch(
+                    "konvu_telemetry.snapshot.session_path",
+                    return_value=Path(directory) / "session.json",
+                ),
+                patch(
+                    "konvu_telemetry.snapshot.write_private_json_if_changed",
+                    side_effect=OSError("full"),
+                ),
+            ):
+                with self.assertRaises(OSError):
+                    write_snapshot(
+                        {
+                            "generated_at": "2026-01-01T00:00:00Z",
+                            "sessions": [{"provider": "claude", "id": "session"}],
+                        }
+                    )
+            self.assertEqual(destination.read_text(), '{"old":true}')
+
+    def test_private_json_skips_unchanged_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "state.json"
+            self.assertTrue(write_private_json_if_changed(destination, {"a": 1}))
+            inode = destination.stat().st_ino
+            self.assertFalse(write_private_json_if_changed(destination, {"a": 1}))
+            self.assertEqual(destination.stat().st_ino, inode)
+            self.assertTrue(write_private_json_if_changed(destination, {"a": 2}))
+
+    def test_stale_valid_baseline_refreshes_without_blocking(self) -> None:
+        old = {
+            "schema_version": BASELINE_SCHEMA_VERSION,
+            "milestones": list(BASELINE_MILESTONES),
+            "minimum_sessions": BASELINE_MIN_SESSIONS,
+            "generated_at": "2026-01-01T00:00:00+00:00",
+            "forecasts": {},
+            "configurations": {},
+            "median_method": "monotonic_checkpoint_cohort_medians",
+        }
+        new = {**old, "generated_at": "2026-01-02T00:00:00+00:00"}
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "baselines.json"
+            destination.write_text(json.dumps(old))
+            with (
+                patch(
+                    "konvu_telemetry.analytics.baseline_path",
+                    return_value=destination,
+                ),
+                patch("konvu_telemetry.analytics.build_baselines", return_value=new),
+                patch("konvu_telemetry.analytics.Thread") as thread_class,
+            ):
+                thread_class.return_value.start.side_effect = lambda: (
+                    thread_class.call_args.kwargs["target"](
+                        *thread_class.call_args.kwargs["args"]
+                    )
+                )
+                loaded = load_baselines(1767312000.0, {}, refresh_in_background=True)
+                self.assertEqual(loaded, old)
+                self.assertEqual(json.loads(destination.read_text()), new)
+                thread_class.assert_called_once()
+
+    def test_failed_baseline_thread_start_does_not_hold_refresh_lock(self) -> None:
+        baseline = {
+            "schema_version": BASELINE_SCHEMA_VERSION,
+            "milestones": list(BASELINE_MILESTONES),
+            "minimum_sessions": BASELINE_MIN_SESSIONS,
+            "generated_at": "2026-01-01T00:00:00+00:00",
+            "forecasts": {},
+            "configurations": {},
+            "median_method": "monotonic_checkpoint_cohort_medians",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "baselines.json"
+            destination.write_text(json.dumps(baseline))
+            with (
+                patch(
+                    "konvu_telemetry.analytics.baseline_path",
+                    return_value=destination,
+                ),
+                patch("konvu_telemetry.analytics.Thread") as thread_class,
+                patch("konvu_telemetry.analytics.LOGGER.exception"),
+            ):
+                thread_class.return_value.start.side_effect = RuntimeError("limited")
+                first = load_baselines(1767312000.0, {}, refresh_in_background=True)
+                second = load_baselines(1767312000.0, {}, refresh_in_background=True)
+        self.assertEqual((first, second), (baseline, baseline))
+        self.assertEqual(thread_class.call_count, 2)
+
+    def test_dashboard_json_uses_etags(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory) / "live-sessions.json"
+            snapshot.write_text('{"generated_at":"2026-01-01T00:00:00Z","sessions":[]}')
+            handler = Mock()
+            handler.headers = {}
+            DashboardRequestHandler._serve_json_file(handler, snapshot)
+            etag = f'"{snapshot.stat().st_mtime_ns:x}-{snapshot.stat().st_size:x}"'
+            handler.send_response.assert_called_once_with(200)
+            handler.send_header.assert_any_call("ETag", etag)
+            handler._write_payload.assert_called_once_with(snapshot.read_bytes())
+
+            handler.reset_mock()
+            handler.headers = {"If-None-Match": etag}
+            DashboardRequestHandler._serve_json_file(handler, snapshot)
+            handler.send_response.assert_called_once_with(304)
+            handler._write_payload.assert_not_called()
+
+    def test_refreshed_session_uses_fresh_collector_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            health = root / "health.json"
+            session = root / "session.json"
+            health.write_text(
+                json.dumps(
+                    {
+                        "status": "healthy",
+                        "last_success_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+            )
+            session.write_text('{"id":"session"}')
+            with (
+                patch("konvu_telemetry.display.health_path", return_value=health),
+                patch("konvu_telemetry.display.session_path", return_value=session),
+                patch("konvu_telemetry.display.urlopen") as request,
+            ):
+                payload = refreshed_session(
+                    "claude", "00000000-0000-0000-0000-000000000001"
+                )
+        self.assertEqual(payload, {"id": "session"})
+        request.assert_not_called()
+
+    def test_refreshed_session_requests_refresh_when_collector_is_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            health = root / "health.json"
+            session = root / "session.json"
+            health.write_text(
+                json.dumps(
+                    {
+                        "status": "healthy",
+                        "last_success_at": "2026-01-01T00:00:00+00:00",
+                    }
+                )
+            )
+            session.write_text('{"id":"fallback"}')
+            with (
+                patch("konvu_telemetry.display.health_path", return_value=health),
+                patch("konvu_telemetry.display.session_path", return_value=session),
+                patch(
+                    "konvu_telemetry.display.urlopen", side_effect=OSError("offline")
+                ) as request,
+            ):
+                payload = refreshed_session(
+                    "claude", "00000000-0000-0000-0000-000000000001"
+                )
+        self.assertEqual(payload, {"id": "fallback"})
+        request.assert_called_once()
+
     def test_task_series_preserves_empty_prompts(self) -> None:
         event = UsageEvent(
             "claude",
@@ -1432,9 +1765,11 @@ class ServiceTests(unittest.TestCase):
                 "provider": "claude",
                 "total_cost_usd": cost,
                 "cost_status": "complete",
-                "baseline": baseline_comparison(
-                    "claude", count, tokens, baseline, cost_usd=cost
-                ),
+                "baselines": {
+                    "provider": baseline_comparison(
+                        "claude", count, tokens, baseline, cost_usd=cost
+                    )
+                },
             }
             for count, tokens, cost in ((20, 500, 25.0), (21, 530, 26.5))
         ]
@@ -1455,7 +1790,7 @@ class ServiceTests(unittest.TestCase):
                 "provider": "claude",
                 "total_cost_usd": 12.0,
                 "cost_status": "partial",
-                "baseline": {"token_overhead_percent": 150},
+                "baselines": {"provider": {"token_overhead_percent": 150}},
             }
         ]
         with tempfile.TemporaryDirectory() as directory:
@@ -1476,7 +1811,8 @@ class ServiceTests(unittest.TestCase):
             "total_cost_usd": 10.0,
             "projected_next_10_tasks_usd": 4.01,
             "cost_status": "complete",
-            "baseline": {"cost_overhead_percent": 200},
+            "baseline": {"cost_overhead_percent": 10},
+            "baselines": {"provider": {"cost_overhead_percent": 200}},
         }
         with tempfile.TemporaryDirectory() as directory:
             state_path = Path(directory) / "notifications.json"
@@ -1486,12 +1822,34 @@ class ServiceTests(unittest.TestCase):
             ):
                 apply_notification_tracking([session], 100.0)
                 self.assertEqual(session["notification"]["sequence"], 1)
+                self.assertEqual(session["notification"]["baseline_scope"], "provider")
+                self.assertEqual(session["notification"]["overhead_percent"], 200)
                 session["total_cost_usd"] = 11.0
-                session["baseline"] = {"cost_overhead_percent": 210}
+                session["baselines"] = {"provider": {"cost_overhead_percent": 210}}
                 apply_notification_tracking([session], 100.0 + 9 * 60)
                 self.assertEqual(session["notification"]["sequence"], 1)
                 apply_notification_tracking([session], 100.0 + 10 * 60)
         self.assertEqual(session["notification"]["sequence"], 2)
+
+    def test_hot_alerts_ignore_matched_median_when_provider_median_is_normal(
+        self,
+    ) -> None:
+        session = {
+            "id": "session",
+            "provider": "claude",
+            "total_cost_usd": 10.0,
+            "projected_next_10_tasks_usd": 4.01,
+            "cost_status": "complete",
+            "baseline": {"cost_overhead_percent": 999},
+            "baselines": {"provider": {"cost_overhead_percent": 199}},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            with patch(
+                "konvu_telemetry.analytics.notification_state_path",
+                return_value=Path(directory) / "notifications.json",
+            ):
+                apply_notification_tracking([session], 100.0)
+        self.assertEqual(session["notification"], {"sequence": 0, "hot": False})
 
     def test_quota_alerts_cross_threshold_then_renotify_only_when_rising(self) -> None:
         sessions = [{"id": "session", "provider": "codex"}]

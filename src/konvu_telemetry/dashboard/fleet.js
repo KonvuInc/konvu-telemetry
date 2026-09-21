@@ -22,6 +22,8 @@ const state = {
   selected: null,
   chart: "cumulative",
   error: false,
+  snapshotEtag: null,
+  detailRequest: 0,
   now: Date.now(),
   lastOpener: null,
 };
@@ -350,14 +352,19 @@ function spendComparison(s) {
     return {
       ratio: null,
       label: "Collector has no comparable baseline",
-      detail: "The collector recalculates this from your stored local median every six hours. Alerts use the same value.",
+      detail:
+        state.baselineMode === "matched"
+          ? "The collector recalculates this from your stored local median every six hours. Alerts use the general provider median."
+          : "The collector recalculates this from your stored local median every six hours. Alerts use this general provider median.",
     };
   }
   const label = c.matched ? "model + effort + speed median" : providerName(s.provider) + " general median";
   return {
     ratio: c.ratio,
     label: c.ratio.toFixed(2) + "× " + label,
-    detail: "Current recorded spend against the same local median used in the CLI and alerts.",
+    detail: c.matched
+      ? "Current recorded spend against the matched local median. Alerts use the general provider median."
+      : "Current recorded spend against the same general provider median used in alerts.",
   };
 }
 function roundedDollarCeiling(value) {
@@ -1193,11 +1200,19 @@ function bindEvents() {
 async function refresh() {
   if (axisDragging) return;
   try {
-    const response = await fetch("/api/live-sessions", { cache: "no-store" });
+    const headers = state.snapshotEtag ? { "If-None-Match": state.snapshotEtag } : {};
+    const response = await fetch("/api/live-sessions", { cache: "no-store", headers });
+    if (response.status === 304) {
+      state.error = false;
+      render();
+      return;
+    }
     if (!response.ok) throw new Error("Collector request failed");
     const payload = await response.json();
     if (!payload || !Array.isArray(payload.sessions) || !finite(Date.parse(payload.generated_at))) throw new Error("Invalid snapshot");
+    state.snapshotEtag = response.headers.get("ETag");
     state.payload = payload;
+    if (state.selected) await loadSessionDetails(state.selected);
     state.error = false;
     browserAlerts(payload);
   } catch {
@@ -1562,7 +1577,24 @@ function renderInspector() {
   $("#inspector-body").scrollTop = scroll;
   if (!wasOpen) $("#close").focus();
 }
-function openSession(id, opener) {
+async function loadSessionDetails(id) {
+  const session = allRows().find((row) => keyOf(row) === id || row.id === id);
+  if (!session) return;
+  const request = ++state.detailRequest;
+  try {
+    const query = new URLSearchParams({ provider: session.provider, session: session.id });
+    const response = await fetch("/api/session?" + query, { cache: "no-store" });
+    if (!response.ok) return;
+    const detail = await response.json();
+    if (request !== state.detailRequest) return;
+    if (!detail || detail.id !== session.id || detail.provider !== session.provider) return;
+    const index = state.payload.sessions.findIndex((row) => keyOf(row) === keyOf(session));
+    if (index >= 0) state.payload.sessions[index] = { ...session, ...detail };
+  } catch {
+    return;
+  }
+}
+async function openSession(id, opener) {
   hideGraphTip();
   state.lastOpener = opener;
   state.selected = id;
@@ -1570,8 +1602,11 @@ function openSession(id, opener) {
   $("#inspector-body").scrollTop = 0;
   saveUrl();
   renderInspector();
+  await loadSessionDetails(id);
+  if (state.selected === id) renderInspector();
 }
 function closeSession() {
+  state.detailRequest++;
   state.selected = null;
   saveUrl();
   renderInspector();
@@ -1712,7 +1747,7 @@ function browserAlerts(payload) {
     const key = "konvu-alert-" + session.provider + "-" + session.id;
     if (Number(localStorage.getItem(key) || 0) >= alert.sequence) continue;
     localStorage.setItem(key, String(alert.sequence));
-    const overhead = Math.round(session.baseline?.cost_overhead_percent || 0);
+    const overhead = Math.round(alert.overhead_percent || 0);
     const notification = new Notification(providerName(session.provider) + " session running hot", {
       body:
         "💸 $" +

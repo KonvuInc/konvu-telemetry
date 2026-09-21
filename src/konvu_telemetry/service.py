@@ -7,6 +7,7 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
+import os
 from pathlib import Path
 from threading import Lock, Thread
 import time
@@ -15,8 +16,15 @@ import webbrowser
 
 from .config import ALLOWED_PROVIDERS, DEFAULT_HEALTH_STALE_SECONDS
 from .live import IncrementalLiveState
-from .snapshot import build_snapshot, load_snapshot, write_snapshot
-from .storage import health_path, parse_timestamp, valid_session_id, write_private_json
+from .snapshot import build_snapshot, write_snapshot
+from .storage import (
+    health_path,
+    parse_timestamp,
+    session_path,
+    snapshot_path,
+    valid_session_id,
+    write_private_json,
+)
 
 LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost"})
 LOGGER = logging.getLogger(__name__)
@@ -108,6 +116,31 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
     live_state: IncrementalLiveState
     snapshot_lock: Lock
 
+    def _write_payload(self, payload: bytes) -> None:
+        try:
+            self.wfile.write(payload)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def _serve_json_file(self, path: Path) -> None:
+        try:
+            with path.open("rb") as handle:
+                stat = os.fstat(handle.fileno())
+                etag = f'"{stat.st_mtime_ns:x}-{stat.st_size:x}"'
+                if self.headers.get("If-None-Match") == etag:
+                    self.send_response(304)
+                    self.send_header("ETag", etag)
+                    self.end_headers()
+                    return
+                payload = handle.read()
+        except OSError:
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self.send_header("ETag", etag)
+        self._secure_headers("application/json; charset=utf-8", len(payload))
+        self._write_payload(payload)
+
     def do_GET(self) -> None:  # noqa: N802
         host = self.headers.get("Host", "")
         origin = self.headers.get("Origin")
@@ -120,14 +153,19 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
             payload = json.dumps(health).encode("utf-8")
             self.send_response(200 if health.get("status") == "healthy" else 503)
             self._secure_headers("application/json; charset=utf-8", len(payload))
-            self.wfile.write(payload)
+            self._write_payload(payload)
             return
         if path == "/api/live-sessions":
-            snapshot = load_snapshot() or {"generated_at": None, "sessions": []}
-            payload = json.dumps(snapshot).encode("utf-8")
-            self.send_response(200)
-            self._secure_headers("application/json; charset=utf-8", len(payload))
-            self.wfile.write(payload)
+            self._serve_json_file(snapshot_path())
+            return
+        if path == "/api/session":
+            query = parse_qs(urlparse(self.path).query)
+            provider = query.get("provider", [""])[0]
+            session_id = query.get("session", [""])[0]
+            if provider not in ALLOWED_PROVIDERS or not valid_session_id(session_id):
+                self.send_error(400)
+                return
+            self._serve_json_file(session_path(provider, session_id))
             return
         if path == "/api/refresh":
             query = parse_qs(urlparse(self.path).query)
@@ -138,26 +176,17 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
                 return
             with self.snapshot_lock:
                 write_snapshot(build_snapshot(time.time(), self.live_state))
-                snapshot = load_snapshot() or {"sessions": []}
-            sessions = snapshot.get("sessions")
-            session = (
-                next(
-                    (
-                        item
-                        for item in sessions
-                        if isinstance(item, dict)
-                        and item.get("provider") == provider
-                        and item.get("id") == session_id
-                    ),
-                    None,
-                )
-                if isinstance(sessions, list)
-                else None
-            )
+                try:
+                    candidate = json.loads(
+                        session_path(provider, session_id).read_text()
+                    )
+                    session = candidate if isinstance(candidate, dict) else None
+                except (OSError, json.JSONDecodeError):
+                    session = None
             payload = json.dumps({"session": session}).encode("utf-8")
             self.send_response(200)
             self._secure_headers("application/json; charset=utf-8", len(payload))
-            self.wfile.write(payload)
+            self._write_payload(payload)
             return
         super().do_GET()
 
