@@ -20,6 +20,7 @@ from .parsers import (
     assistant_event,
     codex_session_id,
     codex_subagent_parent,
+    has_usage_fields,
     is_human_claude_prompt,
     session_title,
 )
@@ -61,6 +62,7 @@ class CodexLiveFile:
     session_id: str = ""
     events: list[UsageEvent] = field(default_factory=list)
     task_starts: list[float] = field(default_factory=list)
+    has_recorded_task_starts: bool = False
     tool_counts: dict[float, int] = field(default_factory=lambda: defaultdict(int))
     title: str | None = None
     client: str = "unknown"
@@ -289,6 +291,8 @@ class IncrementalLiveState:
                     state.clients[session_id] = "desktop"
                 elif entrypoint == "cli" and session_id not in state.clients:
                     state.clients[session_id] = "cli"
+                elif entrypoint == "sdk-cli" and session_id not in state.clients:
+                    state.clients[session_id] = "sdk"
             if (
                 record.get("type") == "system"
                 and record.get("subtype") == "compact_boundary"
@@ -422,6 +426,17 @@ class IncrementalLiveState:
                     if tier in {"fast", "priority"}
                     else "standard"
                 )
+            if (
+                timestamp is not None
+                and (
+                    event_type == "user_message"
+                    or (event_type == "message" and payload.get("role") == "user")
+                )
+                and not state.has_recorded_task_starts
+            ):
+                if timestamp not in state.task_starts:
+                    state.task_starts.append(timestamp)
+                    state.task_starts.sort()
             if event_type in {"user_message", "message"}:
                 role = payload.get("role")
                 if event_type == "user_message" or role == "user":
@@ -433,6 +448,10 @@ class IncrementalLiveState:
                     if title:
                         state.title = state.title or title
             if timestamp is not None and event_type == "task_started":
+                if not state.has_recorded_task_starts:
+                    state.has_recorded_task_starts = True
+                    state.task_starts.clear()
+                    state.tool_counts.clear()
                 if timestamp not in state.task_starts:
                     state.task_starts.append(timestamp)
                     state.task_starts.sort()
@@ -480,6 +499,7 @@ class IncrementalLiveState:
             )
             for key in state.previous_usage:
                 state.previous_usage[key] = as_number(total_usage.get(key))
+            usage_source = last_usage if isinstance(last_usage, dict) else total_usage
             input_tokens = as_number(raw.get("input_tokens"))
             cached_input_tokens = as_number(raw.get("cached_input_tokens"))
             cache_write_tokens = min(
@@ -492,7 +512,7 @@ class IncrementalLiveState:
                 UsageEvent(
                     "codex",
                     state.session_id,
-                    f"{state.session_id}:{cumulative}:{timestamp}",
+                    f"{state.session_id}:{cumulative}",
                     timestamp,
                     model,
                     Usage(
@@ -503,6 +523,8 @@ class IncrementalLiveState:
                         cached_input_tokens,
                         0,
                         state.speed,
+                        as_number(raw.get("reasoning_output_tokens")),
+                        has_usage_fields(usage_source, "input_tokens", "output_tokens"),
                     ),
                     0,
                     False,

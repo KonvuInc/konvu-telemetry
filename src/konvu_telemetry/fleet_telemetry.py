@@ -134,12 +134,13 @@ def _quota_windows(raw: dict[str, object], observed: float) -> list[dict[str, ob
         reset = _number(window.get("resets_at"))
         if used is None or minutes is None or minutes <= 0:
             continue
+        used_percent = used * 100 if 0 <= used <= 1 else used
         windows.append(
             {
                 "limit_id": limit_id if isinstance(limit_id, str) else "default",
                 "window_minutes": minutes,
-                "used_percent": min(100.0, used),
-                "remaining_percent": max(0.0, 100.0 - used),
+                "used_percent": min(100.0, used_percent),
+                "remaining_percent": max(0.0, 100.0 - used_percent),
                 "resets_at": _iso(reset),
                 "observed_at": _iso(observed),
             }

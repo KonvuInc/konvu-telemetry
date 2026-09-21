@@ -12,15 +12,15 @@ The snapshot source and SHA-256 are recorded in `NOTICE`. The scheduled pricing 
 
 Prompt boundaries come from explicit provider records. Subagent calls are deduplicated by message identity and included in the parent session total. Their spend is attributed to the parent prompt that spawned them when the provider records that relationship; otherwise timestamps are used and the per-prompt attribution is approximate.
 
-Context is the latest provider-recorded input plus cache traffic for a model call. It is not cumulative token traffic. Codex supplies its context-window size directly. Claude uses conservative 200K display capacity until observed usage proves that an advertised larger model window is active.
+Context is the latest provider-recorded input plus cache traffic for a model call. It is not cumulative token traffic. Codex supplies its context-window size directly. Claude uses the published capacity in the bundled model-price snapshot and labels it as model pricing rather than provider-observed capacity.
 
 ## Forecasts and medians
 
 The next-ten forecast first uses the mean cost of up to ten completed, fully priced prompts matching the current model, reasoning effort, and service speed. With fewer than three comparable prompts, it falls back to the provider-wide median forecast from recent local sessions; if no global history exists, any completed prompts in the current session are used. After compaction, only post-compaction prompts are comparable; while that history warms up, a context-scaled pre-compaction estimate is labeled separately. The baseline document includes the median held-out percentage error for recent Claude and Codex sessions with at least 20 prompts.
 
-Personal baselines use the median cumulative cost and token traffic of sessions that reached the same checkpoint during the last 30 days. At least five sessions are required. Checkpoint medians are clamped to the previous checkpoint when cohort changes would otherwise make cumulative spend decrease. Values are interpolated only between measured checkpoints and are suppressed outside the observed range.
+Personal baselines use the median cumulative cost and token traffic of all sessions from the last 30 days. At least five sessions are required. A finished session retains its final cumulative total at later checkpoints, while still-active sessions continue accumulating. Values are interpolated only between measured checkpoints and are suppressed outside the observed range.
 
-Hot-session alerts compare recorded cost with the general provider median. The model, effort, and speed median remains available as a separate dashboard comparison and does not drive alerts.
+Hot-session alerts are driven by the next-ten forecast alone: a session alerts when it was active within the last twenty minutes, its cost is fully priced, and that forecast exceeds $4. Medians drive no alert; both the general provider median and the model, effort, and speed median remain dashboard comparisons only. Because the forecast needs no baseline, short sessions that never reach a median checkpoint still alert.
 
 Run `konvu-telemetry backtest-next-ten` against local Claude history to inspect rolling forecast error. Run `python3 scripts/benchmark.py` for a synthetic performance receipt that never reads real transcripts.
 

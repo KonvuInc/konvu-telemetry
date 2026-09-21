@@ -24,6 +24,17 @@ from .storage import (
 )
 
 
+def has_usage_fields(raw: dict[str, object], *fields: str) -> bool:
+    """Return whether a provider record explicitly supplied each required token field."""
+    for field in fields:
+        value = raw.get(field)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return False
+        if value < 0:
+            return False
+    return True
+
+
 def is_human_claude_prompt(record: dict[str, object]) -> bool:
     """Identify real root-user prompts shared by cold and incremental parsing."""
     if (
@@ -104,6 +115,7 @@ def assistant_event(record: dict[str, object]) -> UsageEvent | None:
         cache_read_tokens=as_number(raw_usage.get("cache_read_input_tokens")),
         web_search_requests=web_search_requests,
         speed=str(raw_usage.get("speed") or "standard"),
+        complete=has_usage_fields(raw_usage, "input_tokens", "output_tokens"),
     )
     model = str(message.get("model") or "unknown")
     if (
@@ -261,6 +273,9 @@ def codex_events_in_file(file_path: Path) -> Iterator[UsageEvent]:
                 )
                 for key in previous:
                     previous[key] = as_number(total_usage.get(key))
+                usage_source = (
+                    last_usage if isinstance(last_usage, dict) else total_usage
+                )
                 input_tokens = as_number(raw.get("input_tokens"))
                 cached_input_tokens = as_number(raw.get("cached_input_tokens"))
                 cache_write_tokens = min(
@@ -274,7 +289,7 @@ def codex_events_in_file(file_path: Path) -> Iterator[UsageEvent]:
                 yield UsageEvent(
                     provider="codex",
                     session_id=session_id,
-                    message_id=f"{session_id}:{cumulative}:{timestamp}",
+                    message_id=f"{session_id}:{cumulative}",
                     timestamp=timestamp,
                     model=model,
                     usage=Usage(
@@ -287,6 +302,12 @@ def codex_events_in_file(file_path: Path) -> Iterator[UsageEvent]:
                         cache_read_tokens=cached_input_tokens,
                         web_search_requests=0,
                         speed=session_speed,
+                        reasoning_output_tokens=as_number(
+                            raw.get("reasoning_output_tokens")
+                        ),
+                        complete=has_usage_fields(
+                            usage_source, "input_tokens", "output_tokens"
+                        ),
                     ),
                     tool_calls=0,
                     is_subagent=False,
@@ -300,8 +321,9 @@ def codex_events_in_file(file_path: Path) -> Iterator[UsageEvent]:
 
 @file_cached
 def codex_task_starts(file_path: Path) -> list[float]:
-    """Read Codex's recorded task_started boundaries for one rollout."""
+    """Read recorded task boundaries, falling back to real user-message timestamps."""
     starts: list[float] = []
+    fallback_starts: list[float] = []
     try:
         with file_path.open("r", encoding="utf-8", errors="replace") as transcript:
             for line in transcript:
@@ -310,18 +332,20 @@ def codex_task_starts(file_path: Path) -> list[float]:
                 except json.JSONDecodeError:
                     continue
                 payload = record.get("payload") if isinstance(record, dict) else None
-                if (
-                    not isinstance(payload, dict)
-                    or record.get("type") != "event_msg"
-                    or payload.get("type") != "task_started"
-                ):
+                if not isinstance(payload, dict) or record.get("type") != "event_msg":
                     continue
                 timestamp = parse_timestamp(record.get("timestamp"))
-                if timestamp is not None:
+                if timestamp is None:
+                    continue
+                if payload.get("type") == "task_started":
                     starts.append(timestamp)
+                elif payload.get("type") == "user_message" or (
+                    payload.get("type") == "message" and payload.get("role") == "user"
+                ):
+                    fallback_starts.append(timestamp)
     except OSError:
         return starts
-    return sorted(set(starts))
+    return sorted(set(starts or fallback_starts))
 
 
 @file_cached
@@ -519,6 +543,8 @@ def claude_client_in_file(file_path: Path) -> dict[str, str]:
                     clients[session_id] = "desktop"
                 elif entrypoint == "cli" and session_id not in clients:
                     clients[session_id] = "cli"
+                elif entrypoint == "sdk-cli" and session_id not in clients:
+                    clients[session_id] = "sdk"
     except OSError:
         return clients
     return clients
