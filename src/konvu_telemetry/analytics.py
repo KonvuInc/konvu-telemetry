@@ -6,9 +6,11 @@ import json
 from bisect import bisect_right
 from collections import defaultdict
 from datetime import datetime, timezone
+import logging
 from pathlib import Path
 from statistics import median
-from typing import Iterator, Literal
+from threading import Lock, Thread
+from typing import Iterator, Literal, cast
 
 from .config import (
     ALERT_FORECAST_USD,
@@ -17,10 +19,12 @@ from .config import (
     ALERT_QUOTA_WEEKLY_PERCENT,
     ALERT_RENOTIFY_SECONDS,
     BASELINE_LOOKBACK_SECONDS,
+    BASELINE_MIN_SESSIONS,
     BASELINE_MILESTONES,
     BASELINE_REFRESH_SECONDS,
     BASELINE_SCHEMA_VERSION,
     FORECAST_WINDOW,
+    FORECAST_MIN_SAMPLES,
 )
 from .models import UsageEvent
 from .parsers import (
@@ -43,6 +47,9 @@ from .storage import (
     transcript_files,
     write_private_json,
 )
+
+LOGGER = logging.getLogger(__name__)
+_BASELINE_REFRESH_LOCK = Lock()
 
 
 def iteration_series(
@@ -70,6 +77,10 @@ def iteration_series(
             else (prior_events[-1] if prior_events else None)
         )
         cumulative_cost += cost
+        configuration = single_configuration(iteration_events)
+        model, effort, speed = (
+            configuration if configuration is not None else (None, None, None)
+        )
         rows.append(
             {
                 "iteration": index,
@@ -81,6 +92,9 @@ def iteration_series(
                 if context_event
                 else 0,
                 "tool_calls": sum(event.tool_calls for event in iteration_events),
+                "model": model,
+                "reasoning_effort": effort,
+                "speed": speed,
             }
         )
     return rows
@@ -197,7 +211,10 @@ def apply_notification_tracking(
     for session in sessions:
         session_id = session.get("id")
         provider = session.get("provider")
-        comparison = session.get("baseline")
+        comparisons = session.get("baselines")
+        comparison = (
+            comparisons.get("provider") if isinstance(comparisons, dict) else None
+        )
         if not isinstance(session_id, str) or not isinstance(provider, str):
             continue
         key = f"{provider}:{session_id}"
@@ -250,6 +267,8 @@ def apply_notification_tracking(
         session["notification"] = {
             "sequence": int(record.get("sequence", 0)),
             "hot": True,
+            "baseline_scope": "provider",
+            "overhead_percent": overhead,
             "last_notified_at": record.get("last_notified_at"),
             "last_cost_usd": record.get("last_cost_usd"),
             "last_overhead_percent": record.get("last_overhead_percent"),
@@ -552,7 +571,7 @@ def median_absolute_percentage_error(samples: list[tuple[float, float]]) -> floa
 
 def configuration_key(model: str, effort: str, speed: str) -> str:
     """Build a stable model, effort, and pricing-tier baseline key."""
-    return f"{model}::{effort}::{speed}"
+    return json.dumps([model, effort, speed], separators=(",", ":"))
 
 
 def next_ten_forecast(costs: list[float], provider: str) -> float:
@@ -562,11 +581,27 @@ def next_ten_forecast(costs: list[float], provider: str) -> float:
     return sum(recent) / len(recent) * 10 if recent else 0.0
 
 
+def forecast_backtest_sample(
+    series: list[tuple[float, int]],
+) -> tuple[float, float] | None:
+    """Backtest the live forecast against a held-out final ten-task window."""
+    if len(series) < FORECAST_WINDOW * 2:
+        return None
+    costs = [cost for cost, _ in series]
+    point = len(costs) - FORECAST_WINDOW
+    prediction = next_ten_forecast(costs[:point], "historical")
+    return prediction, sum(costs[point:])
+
+
 def scaled_precompact_forecast(
     costs: list[float], current_context: int, precompact_context: int
 ) -> float | None:
     """Scale the pre-compact trend until enough post-compact prompts exist."""
-    if current_context <= 0 or precompact_context <= 0:
+    if (
+        current_context <= 0
+        or precompact_context <= 0
+        or len(costs) < FORECAST_MIN_SAMPLES
+    ):
         return None
     forecast = next_ten_forecast(costs, "claude")
     if forecast <= 0:
@@ -690,6 +725,8 @@ def build_baselines(
     """Build provider and model-effort median checkpoints."""
     providers: dict[str, list[dict[str, object]]] = {}
     configurations: dict[str, dict[str, dict[str, object]]] = {}
+    forecast_backtests: dict[str, dict[str, object]] = {}
+    provider_forecasts: dict[str, dict[str, object]] = {}
     since = now - BASELINE_LOOKBACK_SECONDS
     for provider in ("claude", "codex"):
         provider_series: list[list[tuple[float, int]]] = []
@@ -697,15 +734,41 @@ def build_baselines(
             list
         )
         configuration_labels: dict[str, tuple[str, str, str]] = {}
+        forecast_samples: list[tuple[float, float]] = []
         for model, effort, speed, series in historical_task_series(
             provider, since, prices
         ):
             provider_series.append(series)
+            forecast_sample = forecast_backtest_sample(series)
+            if forecast_sample is not None:
+                forecast_samples.append(forecast_sample)
             if model is not None and effort is not None and speed is not None:
                 key = configuration_key(model, effort, speed)
                 configuration_labels[key] = (model, effort, speed)
                 configuration_series[key].append(series)
         providers[provider] = cumulative_median_checkpoints(provider_series)
+        provider_forecast_values = [
+            next_ten_forecast([cost for cost, _ in series], provider)
+            for series in provider_series
+            if series
+        ]
+        provider_forecasts[provider] = {
+            "median_next_10_usd": round(float(median(provider_forecast_values)), 6)
+            if provider_forecast_values
+            else None,
+            "sessions": len(provider_forecast_values),
+        }
+        valid_forecast_samples = [
+            sample for sample in forecast_samples if sample[1] > 0
+        ]
+        forecast_backtests[provider] = {
+            "samples": len(valid_forecast_samples),
+            "median_absolute_percentage_error": round(
+                median_absolute_percentage_error(valid_forecast_samples), 1
+            )
+            if valid_forecast_samples
+            else None,
+        }
         configurations[provider] = {}
         for key, cohort_series in configuration_series.items():
             model, effort, speed = configuration_labels[key]
@@ -722,6 +785,7 @@ def build_baselines(
         "schema_version": BASELINE_SCHEMA_VERSION,
         "generated_at": datetime.fromtimestamp(now, timezone.utc).isoformat(),
         "lookback_days": BASELINE_LOOKBACK_SECONDS // 86400,
+        "minimum_sessions": BASELINE_MIN_SESSIONS,
         "milestones": list(BASELINE_MILESTONES),
         "median_method": "monotonic_checkpoint_cohort_medians",
         "providers": providers,
@@ -731,6 +795,8 @@ def build_baselines(
             if compact_windows
             else 0.0,
             "claude_after_compact_samples": len(compact_windows),
+            "provider_median_next_10": provider_forecasts,
+            "rolling_next_10_backtest": forecast_backtests,
         },
     }
 
@@ -751,7 +817,7 @@ def cumulative_median_checkpoints(
             )
             for row in cohort
         ]
-        if len(values) < 3:
+        if len(values) < BASELINE_MIN_SESSIONS:
             continue
         median_cost = max(previous_cost, float(median(value[0] for value in values)))
         median_tokens = max(previous_tokens, int(median(value[1] for value in values)))
@@ -769,11 +835,13 @@ def cumulative_median_checkpoints(
 
 
 def load_baselines(
-    now: float, prices: dict[str, dict[str, float]]
+    now: float,
+    prices: dict[str, dict[str, float]],
+    refresh_in_background: bool = False,
 ) -> dict[str, object]:
     """Reuse a recent baseline so the minute collector only reads active sessions."""
     try:
-        baseline = json.loads(baseline_path().read_text())
+        baseline = cast(dict[str, object], json.loads(baseline_path().read_text()))
         generated_at = (
             parse_timestamp(baseline.get("generated_at"))
             if isinstance(baseline, dict)
@@ -783,23 +851,46 @@ def load_baselines(
         configurations = (
             baseline.get("configurations") if isinstance(baseline, dict) else None
         )
-        if (
+        valid = (
             isinstance(baseline, dict)
             and baseline.get("schema_version") == BASELINE_SCHEMA_VERSION
             and baseline.get("milestones") == list(BASELINE_MILESTONES)
+            and baseline.get("minimum_sessions") == BASELINE_MIN_SESSIONS
             and baseline.get("median_method") == "monotonic_checkpoint_cohort_medians"
             and isinstance(forecasts, dict)
             and isinstance(configurations, dict)
             and generated_at is not None
-            and now - generated_at < BASELINE_REFRESH_SECONDS
-        ):
-            return baseline
+        )
+        if valid and generated_at is not None:
+            if now - generated_at < BASELINE_REFRESH_SECONDS:
+                return baseline
+            if refresh_in_background:
+                if _BASELINE_REFRESH_LOCK.acquire(blocking=False):
+                    try:
+                        Thread(
+                            target=_refresh_baselines,
+                            args=(now, prices),
+                            daemon=True,
+                        ).start()
+                    except RuntimeError:
+                        _BASELINE_REFRESH_LOCK.release()
+                        LOGGER.exception("Could not start background baseline refresh")
+                return baseline
     except (OSError, json.JSONDecodeError):
         pass
     baseline = build_baselines(now, prices)
     destination = baseline_path()
     write_private_json(destination, baseline)
     return baseline
+
+
+def _refresh_baselines(now: float, prices: dict[str, dict[str, float]]) -> None:
+    try:
+        write_private_json(baseline_path(), build_baselines(now, prices))
+    except Exception:
+        LOGGER.exception("Background baseline refresh failed")
+    finally:
+        _BASELINE_REFRESH_LOCK.release()
 
 
 def baseline_comparison(
@@ -812,13 +903,42 @@ def baseline_comparison(
     speed: str = "standard",
     since_compact: bool = False,
     cost_usd: float | None = None,
-    comparison_scope: Literal["auto", "provider", "model_effort_speed"] = "auto",
+    comparison_scope: Literal["provider", "model_effort_speed"] = "provider",
 ) -> dict[str, object] | None:
+    def eligible_checkpoints(value: object) -> list[dict[str, object]]:
+        if not isinstance(value, list):
+            return []
+        eligible: list[dict[str, object]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            iterations = item.get("iterations")
+            sessions = item.get("sessions")
+            if (
+                not isinstance(iterations, int)
+                or isinstance(iterations, bool)
+                or not isinstance(sessions, int)
+                or isinstance(sessions, bool)
+                or sessions < BASELINE_MIN_SESSIONS
+            ):
+                continue
+            eligible.append(item)
+        return eligible
+
+    def checkpoint_iteration(item: dict[str, object]) -> int:
+        iteration = item.get("iterations")
+        if not isinstance(iteration, int):
+            raise ValueError("eligible checkpoint has no iteration")
+        return iteration
+
+    def covers(items: list[dict[str, object]]) -> bool:
+        iterations = [checkpoint_iteration(item) for item in items]
+        return bool(iterations) and min(iterations) <= task_count <= max(iterations)
+
     providers = baseline.get("providers")
-    provider_checkpoints = (
+    provider_checkpoints = eligible_checkpoints(
         providers.get(provider) if isinstance(providers, dict) else None
     )
-    checkpoints = provider_checkpoints
     scope = "provider"
     configurations = baseline.get("configurations")
     provider_configurations = (
@@ -832,74 +952,28 @@ def baseline_comparison(
     config_checkpoints = (
         configuration.get("checkpoints") if isinstance(configuration, dict) else None
     )
-    config_eligible = (
-        [
-            item
-            for item in config_checkpoints
-            if isinstance(item, dict)
-            and isinstance(item.get("iterations"), int)
-            and int(item.get("sessions", 0)) >= 3
-        ]
-        if isinstance(config_checkpoints, list)
-        else []
-    )
+    configuration_checkpoints = eligible_checkpoints(config_checkpoints)
     if comparison_scope == "model_effort_speed":
-        checkpoints = config_eligible
+        eligible = configuration_checkpoints
         scope = "model_effort_speed"
-    elif comparison_scope == "auto" and config_eligible:
-        checkpoints = config_eligible
-        scope = "model_effort_speed"
-    if not isinstance(checkpoints, list):
+    else:
+        eligible = provider_checkpoints
+    if not covers(eligible):
         return None
-    eligible = [
-        item
-        for item in checkpoints
-        if isinstance(item, dict) and isinstance(item.get("iterations"), int)
-    ]
-    if not eligible:
-        return None
-    if task_count < min(int(item["iterations"]) for item in eligible):
-        if (
-            comparison_scope == "auto"
-            and scope == "model_effort_speed"
-            and isinstance(provider_checkpoints, list)
-        ):
-            checkpoints = provider_checkpoints
-            scope = "provider"
-            eligible = [
-                item
-                for item in checkpoints
-                if isinstance(item, dict) and isinstance(item.get("iterations"), int)
-            ]
-        if not eligible or task_count < min(
-            int(item["iterations"]) for item in eligible
-        ):
-            return None
-    ordered = sorted(eligible, key=lambda item: int(item["iterations"]))
+    ordered = sorted(eligible, key=checkpoint_iteration)
     lower_index = (
-        bisect_right([int(item["iterations"]) for item in ordered], task_count) - 1
+        bisect_right([checkpoint_iteration(item) for item in ordered], task_count) - 1
     )
     lower = ordered[lower_index]
     upper = ordered[lower_index + 1] if lower_index + 1 < len(ordered) else None
-    if task_count == int(lower["iterations"]):
+    if task_count == checkpoint_iteration(lower):
         upper = lower
-    if upper is None and len(ordered) > 1:
-        lower = ordered[-2]
-        upper = ordered[-1]
-    if upper is None and len(ordered) == 1:
-        upper = lower
-        lower = {
-            "iterations": 0,
-            "sessions": upper.get("sessions", 0),
-            "median_cost_usd": 0.0,
-            "median_tokens": 0,
-        }
     if upper is None:
         return None
 
-    lower_iterations = int(lower["iterations"])
+    lower_iterations = checkpoint_iteration(lower)
     lower_tokens = lower.get("median_tokens")
-    upper_iterations = int(upper["iterations"])
+    upper_iterations = checkpoint_iteration(upper)
     upper_tokens = upper.get("median_tokens")
     if (
         not isinstance(lower_tokens, int)

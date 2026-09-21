@@ -1,0 +1,47 @@
+name: update pricing
+
+on:
+  schedule:
+    - cron: "17 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: update-pricing
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - run: python scripts/update_pricing.py
+      - id: changes
+        run: |
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.changes.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: automation/pricing-${{ github.run_id }}
+        run: |
+          if [ "$(gh pr list --state open --search 'in:title Update bundled model pricing' --json number --jq length)" -gt 0 ]; then
+            echo "A pricing update pull request is already open."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          git add NOTICE src/konvu_telemetry/pricing.json
+          git commit -m "Update bundled model pricing"
+          git push origin "$BRANCH"
+          gh pr create --base main --head "$BRANCH" --title "Update bundled model pricing" --body "Refreshes the validated LiteLLM pricing snapshot and its recorded SHA-256."

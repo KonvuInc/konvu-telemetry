@@ -25,8 +25,12 @@ from .analytics import (
 )
 from .config import (
     ACTIVITY_FRESHNESS_SECONDS,
+    DASHBOARD_SESSION_WINDOW_SECONDS,
     DEFAULT_LIVE_WINDOW_SECONDS,
+    FORECAST_MIN_SAMPLES,
     FORECAST_WINDOW,
+    MAX_CONTEXT_HISTORY_POINTS,
+    MAX_SUMMARY_ITERATION_POINTS,
     ROLLING_WINDOW_SECONDS,
     SESSION_FILE_RETENTION_SECONDS,
 )
@@ -63,12 +67,62 @@ from .pricing import (
 )
 from .storage import (
     home_dir,
+    parse_timestamp,
     pinned_sessions,
     session_path,
     snapshot_path,
     valid_session_id,
     write_private_json,
+    write_private_json_if_changed,
 )
+
+
+def sampled_rows(rows: list[object], limit: int) -> list[object]:
+    """Keep evenly spaced history rows, including both endpoints."""
+    if limit < 2 or len(rows) <= limit:
+        return rows
+    indexes = {round(index * (len(rows) - 1) / (limit - 1)) for index in range(limit)}
+    return [row for index, row in enumerate(rows) if index in indexes]
+
+
+def sampled_rows_with_tail(
+    rows: list[object], limit: int, tail_size: int
+) -> list[object]:
+    """Downsample old rows while retaining the exact recent comparison window."""
+    if limit <= 0:
+        return []
+    if len(rows) <= limit:
+        return rows
+    if limit <= tail_size:
+        return rows[-limit:]
+    return sampled_rows(rows[:-tail_size], limit - tail_size) + rows[-tail_size:]
+
+
+def summary_snapshot(snapshot: dict[str, object]) -> dict[str, object]:
+    """Remove inspector-only detail from the frequently polled dashboard payload."""
+    raw_sessions = snapshot.get("sessions")
+    generated_at = parse_timestamp(snapshot.get("generated_at"))
+    sessions: list[dict[str, object]] = []
+    for session in raw_sessions if isinstance(raw_sessions, list) else []:
+        if not isinstance(session, dict):
+            continue
+        last_activity = parse_timestamp(session.get("last_activity_at"))
+        if (
+            generated_at is not None
+            and last_activity is not None
+            and generated_at - last_activity > DASHBOARD_SESSION_WINDOW_SECONDS
+        ):
+            continue
+        summary = dict(session)
+        summary.pop("context_history", None)
+        summary.pop("subagents", None)
+        iterations = summary.get("iterations")
+        if isinstance(iterations, list):
+            summary["iterations"] = sampled_rows_with_tail(
+                iterations, MAX_SUMMARY_ITERATION_POINTS, 6
+            )
+        sessions.append(summary)
+    return {**snapshot, "sessions": sessions}
 
 
 def build_snapshot(
@@ -76,7 +130,9 @@ def build_snapshot(
 ) -> dict[str, object]:
     """Summarise currently active Claude Code and Codex transcripts."""
     prices = load_pricing()
-    baselines = load_baselines(now, prices)
+    baselines = load_baselines(
+        now, prices, refresh_in_background=live_state is not None
+    )
     grouped: dict[str, list[UsageEvent]] = defaultdict(list)
     prompt_times: dict[str, list[float]] = defaultdict(list)
     compact_times: dict[str, list[float]] = defaultdict(list)
@@ -216,8 +272,10 @@ def build_snapshot(
         completed_prompt_costs = [costs_by_prompt.get(start, 0.0) for start in starts]
         forecast_prompt_costs = completed_prompt_costs
         last_task_cost = completed_prompt_costs[-1] if completed_prompt_costs else 0.0
-        next_10_forecast: float | None = next_ten_forecast(
-            forecast_prompt_costs, "claude"
+        next_10_forecast: float | None = (
+            next_ten_forecast(forecast_prompt_costs, "claude")
+            if len(forecast_prompt_costs) >= FORECAST_MIN_SAMPLES
+            else None
         )
         last_prompt_start = starts[-1] if starts else None
         latest_compact = (
@@ -256,7 +314,7 @@ def build_snapshot(
                 else None
             )
             since_compact = True
-            if len(post_compact_costs) >= 3:
+            if len(post_compact_costs) >= FORECAST_MIN_SAMPLES:
                 next_10_forecast = next_ten_forecast(post_compact_costs, "claude")
                 forecast_mode = "post_compact"
             else:
@@ -333,7 +391,7 @@ def build_snapshot(
             cost_usd=comparison_cost,
             comparison_scope="model_effort_speed",
         )
-        claude_baseline = claude_configuration_baseline or claude_provider_baseline
+        claude_baseline = claude_configuration_baseline
         if since_compact and comparison_task_count < FORECAST_WINDOW:
             claude_baseline = None
             claude_provider_baseline = None
@@ -580,7 +638,11 @@ def build_snapshot(
                 costs_by_task[starts[task_index]] += cost
         task_costs = [costs_by_task.get(start, 0.0) for start in starts]
         last_task_cost = task_costs[-1] if task_costs else 0.0
-        next_10_forecast = next_ten_forecast(task_costs, "codex")
+        next_10_forecast = (
+            next_ten_forecast(task_costs, "codex")
+            if len(task_costs) >= FORECAST_MIN_SAMPLES
+            else None
+        )
         task_count = len(starts)
         all_events = [*events, *child_events]
         last_event = max(all_events, key=lambda event: event.timestamp)
@@ -617,7 +679,7 @@ def build_snapshot(
             cost_usd=sum(known_costs) + sum(known_child_costs),
             comparison_scope="model_effort_speed",
         )
-        codex_baseline = codex_configuration_baseline or codex_provider_baseline
+        codex_baseline = codex_configuration_baseline
         if total_cost_status != "complete":
             codex_baseline = None
             codex_provider_baseline = None
@@ -726,6 +788,12 @@ def build_snapshot(
     }
     enrich_snapshot(snapshot, claude_transcripts, codex_transcripts, now)
     locate_compactions(snapshot)
+    for session in sessions:
+        history = session.get("context_history")
+        if isinstance(history, list):
+            session["context_history"] = sampled_rows(
+                history, MAX_CONTEXT_HISTORY_POINTS
+            )
     account_quotas = snapshot.get("account_quotas")
     apply_notification_tracking(
         sessions,
@@ -740,9 +808,9 @@ def build_snapshot(
 
 def write_snapshot(snapshot: dict[str, object]) -> None:
     destination = snapshot_path()
-    write_private_json(destination, snapshot)
     sessions = snapshot.get("sessions")
     if not isinstance(sessions, list):
+        write_private_json(destination, summary_snapshot(snapshot))
         return
     for session in sessions:
         if not isinstance(session, dict):
@@ -755,7 +823,8 @@ def write_snapshot(snapshot: dict[str, object]) -> None:
             session_destination = session_path(provider, session_id)
         except ValueError:
             continue
-        write_private_json(session_destination, session)
+        write_private_json_if_changed(session_destination, session)
+    write_private_json(destination, summary_snapshot(snapshot))
     sessions_directory = home_dir() / "sessions"
     cutoff = time.time() - SESSION_FILE_RETENTION_SECONDS
     try:

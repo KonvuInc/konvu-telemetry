@@ -22,6 +22,8 @@ const state = {
   selected: null,
   chart: "cumulative",
   error: false,
+  snapshotEtag: null,
+  detailRequest: 0,
   now: Date.now(),
   lastOpener: null,
 };
@@ -95,13 +97,14 @@ function activity(s) {
 function comparableRows(s) {
   const rows = series(s);
   const model = s.forecast_basis?.model || s.model,
-    effort = s.forecast_basis?.effort || s.reasoning_effort;
-  if (!model || !effort) return [];
+    effort = s.forecast_basis?.effort || s.reasoning_effort,
+    speed = s.forecast_basis?.speed || s.speed;
+  if (!model || !effort || !speed) return [];
   const recent = [];
   for (let i = rows.length - 1; i >= 0; i--) {
     const q = rows[i];
     if (i === rows.length - 1 && q.completed === false) continue;
-    if (q.completed !== true || q.priced !== true || q.model !== model || q.reasoning_effort !== effort) break;
+    if (q.completed !== true || q.priced !== true || q.model !== model || q.reasoning_effort !== effort || q.speed !== speed) break;
     recent.unshift(q);
   }
   return recent;
@@ -124,8 +127,8 @@ function assess(s) {
     label: c ? "No sharp cost rise" : "Limited comparison data",
     action: "Review session",
     evidence: c
-      ? "Recent prompts compared with earlier prompts in this session, on the same model and effort."
-      : "A cost trend needs six completed, priced prompts with recorded matching model and effort.",
+      ? "Recent prompts compared with earlier prompts in this session, on the same model, effort, and speed."
+      : "A cost trend needs six completed, priced prompts with recorded matching model, effort, and speed.",
     score: f || 0,
   };
   if (c && c.ratio >= 2 && c.after - c.before >= 0.1) {
@@ -133,7 +136,7 @@ function assess(s) {
     result.label = "Cost per prompt is rising";
     result.action = "Review the more expensive prompts";
     result.evidence =
-      "Last 3 prompts averaged " + money(c.after) + " vs " + money(c.before) + " before (" + c.ratio.toFixed(1) + "×), on the same model and effort.";
+      "Last 3 prompts averaged " + money(c.after) + " vs " + money(c.before) + " before (" + c.ratio.toFixed(1) + "×), on the same model, effort, and speed.";
     result.score = 100 + (f || 0);
   }
   const repeated = compacts(s).filter((e) => elapsed(e.timestamp) >= 0 && elapsed(e.timestamp) < 1800000);
@@ -175,15 +178,6 @@ function sortedRows() {
 }
 const effort = (s) => s.reasoning_effort || s.effort || null;
 const speed = (s) => s.service_tier || s.speed || null;
-function matchesConfiguration(a, b) {
-  const configuration = a.comparison_configuration;
-  return (
-    !!configuration &&
-    configuration.model === b.model &&
-    configuration.effort === b.effort &&
-    (!speed(b) || !configuration.speed || configuration.speed === speed(b))
-  );
-}
 function configurationLabel(s) {
   return [s.model || providerName(s.provider), effort(s) ? effort(s) + " effort" : "Effort unrecorded", speed(s)].filter(Boolean).join(" · ");
 }
@@ -337,27 +331,6 @@ function donut(s) {
     "</span></div>"
   );
 }
-function checkpointComparison(s) {
-  const curve = configurationCurve(s);
-  const matched = state.baselineMode === "matched";
-  const points = matched ? curve?.points || [] : curvePoints(state.payload?.baselines?.providers?.[s.provider]);
-  const prompts = count(s),
-    spent = cost(s),
-    first = points[0],
-    last = points.at(-1);
-  const median = medianCostAt(points, prompts);
-  if (prompts <= 0 || spent === null || !first || !last || !nonnegative(median) || median <= 0) return null;
-  return {
-    ratio: spent / median,
-    matched,
-    iteration: prompts,
-    samples: prompts <= first.iterations ? first.sessions : last.sessions,
-    actual: spent,
-    median,
-    early: prompts < first.iterations,
-    extrapolated: prompts > last.iterations,
-  };
-}
 function recordedBaselineComparison(s) {
   const scope = state.baselineMode === "matched" ? "model_effort_speed" : "provider";
   const baseline = s.baselines?.[scope] || (s.baseline?.scope === scope ? s.baseline : null);
@@ -374,46 +347,24 @@ function recordedBaselineComparison(s) {
   };
 }
 function spendComparison(s) {
-  const c = recordedBaselineComparison(s) || checkpointComparison(s);
+  const c = recordedBaselineComparison(s);
   if (!c) {
-    const prompts = Number(s.task_count || 0);
     return {
       ratio: null,
-      label:
-        prompts < 10
-          ? "Median starts after 10 prompts"
-          : state.baselineMode === "matched" && !configurationCurve(s)?.points.length
-            ? "Need 3 matching model + effort + speed sessions"
-            : "Waiting for a comparable checkpoint",
+      label: "Collector has no comparable baseline",
       detail:
-        prompts < 10
-          ? "Your median has no checkpoint before 10 prompts yet."
-          : "A comparison needs recorded spend at the same iteration count as the selected median. Model, effort, and speed comparisons require at least three matching sessions.",
+        state.baselineMode === "matched"
+          ? "The collector recalculates this from your stored local median every six hours. Alerts use the general provider median."
+          : "The collector recalculates this from your stored local median every six hours. Alerts use this general provider median.",
     };
   }
-  const label = (c.matched ? "model + effort + speed median" : providerName(s.provider) + " general median") + (c.early ? " estimate" : "");
+  const label = c.matched ? "model + effort + speed median" : providerName(s.provider) + " general median";
   return {
     ratio: c.ratio,
     label: c.ratio.toFixed(2) + "× " + label,
-    detail: c.recorded
-      ? "Current recorded spend against the same local median used in the CLI."
-      : money(c.actual) +
-        " recorded at " +
-        c.iteration +
-        " prompts vs. " +
-        money(c.median) +
-        " median across " +
-        c.samples +
-        " sessions in the last " +
-        (state.payload?.baselines?.lookback_days || 60) +
-        " days." +
-        (c.early
-          ? " This is prorated from the first 10-prompt checkpoint."
-          : c.extrapolated
-            ? " This extends the same median curve past its final checkpoint."
-            : c.matched
-              ? ""
-              : " General usage includes all models, efforts, and speeds within this provider."),
+    detail: c.matched
+      ? "Current recorded spend against the matched local median. Alerts use the general provider median."
+      : "Current recorded spend against the same general provider median used in alerts.",
   };
 }
 function roundedDollarCeiling(value) {
@@ -581,12 +532,6 @@ function curvePoints(b) {
         .sort((a, b) => a.iterations - b.iterations)
     : [];
 }
-function configurationCurve(s) {
-  const configs = state.payload?.baselines?.configurations?.[s.provider];
-  if (!configs || typeof configs !== "object") return null;
-  const match = Object.values(configs).find((b) => b && matchesConfiguration(s, b));
-  return match ? { ...match, points: curvePoints(match.checkpoints).filter((p) => p.sessions >= 3) } : null;
-}
 function graphBaselines() {
   return ["claude", "codex"]
     .filter((p) => state.provider === "all" || state.provider === p)
@@ -619,10 +564,11 @@ function medianCostAt(points, n) {
 function medianGeometry(points, xmax, ymax) {
   const rows = curvePoints(points);
   if (!rows.length) return null;
-  const xs = [0, ...rows.map((p) => p.iterations).filter((n) => n > 0 && n < xmax), xmax];
+  const endpointX = Math.min(xmax, rows.at(-1).iterations);
+  const xs = [0, ...rows.map((p) => p.iterations).filter((n) => n > 0 && n < endpointX), endpointX];
   const curve = xs.map((iterations) => ({ iterations, median_cost_usd: medianCostAt(rows, iterations) }));
-  let exitX = xmax;
-  if (medianCostAt(rows, xmax) > ymax) {
+  let exitX = endpointX;
+  if (medianCostAt(rows, endpointX) > ymax) {
     const lo = xs.reduce((acc, n) => (medianCostAt(rows, n) <= ymax ? n : acc), 0);
     const hi = xs.find((n) => medianCostAt(rows, n) > ymax);
     if (hi !== undefined) {
@@ -1254,11 +1200,19 @@ function bindEvents() {
 async function refresh() {
   if (axisDragging) return;
   try {
-    const response = await fetch("/api/live-sessions", { cache: "no-store" });
+    const headers = state.snapshotEtag ? { "If-None-Match": state.snapshotEtag } : {};
+    const response = await fetch("/api/live-sessions", { cache: "no-store", headers });
+    if (response.status === 304) {
+      state.error = false;
+      render();
+      return;
+    }
     if (!response.ok) throw new Error("Collector request failed");
     const payload = await response.json();
     if (!payload || !Array.isArray(payload.sessions) || !finite(Date.parse(payload.generated_at))) throw new Error("Invalid snapshot");
+    state.snapshotEtag = response.headers.get("ETag");
     state.payload = payload;
+    if (state.selected) await loadSessionDetails(state.selected);
     state.error = false;
     browserAlerts(payload);
   } catch {
@@ -1623,7 +1577,24 @@ function renderInspector() {
   $("#inspector-body").scrollTop = scroll;
   if (!wasOpen) $("#close").focus();
 }
-function openSession(id, opener) {
+async function loadSessionDetails(id) {
+  const session = allRows().find((row) => keyOf(row) === id || row.id === id);
+  if (!session) return;
+  const request = ++state.detailRequest;
+  try {
+    const query = new URLSearchParams({ provider: session.provider, session: session.id });
+    const response = await fetch("/api/session?" + query, { cache: "no-store" });
+    if (!response.ok) return;
+    const detail = await response.json();
+    if (request !== state.detailRequest) return;
+    if (!detail || detail.id !== session.id || detail.provider !== session.provider) return;
+    const index = state.payload.sessions.findIndex((row) => keyOf(row) === keyOf(session));
+    if (index >= 0) state.payload.sessions[index] = { ...session, ...detail };
+  } catch {
+    return;
+  }
+}
+async function openSession(id, opener) {
   hideGraphTip();
   state.lastOpener = opener;
   state.selected = id;
@@ -1631,8 +1602,11 @@ function openSession(id, opener) {
   $("#inspector-body").scrollTop = 0;
   saveUrl();
   renderInspector();
+  await loadSessionDetails(id);
+  if (state.selected === id) renderInspector();
 }
 function closeSession() {
+  state.detailRequest++;
   state.selected = null;
   saveUrl();
   renderInspector();
@@ -1773,7 +1747,7 @@ function browserAlerts(payload) {
     const key = "konvu-alert-" + session.provider + "-" + session.id;
     if (Number(localStorage.getItem(key) || 0) >= alert.sequence) continue;
     localStorage.setItem(key, String(alert.sequence));
-    const overhead = Math.round(session.baseline?.cost_overhead_percent || 0);
+    const overhead = Math.round(alert.overhead_percent || 0);
     const notification = new Notification(providerName(session.provider) + " session running hot", {
       body:
         "💸 $" +

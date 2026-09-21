@@ -9,7 +9,13 @@ import math
 from pathlib import Path
 from typing import Literal
 
-from .config import FILE_CACHE_LIMIT
+from .config import (
+    FILE_CACHE_LIMIT,
+    FORECAST_MIN_SAMPLES,
+    FORECAST_WINDOW,
+    MAX_PARSED_RECORD_BYTES,
+)
+from .live import IncrementalLiveState
 from .storage import claude_quota_path
 
 
@@ -40,9 +46,20 @@ class TranscriptTelemetry:
         default_factory=dict
     )
     task_tools: dict[float, int] = field(default_factory=dict)
+    latest_task: float | None = None
+    last_compacted: float | None = None
 
 
-_CACHE: dict[tuple[str, str], tuple[int, int, TranscriptTelemetry]] = {}
+@dataclass
+class TelemetryCacheEntry:
+    identity: tuple[int, int]
+    offset: int
+    size: int
+    mtime_ns: int
+    telemetry: TranscriptTelemetry
+
+
+_CACHE: dict[tuple[str, str], TelemetryCacheEntry] = {}
 
 
 def _number(value: object) -> float | None:
@@ -155,20 +172,57 @@ def _claude_quota_snapshot(now: float) -> dict[str, object] | None:
     }
 
 
-def _read_telemetry(path: Path, provider: Provider) -> TranscriptTelemetry:
-    result = TranscriptTelemetry()
-    result.is_subagent = provider == "claude" and (
-        path.parent.name == "subagents" or path.name.startswith("agent-")
-    )
-    latest_task: float | None = None
-    last_compacted: float | None = None
+def _read_telemetry(
+    path: Path,
+    provider: Provider,
+    result: TranscriptTelemetry | None = None,
+    offset: int = 0,
+) -> tuple[TranscriptTelemetry, int]:
+    result = result or TranscriptTelemetry()
+    next_offset = offset
+    if offset == 0:
+        result.is_subagent = provider == "claude" and (
+            path.parent.name == "subagents" or path.name.startswith("agent-")
+        )
     try:
-        with path.open(encoding="utf-8", errors="replace") as transcript:
-            for line in transcript:
-                try:
-                    record = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
+        with path.open("rb") as transcript:
+            transcript.seek(offset)
+            while True:
+                start = transcript.tell()
+                raw_line = transcript.readline(MAX_PARSED_RECORD_BYTES + 1)
+                if not raw_line:
+                    break
+                oversized = False
+                if not raw_line.endswith(b"\n"):
+                    if len(raw_line) <= MAX_PARSED_RECORD_BYTES:
+                        transcript.seek(start)
+                        break
+                    oversized = True
+                    prefix = raw_line[:MAX_PARSED_RECORD_BYTES]
+                    suffix = b""
+                    while True:
+                        remainder = transcript.readline(MAX_PARSED_RECORD_BYTES + 1)
+                        if not remainder:
+                            transcript.seek(start)
+                            return result, start
+                        suffix = (suffix + remainder)[-MAX_PARSED_RECORD_BYTES:]
+                        if remainder.endswith(b"\n"):
+                            break
+                    raw_line = prefix + suffix
+                next_offset = transcript.tell()
+                if oversized:
+                    record = (
+                        IncrementalLiveState._lightweight_claude_prompt(raw_line)
+                        if provider == "claude"
+                        else IncrementalLiveState._lightweight_codex_item(raw_line)
+                    )
+                    if record is None:
+                        continue
+                else:
+                    try:
+                        record = json.loads(raw_line)
+                    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+                        continue
                 if not isinstance(record, dict):
                     continue
                 timestamp = _timestamp(record.get("timestamp"))
@@ -288,27 +342,28 @@ def _read_telemetry(path: Path, provider: Provider) -> TranscriptTelemetry:
                         )
                     )
                     if event_type == "task_started":
-                        latest_task = timestamp
+                        result.latest_task = timestamp
                         result.task_tools.setdefault(timestamp, 0)
                     elif event_type == "task_complete":
                         result.completions.append(
                             (timestamp, turn_id if isinstance(turn_id, str) else None)
                         )
-                if event_type == "item_completed" and latest_task is not None:
+                if event_type == "item_completed" and result.latest_task is not None:
                     item = payload.get("item")
                     if (
                         isinstance(item, dict)
                         and isinstance(item.get("type"), str)
                         and item["type"] in CODEX_TOOL_ITEMS
                     ):
-                        result.task_tools[latest_task] += 1
+                        result.task_tools[result.latest_task] += 1
                 if record_type == "compacted":
                     result.compactions.append(
                         {"timestamp": _iso(timestamp), "source": "codex_compacted"}
                     )
-                    last_compacted = timestamp
+                    result.last_compacted = timestamp
                 elif event_type == "context_compacted" and (
-                    last_compacted is None or not 0 <= timestamp - last_compacted <= 1
+                    result.last_compacted is None
+                    or not 0 <= timestamp - result.last_compacted <= 1
                 ):
                     result.compactions.append(
                         {
@@ -332,21 +387,33 @@ def _read_telemetry(path: Path, provider: Provider) -> TranscriptTelemetry:
                             )
     except (OSError, UnicodeError):
         pass
-    return result
+    return result, next_offset
 
 
 def parse_telemetry(path: Path, provider: Provider) -> TranscriptTelemetry:
-    """Cache sanitized metadata until a transcript's size or mtime changes."""
+    """Incrementally cache sanitized metadata for one append-only transcript."""
     try:
         stat = path.stat()
     except OSError:
         return TranscriptTelemetry()
     key = provider, str(path)
+    identity = stat.st_dev, stat.st_ino
     cached = _CACHE.get(key)
-    if cached is not None and cached[:2] == (stat.st_size, stat.st_mtime_ns):
-        return cached[2]
-    parsed = _read_telemetry(path, provider)
-    _CACHE[key] = stat.st_size, stat.st_mtime_ns, parsed
+    if (
+        cached is not None
+        and cached.identity == identity
+        and stat.st_size >= cached.size
+    ):
+        if cached.size == stat.st_size and cached.mtime_ns == stat.st_mtime_ns:
+            return cached.telemetry
+        parsed, offset = _read_telemetry(
+            path, provider, cached.telemetry, cached.offset
+        )
+    else:
+        parsed, offset = _read_telemetry(path, provider)
+    _CACHE[key] = TelemetryCacheEntry(
+        identity, offset, stat.st_size, stat.st_mtime_ns, parsed
+    )
     if len(_CACHE) > FILE_CACHE_LIMIT:
         _CACHE.pop(next(iter(_CACHE)), None)
     return parsed
@@ -391,9 +458,12 @@ def _activity(
 
 
 def _comparable_forecast(
-    session: dict[str, object], rows: list[TranscriptTelemetry], replace_forecast: bool
+    session: dict[str, object],
+    rows: list[TranscriptTelemetry],
+    replace_forecast: bool,
+    global_fallback: tuple[float, int] | None = None,
 ) -> None:
-    """Forecast only completed, priced prompts with the latest recorded configuration."""
+    """Forecast from matching prompts, then provider history, then sparse session data."""
     configurations = sorted(
         (configuration for row in rows for configuration in row.configurations),
         key=lambda item: item[0],
@@ -444,9 +514,33 @@ def _comparable_forecast(
                 "priced": iteration.get("priced") is True,
             }
         )
-    latest = configurations[-1] if configurations else None
-    latest_model = latest[1] if latest else None
-    latest_effort = latest[2] if latest else None
+    latest_timestamp = configurations[-1][0] if configurations else None
+    latest_configurations = {
+        (model, effort)
+        for timestamp, model, effort in configurations
+        if timestamp == latest_timestamp
+    }
+    latest_model, latest_effort = (
+        next(iter(latest_configurations))
+        if len(latest_configurations) == 1
+        else (None, None)
+    )
+    latest_speed = session.get("speed")
+    compact_events = session.get("compact_events")
+    latest_compact = (
+        max(
+            (
+                timestamp
+                for event in compact_events
+                if isinstance(event, dict)
+                for timestamp in [_timestamp(event.get("timestamp"))]
+                if timestamp is not None
+            ),
+            default=None,
+        )
+        if isinstance(compact_events, list)
+        else None
+    )
     if latest_effort is not None:
         session["reasoning_effort"] = latest_effort
     comparable = [
@@ -456,35 +550,127 @@ def _comparable_forecast(
         and latest_effort is not None
         and iteration.get("model") == latest_model
         and iteration.get("reasoning_effort") == latest_effort
+        and iteration.get("speed") == latest_speed
+        and (
+            session.get("since_compact") is not True
+            or latest_compact is None
+            or (_timestamp(iteration.get("started_at")) or 0) > latest_compact
+        )
         and iteration.get("completed") is True
         and iteration.get("priced") is True
         and _number(iteration.get("cost_usd")) is not None
-    ][-10:]
+    ][-FORECAST_WINDOW:]
+    sufficient = len(comparable) >= FORECAST_MIN_SAMPLES
+    if not replace_forecast:
+        precompact_samples = sum(
+            1
+            for iteration in iterations
+            for started_at in [_timestamp(iteration.get("started_at"))]
+            if latest_compact is not None
+            and started_at is not None
+            and started_at <= latest_compact
+            and iteration.get("priced") is True
+        )
+        forecast = session.get("projected_next_10_tasks_usd")
+        if isinstance(forecast, (int, float)):
+            session["forecast_basis"] = {
+                "method": "context_scaled_precompact",
+                "sample_count": precompact_samples,
+                "model": None,
+                "effort": None,
+                "speed": None,
+                "coverage": "fully_priced",
+                "reason": None,
+            }
+            return
+    if sufficient:
+        session["forecast_basis"] = {
+            "method": "same_config_completed_prompts",
+            "sample_count": len(comparable),
+            "model": latest_model,
+            "effort": latest_effort,
+            "speed": latest_speed,
+            "coverage": "fully_priced",
+            "reason": None,
+        }
+        session["projected_next_10_tasks_usd"] = round(
+            sum(float(row["cost_usd"]) for row in comparable)
+            / len(comparable)
+            * FORECAST_WINDOW,
+            6,
+        )
+        return
+    if global_fallback is not None:
+        forecast, samples = global_fallback
+        session["projected_next_10_tasks_usd"] = round(forecast, 6)
+        session["forecast_basis"] = {
+            "method": "provider_median_history",
+            "sample_count": samples,
+            "model": None,
+            "effort": None,
+            "speed": None,
+            "coverage": "historical_fallback",
+            "reason": "sparse_session_history",
+        }
+        return
+    recent_completed = [
+        iteration
+        for iteration in iterations
+        if iteration.get("completed") is True
+        and iteration.get("priced") is True
+        and _number(iteration.get("cost_usd")) is not None
+    ][-FORECAST_WINDOW:]
+    if recent_completed:
+        session["projected_next_10_tasks_usd"] = round(
+            sum(float(row["cost_usd"]) for row in recent_completed)
+            / len(recent_completed)
+            * FORECAST_WINDOW,
+            6,
+        )
+        session["forecast_basis"] = {
+            "method": "sparse_session_prompts",
+            "sample_count": len(recent_completed),
+            "model": None,
+            "effort": None,
+            "speed": None,
+            "coverage": "session_fallback",
+            "reason": "no_provider_history",
+        }
+        return
+    session["projected_next_10_tasks_usd"] = None
     session["forecast_basis"] = {
-        "method": "same_config_completed_prompts"
-        if replace_forecast
-        else "rolling_last_10_prompts",
-        "sample_count": len(comparable),
+        "method": "unavailable",
+        "sample_count": 0,
         "model": latest_model,
         "effort": latest_effort,
-        "coverage": "fully_priced" if comparable else "unavailable",
-        "reason": None
-        if comparable
-        else "unknown_configuration"
-        if latest_model is None or latest_effort is None
-        else "no_comparable_completed_prompts",
+        "speed": latest_speed,
+        "coverage": "insufficient_history",
+        "reason": "no_completed_prompt_or_provider_history",
     }
-    if replace_forecast:
-        session["projected_next_10_tasks_usd"] = (
-            round(
-                sum(float(row["cost_usd"]) for row in comparable)
-                / len(comparable)
-                * 10,
-                6,
-            )
-            if comparable
-            else None
-        )
+
+
+def _provider_forecast_fallback(
+    snapshot: dict[str, object], provider: Provider
+) -> tuple[float, int] | None:
+    baselines = snapshot.get("baselines")
+    forecasts = baselines.get("forecasts") if isinstance(baselines, dict) else None
+    provider_forecasts = (
+        forecasts.get("provider_median_next_10")
+        if isinstance(forecasts, dict)
+        else None
+    )
+    fallback = (
+        provider_forecasts.get(provider)
+        if isinstance(provider_forecasts, dict)
+        else None
+    )
+    if not isinstance(fallback, dict):
+        return None
+    value = _number(fallback.get("median_next_10_usd"))
+    samples = fallback.get("sessions")
+    if value is None or not isinstance(samples, int) or samples < 1:
+        return None
+    return value, samples
 
 
 def enrich_snapshot(
@@ -500,6 +686,12 @@ def enrich_snapshot(
         ("claude", claude_paths),
         ("codex", codex_paths),
     )
+    active_cache_keys = {
+        (provider, str(path)) for provider, paths in sources for path in paths
+    }
+    for key in list(_CACHE):
+        if key not in active_cache_keys:
+            _CACHE.pop(key, None)
     for provider, paths in sources:
         for path in paths:
             row = parse_telemetry(path, provider)
@@ -539,8 +731,8 @@ def enrich_snapshot(
         _comparable_forecast(
             session,
             rows,
-            not isinstance(session.get("projected_next_10_tasks_usd"), (int, float))
-            and session.get("forecast_mode") != "warming_up",
+            session.get("forecast_mode") != "warming_up",
+            _provider_forecast_fallback(snapshot, session_provider),
         )
         if session_provider == "codex":
             task_tools = {

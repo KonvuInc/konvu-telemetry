@@ -1,8 +1,10 @@
 include ARCHITECTURE.md
+include ACCURACY.md
 include CHANGELOG.md
 include CONTRIBUTING.md
 include LICENSE
 include NOTICE
+include PERFORMANCE.md
 include README.md
 include RELEASING.md
 include SECURITY.md

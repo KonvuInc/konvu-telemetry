@@ -85,22 +85,41 @@ def ensure_private_directory(path: Path) -> None:
 
 def write_private_json(path: Path, value: object) -> None:
     """Atomically write local telemetry state with user-only permissions."""
+    payload = json.dumps(value, separators=(",", ":")).encode()
     ensure_private_directory(path.parent)
     with _WRITE_LOCK:
-        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        _write_private_bytes(path, payload)
+
+
+def write_private_json_if_changed(path: Path, value: object) -> bool:
+    """Atomically write JSON only when its serialized contents changed."""
+    payload = json.dumps(value, separators=(",", ":")).encode()
+    ensure_private_directory(path.parent)
+    with _WRITE_LOCK:
         try:
-            with temporary.open("w", encoding="utf-8") as handle:
-                os.chmod(temporary, 0o600)
-                json.dump(value, handle, separators=(",", ":"))
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, path)
-            try:
-                path.chmod(0o600)
-            except OSError:
-                pass
-        finally:
-            temporary.unlink(missing_ok=True)
+            if path.read_bytes() == payload:
+                return False
+        except OSError:
+            pass
+        _write_private_bytes(path, payload)
+    return True
+
+
+def _write_private_bytes(path: Path, payload: bytes) -> None:
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with temporary.open("wb") as handle:
+            os.chmod(temporary, 0o600)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def pinned_path() -> Path:

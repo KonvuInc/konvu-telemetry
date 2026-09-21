@@ -525,11 +525,21 @@ class IncrementalLiveState:
             except OSError:
                 continue
             root_transcripts: dict[str, Path] = {}
+            child_transcripts: dict[str, set[Path]] = {}
             for transcript in transcripts:
                 try:
-                    if transcript.parent.resolve(strict=True).parent == resolved_root:
+                    relative = transcript.resolve(strict=True).relative_to(
+                        resolved_root
+                    )
+                    if len(relative.parts) == 2:
                         root_transcripts[transcript.stem] = transcript
+                    elif len(relative.parts) > 2:
+                        child_transcripts.setdefault(relative.parts[1], set()).add(
+                            transcript
+                        )
                 except OSError:
+                    continue
+                except ValueError:
                     continue
             active_ids: set[str] = set()
             for transcript in transcripts:
@@ -546,10 +556,7 @@ class IncrementalLiveState:
                 if root_transcript is None:
                     continue
                 claude_paths.add(root_transcript)
-                session_directory = root_transcript.parent / session_id
-                claude_paths.update(
-                    path for path in transcripts if session_directory in path.parents
-                )
+                claude_paths.update(child_transcripts.get(session_id, ()))
         for path in claude_paths:
             self._refresh_claude(path)
         codex_paths: list[Path] = []
