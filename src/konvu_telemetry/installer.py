@@ -22,6 +22,9 @@ from .service import load_health
 LABEL = "com.konvu.telemetry"
 PORT = 7824
 LAUNCHER_NAME = "konvu-launcher"
+CLAUDE_STATUSLINE_NAME = "konvu-claude-statusline"
+CLAUDE_STATUSLINE_ORIGINAL_NAME = "konvu-claude-statusline-original"
+CLAUDE_STATUSLINE_STATE_NAME = "konvu-claude-statusline-state.json"
 CONSOLE_COMMAND = "konvu-telemetry"
 HOOK_TIMEOUT_SECONDS = 5
 
@@ -43,6 +46,18 @@ def launch_agent_path() -> Path:
 
 def launcher_path() -> Path:
     return telemetry_home() / LAUNCHER_NAME
+
+
+def claude_statusline_path() -> Path:
+    return telemetry_home() / CLAUDE_STATUSLINE_NAME
+
+
+def claude_statusline_original_path() -> Path:
+    return telemetry_home() / CLAUDE_STATUSLINE_ORIGINAL_NAME
+
+
+def claude_statusline_state_path() -> Path:
+    return telemetry_home() / CLAUDE_STATUSLINE_STATE_NAME
 
 
 def console_launcher() -> Path:
@@ -165,25 +180,73 @@ def is_konvu_command(value: object) -> bool:
     return Path(arguments[0]).expanduser() == launcher_path()
 
 
+def is_konvu_statusline(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        arguments = shlex.split(value)
+    except ValueError:
+        return False
+    if not arguments:
+        return False
+    command = Path(arguments[0]).expanduser()
+    return command in {launcher_path(), claude_statusline_path()}
+
+
+def write_claude_statusline_wrapper(command: str) -> None:
+    """Write private scripts that replay an existing status line before telemetry."""
+    original = claude_statusline_original_path()
+    wrapper = claude_statusline_path()
+    for path, contents in (
+        (original, f"#!/bin/sh\n{command}\n"),
+        (
+            wrapper,
+            "#!/bin/sh\n"
+            "payload=$(cat)\n"
+            f"printf '%s' \"$payload\" | {shlex.quote(str(original))}\n"
+            f"printf '%s' \"$payload\" | {command_text('statusline')}\n",
+        ),
+    ):
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        try:
+            temporary.write_text(contents, encoding="utf-8")
+            temporary.chmod(0o700)
+            os.replace(temporary, path)
+            path.chmod(0o700)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
 def install_claude_statusline(
     ensure_launcher: bool = True, create_backup: bool = True
-) -> Literal["installed", "preserved"]:
+) -> Literal["installed"]:
     if ensure_launcher:
         install_launcher()
     path = Path.home() / ".claude" / "settings.json"
     settings = load_json_object(path)
     existing = settings.get("statusLine")
-    if existing is not None and not (
-        isinstance(existing, dict) and is_konvu_command(existing.get("command"))
-    ):
-        return "preserved"
+    command = existing.get("command") if isinstance(existing, dict) else None
+    if existing is not None and not isinstance(command, str):
+        raise ValueError(f"Expected statusLine.command to be a string in {path}")
     if create_backup:
         backup(path)
-    settings["statusLine"] = {
-        "type": "command",
-        "command": command_text("statusline"),
-        "refreshInterval": 60,
-    }
+    statusline: dict[str, object] = dict(existing) if isinstance(existing, dict) else {}
+    statusline.update(
+        {
+            "type": "command",
+            "command": command_text("statusline"),
+            "refreshInterval": 60,
+        }
+    )
+    if command is not None and not is_konvu_statusline(command):
+        write_claude_statusline_wrapper(command)
+        write_json(claude_statusline_state_path(), {"statusLine": existing})
+        statusline["command"] = shlex.quote(str(claude_statusline_path()))
+    elif command != shlex.quote(str(claude_statusline_path())):
+        claude_statusline_path().unlink(missing_ok=True)
+        claude_statusline_original_path().unlink(missing_ok=True)
+        claude_statusline_state_path().unlink(missing_ok=True)
+    settings["statusLine"] = statusline
     write_json(path, settings)
     return "installed"
 
@@ -337,6 +400,9 @@ def setup(interval: int, open_browser: bool) -> dict[str, str]:
         capture_file(claude_path),
         capture_file(codex_path),
         capture_file(launcher_path()),
+        capture_file(claude_statusline_path()),
+        capture_file(claude_statusline_original_path()),
+        capture_file(claude_statusline_state_path()),
         capture_file(launch_agent_path()),
     ]
     backups = [
@@ -367,14 +433,26 @@ def remove_claude_statusline(create_backup: bool = True) -> bool:
     path = Path.home() / ".claude" / "settings.json"
     settings = load_json_object(path)
     statusline = settings.get("statusLine")
-    if not isinstance(statusline, dict) or not is_konvu_command(
+    if not isinstance(statusline, dict) or not is_konvu_statusline(
         statusline.get("command")
     ):
         return False
     if create_backup:
         backup(path)
-    settings.pop("statusLine", None)
+    state_path = claude_statusline_state_path()
+    if statusline.get("command") == shlex.quote(str(claude_statusline_path())):
+        state = load_json_object(state_path) if state_path.is_file() else {}
+        original = state.get("statusLine")
+        if isinstance(original, dict):
+            settings["statusLine"] = original
+        else:
+            settings.pop("statusLine", None)
+    else:
+        settings.pop("statusLine", None)
     write_json(path, settings)
+    claude_statusline_path().unlink(missing_ok=True)
+    claude_statusline_original_path().unlink(missing_ok=True)
+    state_path.unlink(missing_ok=True)
     return True
 
 
@@ -419,6 +497,9 @@ def uninstall() -> dict[str, bool]:
         capture_file(claude_path),
         capture_file(codex_path),
         capture_file(launcher_path()),
+        capture_file(claude_statusline_path()),
+        capture_file(claude_statusline_original_path()),
+        capture_file(claude_statusline_state_path()),
         capture_file(launch_agent_path()),
     ]
     backups = [
