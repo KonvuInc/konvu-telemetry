@@ -369,11 +369,8 @@ def codex_hook() -> None:
         and task_count >= 5
         and codex_display_is_worth_showing(session)
     )
-    if not show_usage and not quota_text:
-        print(json.dumps({"suppressOutput": True}))
-        return
     if not show_usage:
-        print(json.dumps({"systemMessage": f"\n╭─ Konvu usage\n│ {quota_text}\n╰─"}))
+        print(json.dumps({"suppressOutput": True}))
         return
     norm = baseline_text(session)
     complete = session.get("cost_status") == "complete"
@@ -393,10 +390,9 @@ def codex_hook() -> None:
     lines = [
         "╭─ Konvu usage",
         f"│ 💸 {total_text} total · {forecast_text}",
-        f"│ 🧠 {context_usage_text(session)}",
+        f"│ 🧠 {context_usage_text(session)}"
+        + (f" · {quota_text}" if quota_text else ""),
     ]
-    if quota_text:
-        lines.append(f"│ ⏳ {quota_text}")
     subagents = subagent_usage_text(session)
     if subagents:
         lines.insert(2, f"│ {subagents}")
