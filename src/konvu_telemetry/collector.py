@@ -12,7 +12,7 @@ from .analytics import (
 from .config import DASHBOARD_PORT
 from .display import claude_hook, codex_hook, statusline
 from .exporter import write_normalized_events
-from .service import run_local_service, write_health
+from .service import open_dashboard, run_local_service, write_health
 from .snapshot import build_snapshot, write_snapshot
 
 
@@ -44,7 +44,7 @@ def main() -> None:
         write_snapshot(build_snapshot(now))
         write_health(now)
     elif args.command == "serve":
-        run_local_service(max(1, args.interval), args.port, False)
+        run_local_service(max(1, args.interval), args.port)
     elif args.command == "normalize":
         write_normalized_events()
     elif args.command == "codex-hook":
@@ -54,6 +54,6 @@ def main() -> None:
     elif args.command == "backtest-next-ten":
         backtest_next_ten()
     elif args.command == "dashboard":
-        run_local_service(max(1, args.interval), args.port, True)
+        open_dashboard(args.port)
     else:
         statusline()

@@ -51,7 +51,9 @@ from konvu_telemetry.live import CodexLiveFile, IncrementalLiveState
 from konvu_telemetry.models import Usage, UsageEvent
 from konvu_telemetry.parsers import (
     assistant_event,
+    claude_hook_transcript,
     codex_events_in_file,
+    codex_hook_transcript,
     codex_subagent_parent,
     events_in_file,
     is_human_claude_prompt,
@@ -89,6 +91,37 @@ from konvu_telemetry.storage import (
 
 
 class ServiceTests(unittest.TestCase):
+    def test_hook_transcripts_must_match_the_claimed_session(self) -> None:
+        claimed = "11111111-1111-1111-1111-111111111111"
+        other = "22222222-2222-2222-2222-222222222222"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            claude = root / "claude.jsonl"
+            claude.write_text(json.dumps({"sessionId": other}) + "\n")
+            codex = root / f"rollout-{other}.jsonl"
+            codex.write_text("{}\n")
+            with patch.dict(
+                os.environ,
+                {
+                    "KONVU_LIVE_USAGE_CLAUDE_DIR": directory,
+                    "KONVU_LIVE_USAGE_CODEX_DIR": directory,
+                },
+            ):
+                self.assertIsNone(
+                    claude_hook_transcript({"transcript_path": str(claude)}, claimed)
+                )
+                self.assertIsNone(
+                    codex_hook_transcript({"transcript_path": str(codex)}, claimed)
+                )
+                self.assertEqual(
+                    claude_hook_transcript({"transcript_path": str(claude)}, other),
+                    claude,
+                )
+                self.assertEqual(
+                    codex_hook_transcript({"transcript_path": str(codex)}, other),
+                    codex,
+                )
+
     def test_pricing_update_rejects_boolean_required_rates(self) -> None:
         payload: dict[str, object] = {f"model-{index}": {} for index in range(1_000)}
         payload["claude-sonnet-4-6"] = {

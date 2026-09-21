@@ -18,7 +18,11 @@ from .config import (
     DASHBOARD_PORT,
     HOOK_REFRESH_AFTER_SECONDS,
 )
-from .parsers import codex_hook_transcript, codex_turn_tool_calls
+from .parsers import (
+    claude_hook_transcript,
+    codex_hook_transcript,
+    codex_turn_tool_calls,
+)
 from .storage import (
     claude_quota_path,
     codex_display_state_path,
@@ -253,7 +257,10 @@ def statusline() -> None:
         print("Konvu live usage: waiting for Claude session data")
         return
     session_id = payload.get("session_id")
-    if not isinstance(session_id, str):
+    if (
+        not isinstance(session_id, str)
+        or claude_hook_transcript(payload, session_id) is None
+    ):
         print("Konvu live usage: collector starting")
         return
     record_claude_quotas(payload, session_id)

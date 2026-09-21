@@ -490,13 +490,13 @@ def setup(interval: int, open_browser: bool) -> dict[str, str]:
             ensure_launcher=False, create_backup=False
         )
         codex = install_codex_hook(ensure_launcher=False, create_backup=False)
+        dashboard = f"http://127.0.0.1:{PORT}/"
         install_launch_agent(interval, ensure_launcher=False)
     except Exception:
         restore_installation(states, states[-1].contents is not None)
         for path in backups:
             path.unlink(missing_ok=True)
         raise
-    dashboard = f"http://127.0.0.1:{PORT}/"
     if open_browser:
         webbrowser.open(dashboard)
     return {

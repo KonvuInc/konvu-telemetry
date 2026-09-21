@@ -409,7 +409,10 @@ def codex_hook_transcript(payload: dict[str, object], session_id: str) -> Path |
     if isinstance(transcript_path, str):
         candidate = Path(transcript_path).expanduser()
         for root in codex_roots():
-            if candidate in set(transcript_files(root)):
+            if (
+                candidate in set(transcript_files(root))
+                and codex_session_id(candidate) == session_id
+            ):
                 return candidate
     for root in codex_roots():
         candidates = sorted(
@@ -832,6 +835,34 @@ def transcript_session_id(file_path: Path) -> str | None:
                     return session_id
     except OSError:
         return None
+    return None
+
+
+def claude_hook_transcript(payload: dict[str, object], session_id: str) -> Path | None:
+    """Locate the Claude transcript bound to the claimed hook session."""
+    if not valid_session_id(session_id):
+        return None
+    transcript_path = payload.get("transcript_path")
+    if isinstance(transcript_path, str):
+        candidate = Path(transcript_path).expanduser()
+        for root in claude_roots():
+            if (
+                candidate in set(transcript_files(root))
+                and transcript_session_id(candidate) == session_id
+            ):
+                return candidate
+    for root in claude_roots():
+        candidates = sorted(
+            (
+                path
+                for path in transcript_files(root)
+                if transcript_session_id(path) == session_id
+            ),
+            key=lambda path: path.stat().st_mtime if path.exists() else 0.0,
+            reverse=True,
+        )
+        if candidates:
+            return candidates[0]
     return None
 
 
