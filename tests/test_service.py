@@ -34,6 +34,7 @@ from konvu_telemetry.config import (
 from konvu_telemetry.display import (
     baseline_text,
     claude_hook,
+    codex_hook,
     quota_usage_text,
     record_claude_quotas,
     refreshed_session,
@@ -1198,6 +1199,72 @@ class ServiceTests(unittest.TestCase):
             json.loads(stdout.getvalue()),
             {"systemMessage": "Konvu usage\n💸 $1.2 total\n🧠 50% context"},
         )
+
+    def test_codex_hook_includes_quota_with_context_and_never_alone(self) -> None:
+        session_id = "00000000-0000-0000-0000-000000000001"
+        stdout = StringIO()
+        session = {
+            "id": session_id,
+            "total_cost_usd": 25.4,
+            "task_count": 5,
+            "cost_status": "complete",
+            "projected_next_10_tasks_usd": 4.9,
+            "context_tokens": 650,
+            "context_window_tokens": 1000,
+        }
+        with (
+            patch.object(
+                sys,
+                "stdin",
+                StringIO(json.dumps({"session_id": session_id, "turn_id": "turn"})),
+            ),
+            patch.object(sys, "stdout", stdout),
+            patch(
+                "konvu_telemetry.display.codex_hook_transcript",
+                return_value=Path("session.jsonl"),
+            ),
+            patch("konvu_telemetry.display.codex_turn_tool_calls", return_value=1),
+            patch("konvu_telemetry.display.refreshed_session", return_value=session),
+            patch(
+                "konvu_telemetry.display.codex_display_is_worth_showing",
+                return_value=True,
+            ),
+            patch(
+                "konvu_telemetry.display.recorded_quota_usage_text",
+                return_value="3% weekly limit",
+            ),
+        ):
+            codex_hook()
+        self.assertIn(
+            "🧠 65% context · 3% weekly limit",
+            json.loads(stdout.getvalue())["systemMessage"],
+        )
+
+        stdout = StringIO()
+        with (
+            patch.object(
+                sys,
+                "stdin",
+                StringIO(json.dumps({"session_id": session_id, "turn_id": "turn"})),
+            ),
+            patch.object(sys, "stdout", stdout),
+            patch(
+                "konvu_telemetry.display.codex_hook_transcript",
+                return_value=Path("session.jsonl"),
+            ),
+            patch("konvu_telemetry.display.codex_turn_tool_calls", return_value=1),
+            patch("konvu_telemetry.display.refreshed_session", return_value=session),
+            patch(
+                "konvu_telemetry.display.codex_display_is_worth_showing",
+                return_value=False,
+            ),
+            patch(
+                "konvu_telemetry.display.recorded_quota_usage_text",
+                return_value="3% weekly limit",
+            ),
+        ):
+            codex_hook()
+        self.assertEqual(json.loads(stdout.getvalue()), {"suppressOutput": True})
 
     def test_task_series_preserves_empty_prompts(self) -> None:
         event = UsageEvent(
