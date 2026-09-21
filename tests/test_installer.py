@@ -54,29 +54,54 @@ class InstallerTests(unittest.TestCase):
             )
             self.assertEqual(hooks["hooks"]["Stop"][1]["hooks"][0]["timeout"], 5)
 
-    def test_existing_non_konvu_claude_statusline_is_preserved(self) -> None:
+    def test_existing_claude_statusline_is_chained_with_telemetry(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
             claude = home / ".claude"
             claude.mkdir()
             console = home / "bin" / "konvu"
             console.parent.mkdir()
-            console.write_text("#!/bin/sh\nexit 0\n")
+            console.write_text(
+                "#!/bin/sh\n"
+                'if [ "$1" = "statusline" ]; then\n'
+                "  cat >/dev/null\n"
+                "  printf telemetry\n"
+                "fi\n"
+            )
             console.chmod(0o700)
             path = claude / "settings.json"
             path.write_text(
                 json.dumps(
-                    {"statusLine": {"type": "command", "command": "custom-status"}}
+                    {
+                        "statusLine": {
+                            "type": "command",
+                            "command": "printf existing:; cat",
+                        }
+                    }
                 )
             )
             with (
                 patch.object(installer.Path, "home", return_value=home),
                 patch.object(installer, "console_launcher", return_value=console),
             ):
-                self.assertEqual(installer.install_claude_statusline(), "preserved")
+                self.assertEqual(installer.install_claude_statusline(), "installed")
+                wrapper = installer.claude_statusline_path()
+                rendered = subprocess.run(
+                    [str(wrapper)],
+                    input='{"session_id":"session"}',
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                self.assertTrue(installer.remove_claude_statusline())
             self.assertEqual(
-                json.loads(path.read_text())["statusLine"]["command"], "custom-status"
+                rendered.stdout, 'existing:{"session_id":"session"}telemetry'
             )
+            self.assertEqual(
+                json.loads(path.read_text())["statusLine"]["command"],
+                "printf existing:; cat",
+            )
+            self.assertFalse(wrapper.exists())
 
     def test_similar_command_name_is_not_treated_as_konvu_owned(self) -> None:
         self.assertFalse(installer.is_konvu_command("/tmp/not-konvu-launcher-helper"))
