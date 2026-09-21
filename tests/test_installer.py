@@ -47,9 +47,7 @@ class InstallerTests(unittest.TestCase):
             hooks = json.loads((codex / "hooks.json").read_text())
             self.assertIn(installer.LAUNCHER_NAME, settings["statusLine"]["command"])
             self.assertNotIn("-I", settings["statusLine"]["command"])
-            self.assertEqual(
-                settings["hooks"]["Stop"][0]["hooks"][0]["timeout"], 5
-            )
+            self.assertEqual(settings["hooks"]["Stop"][0]["hooks"][0]["timeout"], 5)
             self.assertIn(
                 installer.LAUNCHER_NAME,
                 settings["hooks"]["Stop"][0]["hooks"][0]["command"],

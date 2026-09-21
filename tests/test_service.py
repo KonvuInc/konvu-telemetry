@@ -1115,7 +1115,9 @@ class ServiceTests(unittest.TestCase):
         session_id = "00000000-0000-0000-0000-000000000001"
         stdout = StringIO()
         with (
-            patch.object(sys, "stdin", StringIO(json.dumps({"session_id": session_id}))),
+            patch.object(
+                sys, "stdin", StringIO(json.dumps({"session_id": session_id}))
+            ),
             patch.object(sys, "stdout", stdout),
             patch(
                 "konvu_telemetry.display.refreshed_session",
