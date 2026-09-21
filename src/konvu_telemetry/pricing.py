@@ -96,7 +96,6 @@ def load_pricing() -> dict[str, dict[str, float]]:
             "cache_read": cache_read_number
             if cache_read_number is not None
             else input_number * 0.1,
-            "web_search": web_search_number if web_search_number is not None else 0.01,
             "fast_multiplier": fast_multiplier
             if fast_multiplier is not None and fast_multiplier > 0
             else 1.0,
@@ -178,6 +177,8 @@ def cache_read_rate(model: str, prices: dict[str, dict[str, float]]) -> float | 
 
 
 def event_cost(event: UsageEvent, prices: dict[str, dict[str, float]]) -> float | None:
+    if not event.usage.complete:
+        return None
     rates = price_for(event.model, prices)
     if rates is None:
         return None
@@ -211,6 +212,9 @@ def event_cost(event: UsageEvent, prices: dict[str, dict[str, float]]) -> float 
     output_rate = rate_for("output")
     cache_write_rate = rate_for("cache_write")
     cache_read_rate = rate_for("cache_read")
+    web_search_rate = rates.get("web_search")
+    if event.usage.web_search_requests and not isinstance(web_search_rate, (int, float)):
+        return None
     five_minute_cache_write = max(
         0, event.usage.cache_write_tokens - event.usage.cache_write_one_hour_tokens
     )
@@ -221,7 +225,7 @@ def event_cost(event: UsageEvent, prices: dict[str, dict[str, float]]) -> float 
         + five_minute_cache_write * cache_write_rate
         + event.usage.cache_write_one_hour_tokens * cache_write_rate * 1.6
         + event.usage.cache_read_tokens * cache_read_rate
-        + event.usage.web_search_requests * rates.get("web_search", 0.01)
+        + event.usage.web_search_requests * float(web_search_rate or 0)
     )
 
 
@@ -236,6 +240,8 @@ def is_internal_codex_review(event: UsageEvent) -> bool:
 def requires_pricing(event: UsageEvent) -> bool:
     """Return whether an event can contribute a nonzero cost to its session."""
     return not is_internal_codex_review(event) and (
+        not event.usage.complete
+        or
         event.usage.input_tokens > 0
         or event.usage.output_tokens > 0
         or event.usage.reasoning_output_tokens > 0

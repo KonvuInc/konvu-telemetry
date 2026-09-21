@@ -18,7 +18,7 @@ Context is the latest provider-recorded input plus cache traffic for a model cal
 
 The next-ten forecast first uses the mean cost of up to ten completed, fully priced prompts matching the current model, reasoning effort, and service speed. With fewer than three comparable prompts, it falls back to the provider-wide median forecast from recent local sessions; if no global history exists, any completed prompts in the current session are used. After compaction, only post-compaction prompts are comparable; while that history warms up, a context-scaled pre-compaction estimate is labeled separately. The baseline document includes the median held-out percentage error for recent Claude and Codex sessions with at least 20 prompts.
 
-Personal baselines use the median cumulative cost and token traffic of sessions that reached the same checkpoint during the last 30 days. At least five sessions are required. Checkpoint medians are clamped to the previous checkpoint when cohort changes would otherwise make cumulative spend decrease. Values are interpolated only between measured checkpoints and are suppressed outside the observed range.
+Personal baselines use the median cumulative cost and token traffic of sessions that reached the same checkpoint during the last 30 days. At least five sessions are required. Each checkpoint reports its actual reached-session cohort, so adjacent values can change when the cohort changes. Values are interpolated only between measured checkpoints and are suppressed outside the observed range.
 
 Hot-session alerts compare recorded cost with the general provider median. The model, effort, and speed median remains available as a separate dashboard comparison and does not drive alerts.
 

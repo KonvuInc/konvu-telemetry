@@ -44,6 +44,7 @@ from konvu_telemetry.fleet_telemetry import (
     TranscriptTelemetry,
     _comparable_forecast,
     _timestamp,
+    _quota_windows,
     enrich_snapshot,
     is_claude_prompt,
     parse_telemetry,
@@ -57,6 +58,7 @@ from konvu_telemetry.parsers import (
     codex_events_in_file,
     codex_hook_transcript,
     codex_subagent_parent,
+    codex_task_starts,
     events_in_file,
     is_human_claude_prompt,
     spawned_agent_labels,
@@ -146,7 +148,7 @@ class ServiceTests(unittest.TestCase):
                         "schema_version": 8,
                         "generated_at": "2026-09-21T00:00:00Z",
                         "milestones": list(BASELINE_MILESTONES),
-                        "median_method": "monotonic_checkpoint_cohort_medians",
+                        "median_method": "checkpoint_cohort_medians",
                         "providers": {},
                         "configurations": {},
                         "forecasts": {},
@@ -385,6 +387,33 @@ class ServiceTests(unittest.TestCase):
             [event.context_window_tokens for event in events], [258_400, 258_400]
         )
 
+    def test_codex_user_messages_are_task_boundaries_without_task_started(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / "rollout-session.jsonl"
+            transcript.write_text(
+                "\n".join(
+                    json.dumps(record)
+                    for record in (
+                        {
+                            "timestamp": "2026-01-01T00:00:00Z",
+                            "type": "event_msg",
+                            "payload": {"type": "user_message", "message": "one"},
+                        },
+                        {
+                            "timestamp": "2026-01-01T00:01:00Z",
+                            "type": "event_msg",
+                            "payload": {
+                                "type": "message",
+                                "role": "user",
+                                "content": "two",
+                            },
+                        },
+                    )
+                )
+            )
+            starts = codex_task_starts(transcript)
+        self.assertEqual(starts, [1767225600.0, 1767225660.0])
+
     def test_one_hour_claude_cache_write_uses_the_higher_rate(self) -> None:
         event = UsageEvent(
             provider="claude",
@@ -444,6 +473,72 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(exported["tokens"]["reasoning_output"], 3)
         self.assertEqual(exported["reasoning_effort"], "high")
         self.assertEqual(exported["speed"], "standard")
+        self.assertTrue(exported["usage_complete"])
+
+    def test_missing_billable_usage_is_not_reported_as_a_complete_cost(self) -> None:
+        event = assistant_event(
+            {
+                "timestamp": "2026-01-01T00:00:00Z",
+                "sessionId": "session",
+                "message": {
+                    "id": "message",
+                    "role": "assistant",
+                    "model": "claude-test",
+                    "usage": {"input_tokens": 10},
+                },
+            }
+        )
+        self.assertIsNotNone(event)
+        assert event is not None
+        self.assertFalse(event.usage.complete)
+        self.assertEqual(
+            cost_status(
+                [event],
+                {
+                    "claude-test": {
+                        "input": 1,
+                        "output": 1,
+                        "cache_write": 1,
+                        "cache_read": 1,
+                        "fast_multiplier": 1,
+                    }
+                },
+            ),
+            ("unavailable", 1),
+        )
+
+    def test_codex_checkpoint_identity_deduplicates_replayed_rollouts(self) -> None:
+        first = UsageEvent(
+            "codex",
+            "session",
+            "session:100",
+            1,
+            "model",
+            Usage(1, 0, 0, 0, 0, 0, "standard"),
+            0,
+            False,
+            None,
+            "standard",
+        )
+        replay = UsageEvent(
+            "codex",
+            "session",
+            "session:100",
+            2,
+            "model",
+            Usage(1, 0, 0, 0, 0, 0, "standard"),
+            0,
+            False,
+            None,
+            "standard",
+        )
+        self.assertEqual(deduplicate_usage_events([first, replay]), [first])
+
+    def test_ratio_quota_values_are_normalized_to_percent(self) -> None:
+        windows = _quota_windows(
+            {"primary": {"used_percent": 0.8, "window_minutes": 300}}, 0
+        )
+        self.assertEqual(windows[0]["used_percent"], 80.0)
 
     def test_claude_sdk_client_is_explicitly_attributed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -851,7 +946,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(points[0]["median_cost_usd"], 35.0)
         self.assertEqual(points[1]["median_cost_usd"], 60.0)
 
-    def test_cumulative_median_never_decreases_when_cohort_changes(self) -> None:
+    def test_cumulative_median_reports_the_actual_changed_cohort(self) -> None:
         series = [
             *[[(100.0, 100)] * 10 for _ in range(5)],
             [(1.0, 1)] * 20,
@@ -862,9 +957,9 @@ class ServiceTests(unittest.TestCase):
         ]
         points = cumulative_median_checkpoints(series)
         self.assertEqual(points[0]["median_cost_usd"], 525.0)
-        self.assertEqual(points[1]["median_cost_usd"], 525.0)
+        self.assertEqual(points[1]["median_cost_usd"], 60.0)
         self.assertEqual(points[0]["median_tokens"], 525)
-        self.assertEqual(points[1]["median_tokens"], 525)
+        self.assertEqual(points[1]["median_tokens"], 60)
 
     def test_incremental_reader_keeps_large_prompt_boundary_without_retaining_text(
         self,
@@ -1104,7 +1199,7 @@ class ServiceTests(unittest.TestCase):
             "generated_at": "2026-01-01T00:00:00+00:00",
             "forecasts": {},
             "configurations": {},
-            "median_method": "monotonic_checkpoint_cohort_medians",
+            "median_method": "checkpoint_cohort_medians",
         }
         new = {**old, "generated_at": "2026-01-02T00:00:00+00:00"}
         with tempfile.TemporaryDirectory() as directory:
@@ -1136,7 +1231,7 @@ class ServiceTests(unittest.TestCase):
             "generated_at": "2026-01-01T00:00:00+00:00",
             "forecasts": {},
             "configurations": {},
-            "median_method": "monotonic_checkpoint_cohort_medians",
+            "median_method": "checkpoint_cohort_medians",
         }
         with tempfile.TemporaryDirectory() as directory:
             destination = Path(directory) / "baselines.json"
@@ -1823,7 +1918,11 @@ class ServiceTests(unittest.TestCase):
                     "id": "message",
                     "role": "assistant",
                     "model": "model",
-                    "usage": {"input_tokens": 1, "speed": "fast"},
+                    "usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 0,
+                        "speed": "fast",
+                    },
                 },
             },
         ]

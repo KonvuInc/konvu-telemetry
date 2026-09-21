@@ -42,6 +42,7 @@ def normalized_event(
         "agent_id": event.agent_id,
         "reasoning_effort": event.effort,
         "speed": event.usage.speed,
+        "usage_complete": event.usage.complete,
     }
 
 
@@ -70,4 +71,4 @@ def write_normalized_events() -> None:
             )
     events.sort(key=lambda event: str(event["timestamp"]))
     destination = normalized_events_path()
-    write_private_json(destination, {"schema_version": 1, "events": events})
+    write_private_json(destination, {"schema_version": 2, "events": events})
