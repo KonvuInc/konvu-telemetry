@@ -342,7 +342,14 @@ class InstallerTests(unittest.TestCase):
                     installer.claude_statusline_original_path(),
                     installer.claude_statusline_state_path(),
                 )
-            self.assertEqual(result, {"claude_statusline": True, "codex_hook": True})
+            self.assertEqual(
+                result,
+                {
+                    "claude_statusline": True,
+                    "claude_desktop_hook": True,
+                    "codex_hook": True,
+                },
+            )
             self.assertEqual(
                 json.loads(claude_path.read_text())["statusLine"], original_statusline
             )
