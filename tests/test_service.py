@@ -21,6 +21,7 @@ from konvu_telemetry.analytics import (
     cumulative_median_checkpoints,
     deduplicate_usage_events,
     forecast_backtest_sample,
+    iteration_series,
     load_baselines,
     scaled_precompact_forecast,
     single_configuration,
@@ -1791,6 +1792,19 @@ class ServiceTests(unittest.TestCase):
             task_series([first, third], [1, 2, 3], prices),
             [(1.0, 1), (0.0, 0), (2.0, 2)],
         )
+
+    def test_incomplete_iteration_is_omitted_without_resetting_history(self) -> None:
+        rows = iteration_series(
+            [1.0, 2.0, 3.0],
+            [1.0, None, 3.0],
+            [],
+            [True, False, True],
+        )
+        self.assertEqual([row["cost_usd"] for row in rows], [1.0, None, 3.0])
+        self.assertEqual(
+            [row["cumulative_cost_usd"] for row in rows], [1.0, 1.0, 4.0]
+        )
+        self.assertEqual([row["priced"] for row in rows], [True, False, True])
 
     def test_configuration_baseline_never_mislabels_mixed_or_fast_work(self) -> None:
         standard = UsageEvent(

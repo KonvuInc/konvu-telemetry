@@ -238,11 +238,10 @@ def build_snapshot(
             if event.is_subagent and cost is not None
         ]
         costs_by_prompt: dict[float, float] = defaultdict(float)
+        unpriced_prompts: set[float] = set()
         unattributed_cost = 0.0
         for event in events:
             cost = claude_costs[id(event)]
-            if cost is None:
-                continue
             attribution_time = event.timestamp
             if event.is_subagent:
                 if event.agent_id is None:
@@ -253,6 +252,10 @@ def build_snapshot(
                     )
             starts = prompt_times.get(session_id, [])
             prompt_index = bisect_right(starts, attribution_time) - 1
+            if cost is None:
+                if prompt_index >= 0:
+                    unpriced_prompts.add(starts[prompt_index])
+                continue
             if prompt_index >= 0:
                 costs_by_prompt[starts[prompt_index]] += cost
             else:
@@ -269,8 +272,18 @@ def build_snapshot(
             costs_by_prompt[starts[0]] += unattributed_cost
         # Keep prompt costs aligned with their boundaries: a prompt with no model event is still a prompt.
         completed_prompt_costs = [costs_by_prompt.get(start, 0.0) for start in starts]
-        forecast_prompt_costs = completed_prompt_costs
-        last_task_cost = completed_prompt_costs[-1] if completed_prompt_costs else 0.0
+        complete_prompt_costs = [
+            costs_by_prompt.get(start, 0.0)
+            for start in starts
+            if start not in unpriced_prompts
+        ]
+        prompt_priced = [start not in unpriced_prompts for start in starts]
+        iteration_costs = [
+            cost if priced else None
+            for cost, priced in zip(completed_prompt_costs, prompt_priced)
+        ]
+        forecast_prompt_costs = complete_prompt_costs
+        last_task_cost = iteration_costs[-1] if iteration_costs else None
         next_10_forecast: float | None = (
             next_ten_forecast(forecast_prompt_costs, "claude")
             if len(forecast_prompt_costs) >= FORECAST_MIN_SAMPLES
@@ -287,14 +300,15 @@ def build_snapshot(
             event.usage.total_tokens for event in events
         )
         total_cost_status, unpriced_event_count = cost_status(events, prices)
-        if total_cost_status != "complete":
-            next_10_forecast = None
         comparison_cost = sum(known_costs) if total_cost_status == "complete" else None
         since_compact = False
         forecast_mode = "rolling"
         if latest_compact is not None:
-            first_post_compact = bisect_right(starts, latest_compact)
-            post_compact_costs = forecast_prompt_costs[first_post_compact:]
+            post_compact_costs = [
+                costs_by_prompt.get(start, 0.0)
+                for start in starts
+                if start > latest_compact and start not in unpriced_prompts
+            ]
             post_compact_events = [
                 event for event in events if event.timestamp > latest_compact
             ]
@@ -336,7 +350,11 @@ def build_snapshot(
                     else 0
                 )
                 next_10_forecast = scaled_precompact_forecast(
-                    forecast_prompt_costs[:first_post_compact],
+                    [
+                        costs_by_prompt.get(start, 0.0)
+                        for start in starts
+                        if start <= latest_compact and start not in unpriced_prompts
+                    ],
                     current_context,
                     precompact_context,
                 )
@@ -396,11 +414,6 @@ def build_snapshot(
             claude_baseline = None
             claude_provider_baseline = None
             claude_configuration_baseline = None
-        if total_cost_status != "complete":
-            next_10_forecast = None
-            claude_baseline = None
-            claude_provider_baseline = None
-            claude_configuration_baseline = None
         sessions.append(
             {
                 "id": session_id,
@@ -428,16 +441,18 @@ def build_snapshot(
                 "total_cost_usd": round(sum(known_costs), 6),
                 "cost_status": total_cost_status,
                 "unpriced_event_count": unpriced_event_count,
-                "last_task_cost_usd": round(last_task_cost, 6),
+                "last_task_cost_usd": round(last_task_cost, 6)
+                if isinstance(last_task_cost, (int, float))
+                else None,
                 "projected_next_10_tasks_usd": round(next_10_forecast, 6)
                 if isinstance(next_10_forecast, (int, float))
                 else None,
                 "forecast_mode": forecast_mode,
                 "iterations": iteration_series(
                     starts,
-                    completed_prompt_costs,
+                    iteration_costs,
                     events,
-                    total_cost_status == "complete",
+                    prompt_priced,
                 ),
                 "context_history": context_usage_history(
                     starts, events, prices, context_attribution
@@ -624,24 +639,38 @@ def build_snapshot(
         known_child_costs = [cost for cost in child_costs if cost is not None]
         child_entries = codex_subagent_entries.get(session_id, [])
         costs_by_task: dict[float, float] = defaultdict(float)
+        unpriced_tasks: set[float] = set()
         starts = codex_task_boundaries.get(session_id, [])
         for event, cost in zip(events, codex_costs):
-            if cost is None:
-                continue
             task_index = bisect_right(starts, event.timestamp) - 1
+            if cost is None:
+                if task_index >= 0:
+                    unpriced_tasks.add(starts[task_index])
+                continue
             if task_index >= 0:
                 costs_by_task[starts[task_index]] += cost
         for event, cost in zip(child_events, child_costs):
-            if cost is None:
-                continue
             task_index = bisect_right(starts, event.timestamp) - 1
+            if cost is None:
+                if task_index >= 0:
+                    unpriced_tasks.add(starts[task_index])
+                continue
             if task_index >= 0:
                 costs_by_task[starts[task_index]] += cost
         task_costs = [costs_by_task.get(start, 0.0) for start in starts]
-        last_task_cost = task_costs[-1] if task_costs else 0.0
+        task_priced = [start not in unpriced_tasks for start in starts]
+        iteration_costs = [
+            cost if priced else None for cost, priced in zip(task_costs, task_priced)
+        ]
+        complete_task_costs = [
+            costs_by_task.get(start, 0.0)
+            for start in starts
+            if start not in unpriced_tasks
+        ]
+        last_task_cost = iteration_costs[-1] if iteration_costs else None
         next_10_forecast = (
-            next_ten_forecast(task_costs, "codex")
-            if len(task_costs) >= FORECAST_MIN_SAMPLES
+            next_ten_forecast(complete_task_costs, "codex")
+            if len(complete_task_costs) >= FORECAST_MIN_SAMPLES
             else None
         )
         task_count = len(starts)
@@ -649,8 +678,6 @@ def build_snapshot(
         last_event = max(all_events, key=lambda event: event.timestamp)
         total_tokens = sum(event.usage.total_tokens for event in all_events)
         total_cost_status, unpriced_event_count = cost_status(all_events, prices)
-        if total_cost_status != "complete":
-            next_10_forecast = None
         last_task_start = starts[-1] if starts else None
         baseline_configuration = single_configuration(events)
         baseline_model, baseline_effort, baseline_speed = (
@@ -666,7 +693,9 @@ def build_snapshot(
             model=baseline_model,
             effort=baseline_effort,
             speed=baseline_speed,
-            cost_usd=sum(known_costs) + sum(known_child_costs),
+            cost_usd=(sum(known_costs) + sum(known_child_costs))
+            if total_cost_status == "complete"
+            else None,
             comparison_scope="provider",
         )
         codex_configuration_baseline = baseline_comparison(
@@ -677,14 +706,12 @@ def build_snapshot(
             model=baseline_model,
             effort=baseline_effort,
             speed=baseline_speed,
-            cost_usd=sum(known_costs) + sum(known_child_costs),
+            cost_usd=(sum(known_costs) + sum(known_child_costs))
+            if total_cost_status == "complete"
+            else None,
             comparison_scope="model_effort_speed",
         )
         codex_baseline = codex_configuration_baseline
-        if total_cost_status != "complete":
-            codex_baseline = None
-            codex_provider_baseline = None
-            codex_configuration_baseline = None
         sessions.append(
             {
                 "id": session_id,
@@ -711,12 +738,14 @@ def build_snapshot(
                 "total_cost_usd": round(sum(known_costs) + sum(known_child_costs), 6),
                 "cost_status": total_cost_status,
                 "unpriced_event_count": unpriced_event_count,
-                "last_task_cost_usd": round(last_task_cost, 6),
+                "last_task_cost_usd": round(last_task_cost, 6)
+                if isinstance(last_task_cost, (int, float))
+                else None,
                 "projected_next_10_tasks_usd": round(next_10_forecast, 6)
                 if isinstance(next_10_forecast, (int, float))
                 else None,
                 "iterations": iteration_series(
-                    starts, task_costs, all_events, total_cost_status == "complete"
+                    starts, iteration_costs, all_events, task_priced
                 ),
                 "context_history": context_usage_history(starts, all_events, prices),
                 "task_count": task_count,

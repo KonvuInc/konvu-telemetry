@@ -54,9 +54,9 @@ _BASELINE_REFRESH_LOCK = Lock()
 
 def iteration_series(
     starts: list[float],
-    costs: list[float],
+    costs: list[float | None],
     events: list[UsageEvent],
-    priced: bool = True,
+    priced: bool | list[bool] = True,
 ) -> list[dict[str, object]]:
     """Build the cumulative, per-iteration usage history used by the dashboard."""
     main_events = sorted(
@@ -66,6 +66,9 @@ def iteration_series(
     cumulative_cost = 0.0
     rows: list[dict[str, object]] = []
     for index, (start, cost) in enumerate(zip(starts, costs), start=1):
+        iteration_priced = (
+            priced[index - 1] if isinstance(priced, list) else priced
+        )
         end = starts[index] if index < len(starts) else float("inf")
         iteration_events = [
             event for event in main_events if start <= event.timestamp < end
@@ -76,7 +79,8 @@ def iteration_series(
             if iteration_events
             else (prior_events[-1] if prior_events else None)
         )
-        cumulative_cost += cost
+        if isinstance(cost, (int, float)):
+            cumulative_cost += cost
         configuration = single_configuration(iteration_events)
         model, effort, speed = (
             configuration if configuration is not None else (None, None, None)
@@ -85,9 +89,11 @@ def iteration_series(
             {
                 "iteration": index,
                 "started_at": datetime.fromtimestamp(start, timezone.utc).isoformat(),
-                "cost_usd": round(cost, 6),
+                "cost_usd": round(cost, 6)
+                if isinstance(cost, (int, float))
+                else None,
                 "cumulative_cost_usd": round(cumulative_cost, 6),
-                "priced": priced,
+                "priced": iteration_priced,
                 "context_tokens": context_event.usage.context_tokens
                 if context_event
                 else 0,
