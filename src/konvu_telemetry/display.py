@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 import time
 from datetime import datetime, timezone
@@ -24,6 +25,7 @@ from .storage import (
     health_path,
     parse_timestamp,
     session_path,
+    snapshot_path,
     valid_session_id,
     write_private_json,
 )
@@ -49,11 +51,12 @@ def record_claude_quotas(payload: dict[str, object], session_id: str) -> None:
             ),
             None,
         )
-        if not isinstance(value, (int, float)):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
             continue
         used_percent = value * 100 if 0 <= value <= 1 else value
-        if not 0 <= used_percent <= 100:
+        if not math.isfinite(used_percent) or used_percent < 0:
             continue
+        used_percent = min(100.0, used_percent)
         resets_at = next(
             (
                 raw_window.get(key)
@@ -165,9 +168,10 @@ def quota_usage_text(payload: dict[str, object]) -> str:
             ),
             None,
         )
-        if not isinstance(value, (int, float)):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
             return None
-        return round(value * 100) if 0 <= value <= 1 else round(value)
+        percentage = value * 100 if 0 <= value <= 1 else value
+        return round(min(100, percentage)) if math.isfinite(percentage) else None
 
     five_hour = percentage("five_hour")
     weekly = percentage("seven_day")
@@ -178,6 +182,28 @@ def quota_usage_text(payload: dict[str, object]) -> str:
     if weekly is not None:
         hot = "🔥 " if weekly >= ALERT_QUOTA_WEEKLY_PERCENT else ""
         parts.append(f"{hot}📅 {weekly}% weekly limit")
+    return " · ".join(parts)
+
+
+def recorded_quota_usage_text(provider: str) -> str:
+    """Read the collector's latest quota windows for a provider hook."""
+    try:
+        snapshot = json.loads(snapshot_path().read_text())
+    except (OSError, json.JSONDecodeError):
+        return ""
+    accounts = snapshot.get("account_quotas") if isinstance(snapshot, dict) else None
+    account = accounts.get(provider) if isinstance(accounts, dict) else None
+    windows = account.get("windows") if isinstance(account, dict) else None
+    parts: list[str] = []
+    for window in windows if isinstance(windows, list) else []:
+        if not isinstance(window, dict):
+            continue
+        minutes = window.get("window_minutes")
+        used = window.get("used_percent")
+        if not isinstance(minutes, (int, float)) or not isinstance(used, (int, float)):
+            continue
+        label = "5-hour" if minutes == 300 else "weekly" if minutes == 10_080 else f"{round(minutes / 60)}-hour"
+        parts.append(f"{round(min(100, max(0, used)))}% {label} limit")
     return " · ".join(parts)
 
 
@@ -320,16 +346,21 @@ def codex_hook() -> None:
     if not isinstance(session, dict):
         print(json.dumps({"suppressOutput": True}))
         return
+    quota_text = recorded_quota_usage_text("codex")
     total_cost = session.get("total_cost_usd")
     task_count = session.get("task_count")
-    if (
-        not isinstance(total_cost, (int, float))
-        or total_cost < CODEX_DISPLAY_COST_THRESHOLD_USD
-        or not isinstance(task_count, int)
-        or task_count < 5
-        or not codex_display_is_worth_showing(session)
-    ):
+    show_usage = (
+        isinstance(total_cost, (int, float))
+        and total_cost >= CODEX_DISPLAY_COST_THRESHOLD_USD
+        and isinstance(task_count, int)
+        and task_count >= 5
+        and codex_display_is_worth_showing(session)
+    )
+    if not show_usage and not quota_text:
         print(json.dumps({"suppressOutput": True}))
+        return
+    if not show_usage:
+        print(json.dumps({"systemMessage": f"\n╭─ Konvu usage\n│ {quota_text}\n╰─"}))
         return
     norm = baseline_text(session)
     complete = session.get("cost_status") == "complete"
@@ -351,6 +382,8 @@ def codex_hook() -> None:
         f"│ 💸 {total_text} total · {forecast_text}",
         f"│ 🧠 {context_usage_text(session)}",
     ]
+    if quota_text:
+        lines.append(f"│ ⏳ {quota_text}")
     subagents = subagent_usage_text(session)
     if subagents:
         lines.insert(2, f"│ {subagents}")
