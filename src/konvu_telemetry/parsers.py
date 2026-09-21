@@ -603,8 +603,7 @@ def codex_subagent_parent(file_path: Path) -> tuple[str, str] | None:
                     nickname = spawned.get("agent_nickname")
                     label = (
                         nickname
-                        if isinstance(nickname, str)
-                        and nickname
+                        if isinstance(nickname, str) and nickname
                         else path
                         if isinstance(path, str) and path
                         else "subagent"

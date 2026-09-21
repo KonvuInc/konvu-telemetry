@@ -377,8 +377,7 @@ class IncrementalLiveState:
                     )
                     label = (
                         nickname
-                        if isinstance(nickname, str)
-                        and nickname
+                        if isinstance(nickname, str) and nickname
                         else path_label
                         if isinstance(path_label, str) and path_label
                         else "subagent"
