@@ -176,15 +176,6 @@ function sortedRows() {
 }
 const effort = (s) => s.reasoning_effort || s.effort || null;
 const speed = (s) => s.service_tier || s.speed || null;
-function matchesConfiguration(a, b) {
-  const configuration = a.comparison_configuration;
-  return (
-    !!configuration &&
-    configuration.model === b.model &&
-    configuration.effort === b.effort &&
-    (!speed(b) || !configuration.speed || configuration.speed === speed(b))
-  );
-}
 function configurationLabel(s) {
   return [s.model || providerName(s.provider), effort(s) ? effort(s) + " effort" : "Effort unrecorded", speed(s)].filter(Boolean).join(" · ");
 }
@@ -338,25 +329,6 @@ function donut(s) {
     "</span></div>"
   );
 }
-function checkpointComparison(s) {
-  const curve = configurationCurve(s);
-  const matched = state.baselineMode === "matched";
-  const points = matched ? curve?.points || [] : curvePoints(state.payload?.baselines?.providers?.[s.provider]);
-  const prompts = count(s),
-    spent = cost(s),
-    first = points[0],
-    last = points.at(-1);
-  const median = medianCostAt(points, prompts);
-  if (prompts < first?.iterations || prompts > last?.iterations || spent === null || !nonnegative(median) || median <= 0) return null;
-  return {
-    ratio: spent / median,
-    matched,
-    iteration: prompts,
-    samples: prompts <= first.iterations ? first.sessions : last.sessions,
-    actual: spent,
-    median,
-  };
-}
 function recordedBaselineComparison(s) {
   const scope = state.baselineMode === "matched" ? "model_effort_speed" : "provider";
   const baseline = s.baselines?.[scope] || (s.baseline?.scope === scope ? s.baseline : null);
@@ -373,40 +345,19 @@ function recordedBaselineComparison(s) {
   };
 }
 function spendComparison(s) {
-  const c = recordedBaselineComparison(s) || checkpointComparison(s);
+  const c = recordedBaselineComparison(s);
   if (!c) {
-    const prompts = Number(s.task_count || 0);
     return {
       ratio: null,
-      label:
-        prompts < 10
-          ? "Median starts after 10 prompts"
-          : state.baselineMode === "matched" && !configurationCurve(s)?.points.length
-            ? "Need " + baselineMinimumSessions() + " matching model + effort + speed sessions"
-            : "Waiting for a comparable checkpoint",
-      detail:
-        prompts < 10
-          ? "Your median has no checkpoint before 10 prompts yet."
-          : "A comparison needs recorded spend at the same iteration count as the selected median. Model, effort, and speed comparisons require at least " + baselineMinimumSessions() + " matching sessions.",
+      label: "Collector has no comparable baseline",
+      detail: "The collector recalculates this from your stored local median every six hours. Alerts use the same value.",
     };
   }
   const label = c.matched ? "model + effort + speed median" : providerName(s.provider) + " general median";
   return {
     ratio: c.ratio,
     label: c.ratio.toFixed(2) + "× " + label,
-    detail: c.recorded
-      ? "Current recorded spend against the same local median used in the CLI."
-      : money(c.actual) +
-        " recorded at " +
-        c.iteration +
-        " prompts vs. " +
-        money(c.median) +
-        " median across " +
-        c.samples +
-        " sessions in the last " +
-        (state.payload?.baselines?.lookback_days || 60) +
-        " days." +
-        (c.matched ? "" : " General usage includes all models, efforts, and speeds within this provider."),
+    detail: "Current recorded spend against the same local median used in the CLI and alerts.",
   };
 }
 function roundedDollarCeiling(value) {
@@ -573,16 +524,6 @@ function curvePoints(b) {
         .slice()
         .sort((a, b) => a.iterations - b.iterations)
     : [];
-}
-function baselineMinimumSessions() {
-  const value = state.payload?.baselines?.minimum_sessions;
-  return Number.isInteger(value) && value > 0 ? value : 5;
-}
-function configurationCurve(s) {
-  const configs = state.payload?.baselines?.configurations?.[s.provider];
-  if (!configs || typeof configs !== "object") return null;
-  const match = Object.values(configs).find((b) => b && matchesConfiguration(s, b));
-  return match ? { ...match, points: curvePoints(match.checkpoints).filter((p) => p.sessions >= baselineMinimumSessions()) } : null;
 }
 function graphBaselines() {
   return ["claude", "codex"]
