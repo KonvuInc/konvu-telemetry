@@ -94,7 +94,9 @@ class InstallerTests(unittest.TestCase):
                     check=True,
                 )
                 self.assertTrue(installer.remove_claude_statusline())
-            self.assertEqual(rendered.stdout, 'existing:{"session_id":"session"}telemetry')
+            self.assertEqual(
+                rendered.stdout, 'existing:{"session_id":"session"}telemetry'
+            )
             self.assertEqual(
                 json.loads(path.read_text())["statusLine"]["command"],
                 "printf existing:; cat",
