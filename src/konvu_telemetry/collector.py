@@ -10,7 +10,7 @@ from .analytics import (
     backtest_next_ten,
 )
 from .config import DASHBOARD_PORT
-from .display import codex_hook, statusline
+from .display import claude_hook, codex_hook, statusline
 from .exporter import write_normalized_events
 from .service import run_local_service, write_health
 from .snapshot import build_snapshot, write_snapshot
@@ -29,6 +29,7 @@ def main() -> None:
             "once",
             "serve",
             "statusline",
+            "claude-hook",
             "normalize",
             "codex-hook",
             "backtest-next-ten",
@@ -48,6 +49,8 @@ def main() -> None:
         write_normalized_events()
     elif args.command == "codex-hook":
         codex_hook()
+    elif args.command == "claude-hook":
+        claude_hook()
     elif args.command == "backtest-next-ten":
         backtest_next_ten()
     elif args.command == "dashboard":
