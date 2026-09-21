@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Literal
 
 from .config import FILE_CACHE_LIMIT
+from .storage import claude_quota_path
 
 
 Provider = Literal["claude", "codex"]
@@ -127,6 +128,31 @@ def _quota_windows(raw: dict[str, object], observed: float) -> list[dict[str, ob
             }
         )
     return windows
+
+
+def _claude_quota_snapshot(now: float) -> dict[str, object] | None:
+    """Read recent provider-reported Claude quota data from the status-line hook."""
+    try:
+        raw = json.loads(claude_quota_path().read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    observed_at = raw.get("observed_at")
+    observed = _timestamp(observed_at)
+    if observed is None or now - observed > ACTIVITY_FRESHNESS_SECONDS:
+        return None
+    raw_windows = raw.get("windows")
+    if not isinstance(raw_windows, list):
+        return None
+    windows = [window for window in raw_windows if isinstance(window, dict)]
+    if not windows:
+        return None
+    return {
+        "observed_at": observed_at,
+        "source": "claude_statusline",
+        "windows": windows,
+    }
 
 
 def _read_telemetry(path: Path, provider: Provider) -> TranscriptTelemetry:
@@ -297,9 +323,12 @@ def _read_telemetry(path: Path, provider: Provider) -> TranscriptTelemetry:
                         key = limit_id if isinstance(limit_id, str) else "default"
                         previous = result.quotas.get(key)
                         if previous is None or timestamp >= previous[0]:
+                            windows = _quota_windows(quotas, timestamp)
+                            for window in windows:
+                                window["session_id"] = result.session_id
                             result.quotas[key] = (
                                 timestamp,
-                                _quota_windows(quotas, timestamp),
+                                windows,
                             )
     except (OSError, UnicodeError):
         pass
@@ -531,7 +560,7 @@ def enrich_snapshot(
     ):
         quotas.pop("default")
     observed = max((row[0] for row in quotas.values()), default=None)
-    snapshot["account_quotas"] = {
+    account_quotas: dict[str, object] = {
         "codex": {
             "observed_at": _iso(observed),
             "source": "local_transcript",
@@ -540,3 +569,7 @@ def enrich_snapshot(
             ],
         },
     }
+    claude_quotas = _claude_quota_snapshot(now)
+    if claude_quotas is not None:
+        account_quotas["claude"] = claude_quotas
+    snapshot["account_quotas"] = account_quotas

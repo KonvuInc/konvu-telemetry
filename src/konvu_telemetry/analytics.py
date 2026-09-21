@@ -269,6 +269,18 @@ def apply_notification_tracking(
             used_percent = window.get("used_percent")
             if alert_window is None or not isinstance(used_percent, (int, float)):
                 continue
+            source_session_id = window.get("session_id")
+            target_session = next(
+                (
+                    session
+                    for session in sessions
+                    if session.get("provider") == provider
+                    and session.get("id") == source_session_id
+                ),
+                None,
+            )
+            if target_session is None or not isinstance(source_session_id, str):
+                continue
             window_name, threshold = alert_window
             limit_id = window.get("limit_id")
             key = f"quota:{provider}:{limit_id if isinstance(limit_id, str) else 'default'}:{window_name}"
@@ -311,6 +323,7 @@ def apply_notification_tracking(
                     "hot": True,
                     "window": window_name,
                     "used_percent": round(used_percent),
+                    "session_id": source_session_id,
                 }
             )
         quotas["notifications"] = notifications

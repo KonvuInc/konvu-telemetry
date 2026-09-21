@@ -21,8 +21,16 @@ from konvu_telemetry.analytics import (
     task_series,
 )
 from konvu_telemetry.config import BASELINE_MILESTONES
-from konvu_telemetry.display import baseline_text, quota_usage_text
-from konvu_telemetry.fleet_telemetry import _timestamp, is_claude_prompt
+from konvu_telemetry.display import (
+    baseline_text,
+    quota_usage_text,
+    record_claude_quotas,
+)
+from konvu_telemetry.fleet_telemetry import (
+    _timestamp,
+    enrich_snapshot,
+    is_claude_prompt,
+)
 from konvu_telemetry.live import CodexLiveFile, IncrementalLiveState
 from konvu_telemetry.models import Usage, UsageEvent
 from konvu_telemetry.parsers import (
@@ -1286,16 +1294,19 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(session["notification"]["sequence"], 2)
 
     def test_quota_alerts_cross_threshold_then_renotify_only_when_rising(self) -> None:
+        sessions = [{"id": "session", "provider": "codex"}]
         account_quotas = {
             "codex": {
                 "windows": [
                     {
                         "limit_id": "default",
+                        "session_id": "session",
                         "window_minutes": 300,
                         "used_percent": 80.0,
                     },
                     {
                         "limit_id": "default",
+                        "session_id": "session",
                         "window_minutes": 10080,
                         "used_percent": 90.0,
                     },
@@ -1308,7 +1319,7 @@ class ServiceTests(unittest.TestCase):
                 "konvu_telemetry.analytics.notification_state_path",
                 return_value=state_path,
             ):
-                apply_notification_tracking([], 100.0, account_quotas)
+                apply_notification_tracking(sessions, 100.0, account_quotas)
                 self.assertEqual(
                     account_quotas["codex"]["notifications"],
                     [
@@ -1317,26 +1328,28 @@ class ServiceTests(unittest.TestCase):
                             "hot": True,
                             "window": "5-hour",
                             "used_percent": 80,
+                            "session_id": "session",
                         },
                         {
                             "sequence": 1,
                             "hot": True,
                             "window": "weekly",
                             "used_percent": 90,
+                            "session_id": "session",
                         },
                     ],
                 )
                 account_quotas["codex"]["windows"][0]["used_percent"] = 81.0
-                apply_notification_tracking([], 100.0 + 9 * 60, account_quotas)
+                apply_notification_tracking(sessions, 100.0 + 9 * 60, account_quotas)
                 self.assertEqual(
                     account_quotas["codex"]["notifications"][0]["sequence"], 1
                 )
-                apply_notification_tracking([], 100.0 + 10 * 60, account_quotas)
+                apply_notification_tracking(sessions, 100.0 + 10 * 60, account_quotas)
                 self.assertEqual(
                     account_quotas["codex"]["notifications"][0]["sequence"], 2
                 )
                 account_quotas["codex"]["windows"][0]["used_percent"] = 20.0
-                apply_notification_tracking([], 100.0 + 11 * 60, account_quotas)
+                apply_notification_tracking(sessions, 100.0 + 11 * 60, account_quotas)
                 self.assertEqual(
                     account_quotas["codex"]["notifications"],
                     [
@@ -1345,11 +1358,12 @@ class ServiceTests(unittest.TestCase):
                             "hot": True,
                             "window": "weekly",
                             "used_percent": 90,
+                            "session_id": "session",
                         }
                     ],
                 )
                 account_quotas["codex"]["windows"][0]["used_percent"] = 80.0
-                apply_notification_tracking([], 100.0 + 12 * 60, account_quotas)
+                apply_notification_tracking(sessions, 100.0 + 12 * 60, account_quotas)
         self.assertEqual(account_quotas["codex"]["notifications"][0]["sequence"], 3)
 
     def test_quota_usage_text_marks_windows_at_the_alert_threshold(self) -> None:
@@ -1366,11 +1380,13 @@ class ServiceTests(unittest.TestCase):
         )
 
     def test_quota_alerts_again_after_a_window_resets_above_threshold(self) -> None:
+        sessions = [{"id": "session", "provider": "codex"}]
         account_quotas = {
             "codex": {
                 "windows": [
                     {
                         "limit_id": "default",
+                        "session_id": "session",
                         "window_minutes": 300,
                         "used_percent": 80.0,
                         "resets_at": "2026-01-01T05:00:00+00:00",
@@ -1384,15 +1400,60 @@ class ServiceTests(unittest.TestCase):
                 "konvu_telemetry.analytics.notification_state_path",
                 return_value=state_path,
             ):
-                apply_notification_tracking([], 100.0, account_quotas)
+                apply_notification_tracking(sessions, 100.0, account_quotas)
                 account_quotas["codex"]["windows"][0].update(
                     {
                         "used_percent": 80.0,
                         "resets_at": "2026-01-01T10:00:00+00:00",
                     }
                 )
-                apply_notification_tracking([], 101.0, account_quotas)
+                apply_notification_tracking(sessions, 101.0, account_quotas)
         self.assertEqual(account_quotas["codex"]["notifications"][0]["sequence"], 2)
+
+    def test_claude_statusline_quotas_reach_the_dashboard(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            quota_path = Path(directory) / "claude-quotas.json"
+            with patch(
+                "konvu_telemetry.display.claude_quota_path", return_value=quota_path
+            ):
+                record_claude_quotas(
+                    {
+                        "rate_limits": {
+                            "five_hour": {"utilization": 0.8},
+                            "seven_day": {"used_percentage": 90},
+                        }
+                    },
+                    "session",
+                )
+            snapshot = {"sessions": [{"id": "session", "provider": "claude"}]}
+            with patch(
+                "konvu_telemetry.fleet_telemetry.claude_quota_path",
+                return_value=quota_path,
+            ):
+                enrich_snapshot(snapshot, [], [], time.time())
+        quotas = snapshot["account_quotas"]["claude"]
+        self.assertEqual(quotas["source"], "claude_statusline")
+        self.assertEqual(
+            quotas["windows"],
+            [
+                {
+                    "limit_id": "default",
+                    "session_id": "session",
+                    "window_minutes": 300,
+                    "used_percent": 80.0,
+                    "remaining_percent": 20.0,
+                    "resets_at": None,
+                },
+                {
+                    "limit_id": "default",
+                    "session_id": "session",
+                    "window_minutes": 10080,
+                    "used_percent": 90,
+                    "remaining_percent": 10,
+                    "resets_at": None,
+                },
+            ],
+        )
 
 
 if __name__ == "__main__":
