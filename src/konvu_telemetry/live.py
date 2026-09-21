@@ -426,10 +426,14 @@ class IncrementalLiveState:
                     if tier in {"fast", "priority"}
                     else "standard"
                 )
-            if timestamp is not None and (
-                event_type == "user_message"
-                or (event_type == "message" and payload.get("role") == "user")
-            ) and not state.has_recorded_task_starts:
+            if (
+                timestamp is not None
+                and (
+                    event_type == "user_message"
+                    or (event_type == "message" and payload.get("role") == "user")
+                )
+                and not state.has_recorded_task_starts
+            ):
                 if timestamp not in state.task_starts:
                     state.task_starts.append(timestamp)
                     state.task_starts.sort()
