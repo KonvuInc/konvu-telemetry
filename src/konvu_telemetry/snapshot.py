@@ -498,6 +498,9 @@ def build_snapshot(
                 "token_usage": {
                     "input": sum(event.usage.input_tokens for event in events),
                     "output": sum(event.usage.output_tokens for event in events),
+                    "reasoning_output": sum(
+                        event.usage.reasoning_output_tokens for event in events
+                    ),
                     "cache_write": sum(
                         event.usage.cache_write_tokens for event in events
                     ),
@@ -767,6 +770,9 @@ def build_snapshot(
                 "token_usage": {
                     "input": sum(event.usage.input_tokens for event in all_events),
                     "output": sum(event.usage.output_tokens for event in all_events),
+                    "reasoning_output": sum(
+                        event.usage.reasoning_output_tokens for event in all_events
+                    ),
                     "cache_write": sum(
                         event.usage.cache_write_tokens for event in all_events
                     ),

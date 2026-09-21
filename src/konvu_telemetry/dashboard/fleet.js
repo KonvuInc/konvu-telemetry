@@ -1498,6 +1498,7 @@ function tokenBreakdown(s) {
       ["Cache reads", u.cache_read, COLORS.mint],
       ["Cache writes", u.cache_write, COLORS.muted],
       ["Output", u.output, COLORS.pink],
+      ["Reasoning output", u.reasoning_output, COLORS.orange],
     ];
   const total = parts.reduce((a, p) => a + (nonnegative(p[1]) ? p[1] : 0), 0);
   return (

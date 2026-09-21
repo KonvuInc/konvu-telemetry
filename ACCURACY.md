@@ -12,7 +12,7 @@ The snapshot source and SHA-256 are recorded in `NOTICE`. The scheduled pricing 
 
 Prompt boundaries come from explicit provider records. Subagent calls are deduplicated by message identity and included in the parent session total. Their spend is attributed to the parent prompt that spawned them when the provider records that relationship; otherwise timestamps are used and the per-prompt attribution is approximate.
 
-Context is the latest provider-recorded input plus cache traffic for a model call. It is not cumulative token traffic. Codex supplies its context-window size directly. Claude uses conservative 200K display capacity until observed usage proves that an advertised larger model window is active.
+Context is the latest provider-recorded input plus cache traffic for a model call. It is not cumulative token traffic. Codex supplies its context-window size directly. Claude uses the published capacity in the bundled model-price snapshot and labels it as model pricing rather than provider-observed capacity.
 
 ## Forecasts and medians
 

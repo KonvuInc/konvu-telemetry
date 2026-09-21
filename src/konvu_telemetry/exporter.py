@@ -29,14 +29,19 @@ def normalized_event(
         "tokens": {
             "input": event.usage.input_tokens,
             "output": event.usage.output_tokens,
+            "reasoning_output": event.usage.reasoning_output_tokens,
             "cache_write": event.usage.cache_write_tokens,
+            "cache_write_one_hour": event.usage.cache_write_one_hour_tokens,
             "cache_read": event.usage.cache_read_tokens,
+            "web_search_requests": event.usage.web_search_requests,
         },
         "context_window_tokens": event.context_window_tokens,
         "estimated_cost_usd": event_cost(event, prices),
         "tool_calls": event.tool_calls,
         "is_subagent": event.is_subagent,
         "agent_id": event.agent_id,
+        "reasoning_effort": event.effort,
+        "speed": event.usage.speed,
     }
 
 
