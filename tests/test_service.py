@@ -1,10 +1,11 @@
 import json
+from collections.abc import Callable
 from datetime import datetime, timezone
 from io import StringIO
 import os
 import sys
 import tempfile
-from threading import Lock
+from threading import Event, Lock, Thread
 import time
 import unittest
 from pathlib import Path
@@ -81,6 +82,7 @@ from konvu_telemetry.pricing import (
 )
 from konvu_telemetry.service import (
     DashboardRequestHandler,
+    RefreshCoordinator,
     collect_forever,
     load_health,
     local_request_allowed,
@@ -1645,21 +1647,90 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(health["next_poll_at"], "1970-01-01T00:02:40+00:00")
 
     def test_collector_keeps_polling_when_health_state_cannot_be_written(self) -> None:
+        coordinator = Mock()
+        coordinator.wait_for_refresh.side_effect = StopIteration
         with (
             patch(
                 "konvu_telemetry.service.build_snapshot", side_effect=OSError("full")
             ),
             patch("konvu_telemetry.service.write_health", side_effect=OSError("full")),
             patch("konvu_telemetry.service.record_collector_failure") as recorded,
-            patch("konvu_telemetry.service.time.sleep", side_effect=StopIteration),
             self.assertLogs("konvu_telemetry.service", level="ERROR"),
             self.assertRaises(StopIteration),
         ):
-            collect_forever(60, IncrementalLiveState(), Lock())
+            collect_forever(60, IncrementalLiveState(), Lock(), coordinator)
         recorded.assert_called_once()
+        coordinator.start_collection.assert_called_once_with()
+        coordinator.finish_collection.assert_called_once_with("OSError: full")
+
+    def test_manual_refresh_wakes_collector_and_waits_for_completion(self) -> None:
+        coordinator = RefreshCoordinator()
+        results: list[str | None] = []
+        requester = Thread(
+            target=lambda: results.append(coordinator.request_refresh(1))
+        )
+
+        requester.start()
+        self.assertTrue(coordinator.wait_for_refresh(1))
+        coordinator.start_collection()
+        coordinator.finish_collection(None)
+        requester.join(1)
+
+        self.assertFalse(requester.is_alive())
+        self.assertEqual(results, [None])
+
+    def test_refresh_during_collection_reuses_in_flight_result(self) -> None:
+        coordinator = RefreshCoordinator()
+        coordinator.start_collection()
+        results: list[str | None] = []
+        waiting = Event()
+        original_wait_for = coordinator._condition.wait_for
+
+        def tracked_wait_for(
+            predicate: Callable[[], bool], timeout: float | None = None
+        ) -> bool:
+            waiting.set()
+            return original_wait_for(predicate, timeout)
+
+        requester = Thread(
+            target=lambda: results.append(coordinator.request_refresh(1))
+        )
+
+        with patch.object(
+            coordinator._condition, "wait_for", side_effect=tracked_wait_for
+        ):
+            requester.start()
+            self.assertTrue(waiting.wait(1))
+            coordinator.finish_collection(None)
+        requester.join(1)
+
+        self.assertFalse(requester.is_alive())
+        self.assertEqual(results, [None])
+        self.assertFalse(coordinator.wait_for_refresh(0))
+
+    def test_dashboard_refresh_endpoint_requests_collection(self) -> None:
+        handler = object.__new__(DashboardRequestHandler)
+        handler.headers = {"Host": "127.0.0.1:7824", "Origin": "http://localhost:7824"}
+        handler.path = "/api/refresh"
+        handler.refresh_coordinator = Mock()
+        handler.refresh_coordinator.request_refresh.return_value = None
+        handler.send_response = Mock()
+        handler._secure_headers = Mock()
+        handler._write_payload = Mock()
+
+        with patch(
+            "konvu_telemetry.service.load_health", return_value={"status": "healthy"}
+        ):
+            DashboardRequestHandler.do_POST(handler)
+
+        handler.refresh_coordinator.request_refresh.assert_called_once_with()
+        handler.send_response.assert_called_once_with(200)
+        handler._write_payload.assert_called_once_with(b'{"status": "healthy"}')
 
     def test_first_snapshot_with_session_data_is_recorded(self) -> None:
         service._DASHBOARD_DATA_AVAILABLE = False
+        coordinator = Mock()
+        coordinator.wait_for_refresh.side_effect = StopIteration
         with (
             patch(
                 "konvu_telemetry.service.build_snapshot",
@@ -1672,10 +1743,9 @@ class ServiceTests(unittest.TestCase):
             patch("konvu_telemetry.service.write_health"),
             patch("konvu_telemetry.service.record_first_snapshot_ready") as recorded,
             patch("konvu_telemetry.service.time.time", return_value=1_767_225_630.0),
-            patch("konvu_telemetry.service.time.sleep", side_effect=StopIteration),
             self.assertRaises(StopIteration),
         ):
-            collect_forever(60, IncrementalLiveState(), Lock())
+            collect_forever(60, IncrementalLiveState(), Lock(), coordinator)
         recorded.assert_called_once()
         self.assertTrue(service._DASHBOARD_DATA_AVAILABLE)
 
