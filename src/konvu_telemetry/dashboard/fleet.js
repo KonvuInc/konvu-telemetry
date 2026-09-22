@@ -16,7 +16,7 @@ const BURNING_FORECAST_USD = 4;
 const state = {
   payload: null,
   view: "ledger",
-  baselineMode: "matched",
+  baselineMode: "provider",
   provider: "all",
   sort: "forecast",
   selected: null,
@@ -1070,7 +1070,7 @@ function saveUrl() {
   if (state.view === "graph") q.set("view", "graph");
   if (state.provider !== "all") q.set("tool", state.provider);
   if (state.sort !== "forecast") q.set("sort", state.sort);
-  if (state.baselineMode !== "matched") q.set("compare", state.baselineMode);
+  if (state.baselineMode !== "provider") q.set("compare", state.baselineMode);
   if (state.selected) q.set("session", state.selected);
   history.replaceState(null, "", location.pathname + (q.size ? "?" + q : "") + location.hash);
 }
@@ -1079,7 +1079,7 @@ function initialUrl() {
   state.view = q.get("view") === "graph" ? "graph" : "ledger";
   state.provider = ["claude", "codex"].includes(q.get("tool")) ? q.get("tool") : "all";
   state.sort = ["activity", "spent", "forecast"].includes(q.get("sort")) ? q.get("sort") : "forecast";
-  state.baselineMode = q.get("compare") === "provider" ? "provider" : "matched";
+  state.baselineMode = q.get("compare") === "matched" ? "matched" : "provider";
   state.selected = q.get("session");
   $("#sort").value = state.sort;
   saveUrl();
