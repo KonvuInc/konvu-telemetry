@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 import fcntl
+from importlib.metadata import PackageNotFoundError, version
 import json
 from pathlib import Path
 import platform
@@ -62,8 +63,6 @@ def _send_to_posthog(payload: bytes) -> None:
 
 
 def _cli_version() -> str:
-    from importlib.metadata import PackageNotFoundError, version
-
     try:
         return version("konvu-telemetry")
     except PackageNotFoundError:

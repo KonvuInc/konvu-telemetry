@@ -8,13 +8,17 @@ import sys
 
 from .collector import main as collector_main
 from .installer import service_status, setup, uninstall
+from .tracking import set_tracking_enabled, tracking_status
 
 
 def telemetry_consent() -> bool:
     """Ask interactive setup users before enabling product analytics."""
     if not sys.stdin.isatty():
         return False
-    response = input("Send anonymous usage telemetry to Konvu? [y/N] ")
+    try:
+        response = input("Send anonymous usage telemetry to Konvu? [y/N] ")
+    except EOFError:
+        return False
     return response.strip().lower() in {"y", "yes"}
 
 
@@ -44,8 +48,6 @@ def installer_main(arguments: list[str]) -> None:
 
 
 def tracking_main(arguments: list[str]) -> None:
-    from .tracking import set_tracking_enabled, tracking_status
-
     parser = argparse.ArgumentParser(description="Control anonymous product analytics")
     parser.add_argument("command", choices=["on", "off", "status"])
     args = parser.parse_args(arguments)

@@ -29,34 +29,16 @@ from .storage import (
     valid_session_id,
     write_private_json,
 )
+from .tracking import (
+    flush_in_background as flush_tracking_in_background,
+    record_collector_failure,
+    record_dashboard_opened,
+    record_first_snapshot_ready,
+)
 
 LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost"})
 LOGGER = logging.getLogger(__name__)
 _DASHBOARD_DATA_AVAILABLE = False
-
-
-def record_collector_failure() -> None:
-    from .tracking import record_collector_failure as record
-
-    record()
-
-
-def record_dashboard_opened(data_available: bool) -> None:
-    from .tracking import record_dashboard_opened as record
-
-    record(data_available)
-
-
-def record_first_snapshot_ready() -> None:
-    from .tracking import record_first_snapshot_ready as record
-
-    record()
-
-
-def flush_tracking_in_background() -> None:
-    from .tracking import flush_in_background
-
-    flush_in_background()
 
 
 def snapshot_has_dashboard_data(snapshot: object, now: float) -> bool:

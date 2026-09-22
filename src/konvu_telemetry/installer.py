@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Literal
 
 from .service import load_health
+from .tracking import record_setup_completed as record_setup_event
 
 LABEL = "com.konvu.telemetry"
 PORT = 7824
@@ -30,10 +31,8 @@ HOOK_TIMEOUT_SECONDS = 5
 
 
 def record_setup_completed(duration_seconds: float, *, default_enabled: bool) -> None:
-    """Load product tracking only for the setup command."""
-    from .tracking import record_setup_completed as record
-
-    record(duration_seconds, default_enabled=default_enabled)
+    """Record the completed setup when the user enabled product analytics."""
+    record_setup_event(duration_seconds, default_enabled=default_enabled)
 
 
 @dataclass(frozen=True)
