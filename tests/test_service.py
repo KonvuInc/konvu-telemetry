@@ -1056,6 +1056,56 @@ class ServiceTests(unittest.TestCase):
             ],
         )
 
+    def test_incremental_reader_keeps_oversized_codex_guardian_parent(self) -> None:
+        session_id = "00000000-0000-0000-0000-000000000001"
+        parent_id = "00000000-0000-0000-0000-000000000002"
+        session_meta = {
+            "timestamp": "2026-01-01T00:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": session_id,
+                "parent_thread_id": parent_id,
+                "originator": "codex-tui",
+                "source": {"subagent": {"other": "guardian"}},
+                "base_instructions": "x" * 1_000_000,
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / f"rollout-{session_id}.jsonl"
+            transcript.write_text(json.dumps(session_meta) + "\n")
+            state = IncrementalLiveState()._refresh_codex(transcript)
+        self.assertEqual(state.parent, (parent_id, "guardian"))
+        self.assertEqual(state.client, "cli")
+
+    def test_incremental_reader_keeps_oversized_codex_spawn_metadata(self) -> None:
+        session_id = "00000000-0000-0000-0000-000000000001"
+        parent_id = "00000000-0000-0000-0000-000000000002"
+        session_meta = {
+            "timestamp": "2026-01-01T00:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": session_id,
+                "parent_thread_id": parent_id,
+                "originator": "Codex Desktop",
+                "source": {
+                    "subagent": {
+                        "thread_spawn": {
+                            "parent_thread_id": parent_id,
+                            "agent_path": "/root/reviewer",
+                            "agent_nickname": "Hubble",
+                        }
+                    }
+                },
+                "base_instructions": "x" * 1_000_000,
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / f"rollout-{session_id}.jsonl"
+            transcript.write_text(json.dumps(session_meta) + "\n")
+            state = IncrementalLiveState()._refresh_codex(transcript)
+        self.assertEqual(state.parent, (parent_id, "Hubble"))
+        self.assertEqual(state.client, "desktop")
+
     def test_fleet_telemetry_incrementally_reads_bounded_appends(self) -> None:
         session_id = "00000000-0000-0000-0000-000000000001"
         prompt = {
