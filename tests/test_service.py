@@ -1360,6 +1360,23 @@ class ServiceTests(unittest.TestCase):
         self.assertTrue(snapshot_has_dashboard_data(snapshot, 1_767_225_630.0))
         self.assertFalse(snapshot_has_dashboard_data(snapshot, 1_767_226_801.0))
 
+    def test_service_initializes_dashboard_visibility_from_disk(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory) / "live-sessions.json"
+            snapshot.write_text(
+                json.dumps(
+                    {
+                        "live_activity_window_seconds": 1_200,
+                        "sessions": [{"last_activity_at": "2026-01-01T00:00:00+00:00"}],
+                    }
+                )
+            )
+            service._DASHBOARD_DATA_AVAILABLE = False
+            with patch("konvu_telemetry.service.snapshot_path", return_value=snapshot):
+                service.initialize_dashboard_data_available(1_767_225_630.0)
+
+        self.assertTrue(service._DASHBOARD_DATA_AVAILABLE)
+
     def test_refreshed_session_reads_existing_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

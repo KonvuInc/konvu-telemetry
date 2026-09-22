@@ -83,6 +83,18 @@ def snapshot_has_dashboard_data(snapshot: object, now: float) -> bool:
     return False
 
 
+def initialize_dashboard_data_available(now: float | None = None) -> None:
+    """Restore dashboard visibility state once when the resident service starts."""
+    global _DASHBOARD_DATA_AVAILABLE
+    try:
+        snapshot = json.loads(snapshot_path().read_text())
+    except (OSError, json.JSONDecodeError):
+        _DASHBOARD_DATA_AVAILABLE = False
+        return
+    current_time = time.time() if now is None else now
+    _DASHBOARD_DATA_AVAILABLE = snapshot_has_dashboard_data(snapshot, current_time)
+
+
 def local_request_allowed(host: str, origin: str | None) -> bool:
     host_name = urlparse(f"//{host}").hostname
     origin_host = urlparse(origin).hostname if origin is not None else None
@@ -274,6 +286,7 @@ def run_local_service(interval_seconds: int, port: int) -> None:
         args=(interval_seconds, live_state, snapshot_lock),
         daemon=True,
     )
+    initialize_dashboard_data_available()
     collector.start()
     flush_tracking_in_background()
     print(
