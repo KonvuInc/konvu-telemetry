@@ -14,7 +14,7 @@ Konvu Telemetry is one Python package with a single resident process. The proces
 - Desktop clients collapse a hook `systemMessage` into a hidden notice, so the desktop path uses a `UserPromptSubmit` hook returning `hookSpecificOutput.additionalContext` that asks the model to end its reply with the usage box.
 - Claude installs no `Stop` hook. Setup removes the one earlier versions installed and leaves every other `Stop` entry in the file alone; `claude-hook` remains a silent no-op so settings written by an older version keep working.
 - Claude is identified as desktop by `CLAUDE_CODE_ENTRYPOINT=claude-desktop` in the hook environment; Codex by its recorded client (Desktop app or VS Code) as opposed to the TUI, read from the rollout's `session_meta` record. An absent, unreadable, or unrecognized client means CLI, so the desktop path is never entered by accident.
-- The desktop box is rate-limited exactly like the Codex CLI hook: `CODEX_DISPLAY_COST_THRESHOLD_USD` of spend, `CODEX_DISPLAY_MIN_TASKS` prompts, and a meaningful change since the last one. Its state file is keyed by provider and session, so two providers cannot overwrite each other's entry for the same identifier.
+- A usage box is shown when, and only when, the last prompt used a tool. The prompt hooks read the rendered session's `last_task_tool_calls`; the Codex `Stop` hook counts tool calls on the exact turn it fires on, which is more precise for that one hook. A missing, zero, or non-integer count shows nothing. There is no cost floor, prompt-count floor, or rate limit.
 
 ## Runtime flow
 
@@ -38,7 +38,6 @@ Konvu Telemetry is one Python package with a single resident process. The proces
 | `~/.konvu/telemetry/baselines.json` | Local historical medians | `0600` |
 | `~/.konvu/telemetry/health.json` | Collector freshness and last error | `0600` |
 | `~/.konvu/telemetry/notification-state.json` | Alert suppression state | `0600` |
-| `~/.konvu/telemetry/codex-display-state.json` | Display rate-limit state for both providers, keyed by provider and session; the filename is legacy | `0600` |
 | `~/.konvu/telemetry/collector*.log` | LaunchAgent stdout and stderr | User-owned |
 | `~/Library/LaunchAgents/com.konvu.telemetry.plist` | Per-user service definition | User-owned |
 | `~/.claude/settings.json` | Optional Claude status line plus `UserPromptSubmit` hook merge | `0600` after write |

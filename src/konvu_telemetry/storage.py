@@ -169,11 +169,6 @@ def claude_quota_path() -> Path:
     return home_dir() / "claude-quotas.json"
 
 
-# The filename is legacy; both providers now share this rate-limit state.
-def display_state_path() -> Path:
-    return home_dir() / "codex-display-state.json"
-
-
 def session_path(provider: str, session_id: str) -> Path:
     if provider not in ALLOWED_PROVIDERS or not valid_session_id(session_id):
         raise ValueError("Invalid local telemetry session identity")

@@ -15,8 +15,6 @@ from .config import (
     ALERT_QUOTA_WEEKLY_PERCENT,
     ALLOWED_PROVIDERS,
     CLAUDE_DESKTOP_ENTRYPOINT,
-    CODEX_DISPLAY_COST_THRESHOLD_USD,
-    CODEX_DISPLAY_MIN_TASKS,
 )
 from .parsers import (
     claude_hook_transcript,
@@ -26,7 +24,6 @@ from .parsers import (
 )
 from .storage import (
     claude_quota_path,
-    display_state_path,
     session_path,
     snapshot_path,
     valid_session_id,
@@ -390,6 +387,14 @@ def prompt_context_payload(session: dict[str, object], quota_text: str) -> str:
     )
 
 
+def last_prompt_used_a_tool(session: dict[str, object]) -> bool:
+    """Show the usage box only for a prompt that actually put the model to work."""
+    tool_calls = session.get("last_task_tool_calls")
+    if isinstance(tool_calls, bool) or not isinstance(tool_calls, int):
+        return False
+    return tool_calls > 0
+
+
 def codex_hook() -> None:
     """Return the boxed Codex CLI usage message from its local session file."""
     try:
@@ -420,7 +425,7 @@ def codex_hook() -> None:
         print(json.dumps({"suppressOutput": True}))
         return
     session = refreshed_session("codex", session_id)
-    if not isinstance(session, dict) or not display_is_worth_showing("codex", session):
+    if not isinstance(session, dict):
         print(json.dumps({"suppressOutput": True}))
         return
     lines = usage_box_lines(session, recorded_quota_usage_text("codex"))
@@ -447,7 +452,7 @@ def claude_prompt_hook() -> None:
     if not isinstance(session_id, str) or not valid_session_id(session_id):
         return
     session = refreshed_session("claude", session_id)
-    if not isinstance(session, dict) or not display_is_worth_showing("claude", session):
+    if not isinstance(session, dict) or not last_prompt_used_a_tool(session):
         return
     print(prompt_context_payload(session, recorded_quota_usage_text("claude")))
 
@@ -475,7 +480,7 @@ def codex_prompt_hook() -> None:
         print(json.dumps({"suppressOutput": True}))
         return
     session = refreshed_session("codex", session_id)
-    if not isinstance(session, dict) or not display_is_worth_showing("codex", session):
+    if not isinstance(session, dict) or not last_prompt_used_a_tool(session):
         print(json.dumps({"suppressOutput": True}))
         return
     print(prompt_context_payload(session, recorded_quota_usage_text("codex")))
@@ -497,56 +502,3 @@ def refreshed_session(provider: str, session_id: str) -> dict[str, object] | Non
         if isinstance(payload, dict)
         else None
     )
-
-
-def display_is_worth_showing(provider: str, session: dict[str, object]) -> bool:
-    """Rate-limit a provider's usage box to meaningful changes in a working session."""
-    session_id = session.get("id")
-    task_count = session.get("task_count")
-    total_cost = session.get("total_cost_usd")
-    forecast = session.get("projected_next_10_tasks_usd")
-    if (
-        provider not in ALLOWED_PROVIDERS
-        or not isinstance(session_id, str)
-        or not isinstance(task_count, int)
-        or task_count < CODEX_DISPLAY_MIN_TASKS
-        or not isinstance(total_cost, (int, float))
-        or total_cost < CODEX_DISPLAY_COST_THRESHOLD_USD
-    ):
-        return False
-    # Providers share one state file, so the key has to carry both dimensions of the identity.
-    state_key = f"{provider}:{session_id}"
-    try:
-        raw_state = json.loads(display_state_path().read_text())
-    except (OSError, json.JSONDecodeError):
-        raw_state = {}
-    state = raw_state if isinstance(raw_state, dict) else {}
-    previous = state.get(state_key)
-    # Entries written before the key was namespaced are still the same session's history.
-    if not isinstance(previous, dict):
-        previous = state.get(session_id)
-    if not isinstance(previous, dict):
-        previous = {}
-    previous_iteration = previous.get("task_count")
-    previous_cost = previous.get("total_cost_usd")
-    previous_forecast = previous.get("forecast_usd")
-    enough_turns = (
-        not isinstance(previous_iteration, int) or task_count - previous_iteration >= 3
-    )
-    cost_changed = not isinstance(
-        previous_cost, (int, float)
-    ) or total_cost - previous_cost >= max(2.0, previous_cost * 0.1)
-    forecast_changed = isinstance(forecast, (int, float)) and (
-        not isinstance(previous_forecast, (int, float))
-        or abs(forecast - previous_forecast) >= max(1.0, previous_forecast * 0.25)
-    )
-    if not enough_turns or not (cost_changed or forecast_changed):
-        return False
-    state[state_key] = {
-        "task_count": task_count,
-        "total_cost_usd": total_cost,
-        "forecast_usd": forecast,
-        "shown_at": time.time(),
-    }
-    write_private_json(display_state_path(), state)
-    return True

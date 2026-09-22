@@ -43,7 +43,7 @@ from konvu_telemetry.display import (
     codex_hook,
     codex_is_desktop,
     codex_prompt_hook,
-    display_is_worth_showing,
+    last_prompt_used_a_tool,
     quota_usage_text,
     record_claude_quotas,
     refreshed_session,
@@ -1363,9 +1363,6 @@ class ServiceTests(unittest.TestCase):
             ),
             patch.object(sys, "stdout", stdout),
             patch("konvu_telemetry.display.refreshed_session", return_value=session),
-            patch(
-                "konvu_telemetry.display.display_is_worth_showing", return_value=True
-            ),
             patch("konvu_telemetry.display.recorded_quota_usage_text", return_value=""),
         ):
             hook()
@@ -1390,7 +1387,7 @@ class ServiceTests(unittest.TestCase):
             "total_cost_usd": 25.0,
             "cost_status": "complete",
             "projected_next_10_tasks_usd": 5.0,
-            "task_count": 9,
+            "last_task_tool_calls": 3,
             "context_tokens": 500,
             "context_window_tokens": 1000,
         }
@@ -1421,6 +1418,7 @@ class ServiceTests(unittest.TestCase):
         hook: Callable[[], None],
         client: str,
         session: dict[str, object] | None,
+        turn_tool_calls: int = 1,
     ) -> str:
         """Run a Codex hook against one recorded client and return its stdout."""
         session_id = "00000000-0000-0000-0000-000000000001"
@@ -1436,12 +1434,12 @@ class ServiceTests(unittest.TestCase):
                 "konvu_telemetry.display.codex_hook_transcript",
                 return_value=Path("session.jsonl"),
             ),
-            patch("konvu_telemetry.display.codex_turn_tool_calls", return_value=1),
+            patch(
+                "konvu_telemetry.display.codex_turn_tool_calls",
+                return_value=turn_tool_calls,
+            ),
             patch("konvu_telemetry.display.codex_client_in_file", return_value=client),
             patch("konvu_telemetry.display.refreshed_session", return_value=session),
-            patch(
-                "konvu_telemetry.display.display_is_worth_showing", return_value=True
-            ),
             patch(
                 "konvu_telemetry.display.recorded_quota_usage_text",
                 return_value="3% weekly limit",
@@ -1489,6 +1487,7 @@ class ServiceTests(unittest.TestCase):
             "task_count": 5,
             "cost_status": "complete",
             "projected_next_10_tasks_usd": 4.9,
+            "last_task_tool_calls": 3,
             "context_tokens": 650,
             "context_window_tokens": 1000,
         }
@@ -1507,78 +1506,81 @@ class ServiceTests(unittest.TestCase):
             {"suppressOutput": True},
         )
 
-    def test_display_rate_limit_suppresses_an_immediate_second_show(self) -> None:
-        session = {
+    def test_last_prompt_used_a_tool_accepts_only_a_positive_count(self) -> None:
+        self.assertTrue(last_prompt_used_a_tool({"last_task_tool_calls": 1}))
+        self.assertTrue(last_prompt_used_a_tool({"last_task_tool_calls": 12}))
+        for value in (0, -1, None, "1", 1.0, True, [1]):
+            self.assertFalse(
+                last_prompt_used_a_tool({"last_task_tool_calls": value}), repr(value)
+            )
+        self.assertFalse(last_prompt_used_a_tool({}))
+
+    def usage_session(self, tool_calls: object) -> dict[str, object]:
+        """Build a session that differs only in the field the display gate reads."""
+        session: dict[str, object] = {
             "id": "00000000-0000-0000-0000-000000000001",
-            "task_count": 9,
-            "total_cost_usd": 25.0,
-            "projected_next_10_tasks_usd": 5.0,
+            "total_cost_usd": 0.02,
+            "cost_status": "complete",
+            "projected_next_10_tasks_usd": 0.1,
+            "task_count": 1,
+            "context_tokens": 500,
+            "context_window_tokens": 1000,
         }
-        with tempfile.TemporaryDirectory() as directory:
-            state = Path(directory) / "display-state.json"
-            with patch(
-                "konvu_telemetry.display.display_state_path", return_value=state
-            ):
-                self.assertTrue(display_is_worth_showing("codex", session))
-                self.assertFalse(display_is_worth_showing("codex", session))
-                # A same-id session on the other provider keeps its own rate-limit entry.
-                self.assertTrue(display_is_worth_showing("claude", session))
-                self.assertFalse(display_is_worth_showing("claude", session))
-                self.assertFalse(display_is_worth_showing("bogus", session))
-            self.assertEqual(
-                set(json.loads(state.read_text())),
-                {
-                    "codex:00000000-0000-0000-0000-000000000001",
-                    "claude:00000000-0000-0000-0000-000000000001",
-                },
-            )
+        if tool_calls is not None:
+            session["last_task_tool_calls"] = tool_calls
+        return session
 
-    def test_display_rate_limit_still_reads_pre_upgrade_state(self) -> None:
-        session_id = "00000000-0000-0000-0000-000000000001"
-        session = {
-            "id": session_id,
-            "task_count": 9,
-            "total_cost_usd": 25.0,
-            "projected_next_10_tasks_usd": 5.0,
-        }
-        with tempfile.TemporaryDirectory() as directory:
-            state = Path(directory) / "display-state.json"
-            state.write_text(
-                json.dumps(
-                    {
-                        session_id: {
-                            "task_count": 9,
-                            "total_cost_usd": 25.0,
-                            "forecast_usd": 5.0,
-                            "shown_at": time.time(),
-                        }
-                    }
+    def injected_context(self, stdout: str) -> str:
+        """Read the context a prompt hook asked the client to append."""
+        payload = json.loads(stdout)
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertIsInstance(context, str)
+        return str(context)
+
+    def test_desktop_boxes_show_only_when_the_last_prompt_used_a_tool(self) -> None:
+        self.assertIn(
+            "╭─ Konvu usage",
+            self.injected_context(
+                self.run_claude_hook(
+                    claude_prompt_hook, "claude-desktop", self.usage_session(1)
                 )
-            )
-            with patch(
-                "konvu_telemetry.display.display_state_path", return_value=state
-            ):
-                self.assertFalse(display_is_worth_showing("codex", session))
-                moved_on = {**session, "task_count": 20, "total_cost_usd": 40.0}
-                self.assertTrue(display_is_worth_showing("codex", moved_on))
+            ),
+        )
+        self.assertIn(
+            "╭─ Konvu usage",
+            self.injected_context(
+                self.run_codex_hook(codex_prompt_hook, "desktop", self.usage_session(1))
+            ),
+        )
+        # Zero, absent, and non-integer counts all fail closed on both desktop surfaces.
+        for tool_calls in (0, None, "1", 1.5):
+            session = self.usage_session(tool_calls)
             self.assertEqual(
-                set(json.loads(state.read_text())),
-                {session_id, f"codex:{session_id}"},
+                self.run_claude_hook(claude_prompt_hook, "claude-desktop", session),
+                "",
+                repr(tool_calls),
+            )
+            self.assertEqual(
+                json.loads(self.run_codex_hook(codex_prompt_hook, "desktop", session)),
+                {"suppressOutput": True},
+                repr(tool_calls),
             )
 
-    def test_display_rate_limit_needs_cost_and_prompts(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            state = Path(directory) / "display-state.json"
-            with patch(
-                "konvu_telemetry.display.display_state_path", return_value=state
-            ):
-                for session in (
-                    {"id": "s", "task_count": 9, "total_cost_usd": 1.0},
-                    {"id": "s", "task_count": 2, "total_cost_usd": 25.0},
-                    {"id": "s", "task_count": 9},
-                ):
-                    self.assertFalse(display_is_worth_showing("codex", session))
-            self.assertFalse(state.exists())
+    def test_codex_stop_box_shows_only_when_the_turn_used_a_tool(self) -> None:
+        # This hook counts the exact turn it fires on rather than the snapshot field.
+        session = self.usage_session(0)
+        self.assertIn(
+            "╭─ Konvu usage",
+            json.loads(
+                self.run_codex_hook(codex_hook, "cli", session, turn_tool_calls=1)
+            )["systemMessage"],
+        )
+        self.assertEqual(
+            json.loads(
+                self.run_codex_hook(codex_hook, "cli", session, turn_tool_calls=0)
+            ),
+            {"suppressOutput": True},
+        )
 
     def test_codex_is_desktop_covers_every_recorded_client(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1621,70 +1623,20 @@ class ServiceTests(unittest.TestCase):
             self.assertFalse(codex_is_desktop(None))
 
     def test_codex_hook_includes_quota_with_context_and_never_alone(self) -> None:
-        session_id = "00000000-0000-0000-0000-000000000001"
-        stdout = StringIO()
         session = {
-            "id": session_id,
+            "id": "00000000-0000-0000-0000-000000000001",
             "total_cost_usd": 25.4,
-            "task_count": 5,
             "cost_status": "complete",
             "projected_next_10_tasks_usd": 4.9,
             "context_tokens": 650,
             "context_window_tokens": 1000,
         }
-        with (
-            patch.object(
-                sys,
-                "stdin",
-                StringIO(json.dumps({"session_id": session_id, "turn_id": "turn"})),
-            ),
-            patch.object(sys, "stdout", stdout),
-            patch(
-                "konvu_telemetry.display.codex_hook_transcript",
-                return_value=Path("session.jsonl"),
-            ),
-            patch("konvu_telemetry.display.codex_turn_tool_calls", return_value=1),
-            patch("konvu_telemetry.display.refreshed_session", return_value=session),
-            patch(
-                "konvu_telemetry.display.display_is_worth_showing",
-                return_value=True,
-            ),
-            patch(
-                "konvu_telemetry.display.recorded_quota_usage_text",
-                return_value="3% weekly limit",
-            ),
-        ):
-            codex_hook()
         self.assertIn(
             "🧠 65% context · 3% weekly limit",
-            json.loads(stdout.getvalue())["systemMessage"],
+            json.loads(self.run_codex_hook(codex_hook, "cli", session))[
+                "systemMessage"
+            ],
         )
-
-        stdout = StringIO()
-        with (
-            patch.object(
-                sys,
-                "stdin",
-                StringIO(json.dumps({"session_id": session_id, "turn_id": "turn"})),
-            ),
-            patch.object(sys, "stdout", stdout),
-            patch(
-                "konvu_telemetry.display.codex_hook_transcript",
-                return_value=Path("session.jsonl"),
-            ),
-            patch("konvu_telemetry.display.codex_turn_tool_calls", return_value=1),
-            patch("konvu_telemetry.display.refreshed_session", return_value=session),
-            patch(
-                "konvu_telemetry.display.display_is_worth_showing",
-                return_value=False,
-            ),
-            patch(
-                "konvu_telemetry.display.recorded_quota_usage_text",
-                return_value="3% weekly limit",
-            ),
-        ):
-            codex_hook()
-        self.assertEqual(json.loads(stdout.getvalue()), {"suppressOutput": True})
 
     def test_task_series_preserves_empty_prompts(self) -> None:
         event = UsageEvent(
