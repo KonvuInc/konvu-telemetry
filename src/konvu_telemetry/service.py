@@ -59,6 +59,9 @@ def write_health(
         ).isoformat()
         if interval_seconds is not None:
             previous["interval_seconds"] = interval_seconds
+            previous["next_poll_at"] = datetime.fromtimestamp(
+                now + interval_seconds, timezone.utc
+            ).isoformat()
         previous.pop("last_error", None)
         previous.pop("last_error_at", None)
     else:
@@ -99,14 +102,16 @@ def collect_forever(
 ) -> None:
     """Refresh local session files until the operating system stops the service."""
     while True:
-        now = time.time()
+        started_at = time.time()
         try:
             with snapshot_lock:
-                write_snapshot(build_snapshot(now, live_state))
-            write_health(now, interval_seconds=interval_seconds)
+                write_snapshot(build_snapshot(started_at, live_state))
+            write_health(time.time(), interval_seconds=interval_seconds)
         except Exception as error:
             try:
-                write_health(now, f"{type(error).__name__}: {error}", interval_seconds)
+                write_health(
+                    time.time(), f"{type(error).__name__}: {error}", interval_seconds
+                )
             except Exception as health_error:
                 LOGGER.error(
                     "Collector failed (%s); health write failed (%s)",

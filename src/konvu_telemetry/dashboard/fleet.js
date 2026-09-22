@@ -25,7 +25,8 @@ const state = {
   chart: "cumulative",
   error: false,
   refreshInFlight: false,
-  nextRefreshAt: Date.now(),
+  nextRefreshAt: null,
+  refreshIntervalMs: null,
   manualRefreshAvailableAt: 0,
   snapshotEtag: null,
   detailRequest: 0,
@@ -33,6 +34,7 @@ const state = {
   lastOpener: null,
 };
 let refreshTimer = null;
+let healthTimer = null;
 const $ = (selector) => document.querySelector(selector);
 const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const finite = (value) => typeof value === "number" && Number.isFinite(value);
@@ -1131,15 +1133,15 @@ function render() {
 }
 function renderFreshness(stale) {
   state.now = Date.now();
-  const remainingSeconds = Math.max(0, Math.ceil((state.nextRefreshAt - state.now) / 1000));
-  const progress = Math.max(0, Math.min(1, 1 - (state.nextRefreshAt - state.now) / AUTO_REFRESH_MS));
+  const remainingSeconds = state.nextRefreshAt === null ? null : Math.max(0, Math.ceil((state.nextRefreshAt - state.now) / 1000));
+  const progress = state.nextRefreshAt === null || state.refreshIntervalMs === null ? 0 : Math.max(0, Math.min(1, 1 - (state.nextRefreshAt - state.now) / state.refreshIntervalMs));
   const coolingDown = state.now < state.manualRefreshAvailableAt;
   const button = $("#freshness");
   button.style.setProperty("--progress", String(progress));
   button.disabled = state.refreshInFlight || coolingDown;
   button.title = coolingDown
     ? "Manual refresh available in " + Math.ceil((state.manualRefreshAvailableAt - state.now) / 1000) + "s"
-    : (state.error ? "Collector unreachable. " : "") + "Refresh now; next sync in " + remainingSeconds + "s";
+    : (state.error ? "Collector unreachable. " : "") + (remainingSeconds === null ? "Waiting for collector schedule" : "Refresh now; next collector sync in " + remainingSeconds + "s");
   button.setAttribute("aria-label", button.title);
   button.classList.toggle("stale", Boolean(stale));
 }
@@ -1226,8 +1228,10 @@ async function refresh() {
   if (axisDragging || state.refreshInFlight) return;
   state.refreshInFlight = true;
   try {
+    const health = refreshHealth();
     const headers = state.snapshotEtag ? { "If-None-Match": state.snapshotEtag } : {};
     const response = await fetch("/api/live-sessions", { cache: "no-store", headers });
+    await health;
     if (response.status === 304) {
       state.error = false;
       render();
@@ -1260,10 +1264,32 @@ async function refresh() {
   else if (baseline) $("#baseline-mode")?.focus({ preventScroll: true });
   else if (axis) document.querySelector('[data-axis="' + axis + '"]')?.focus({ preventScroll: true });
 }
+async function refreshHealth() {
+  try {
+    const response = await fetch("/healthz", { cache: "no-store" });
+    const health = await response.json();
+    const nextRefreshAt = Date.parse(health?.next_poll_at);
+    const intervalMs = Number(health?.interval_seconds) * 1000;
+    if (!Number.isFinite(nextRefreshAt) || !Number.isFinite(intervalMs) || intervalMs <= 0) return false;
+    const advanced = nextRefreshAt !== state.nextRefreshAt;
+    state.nextRefreshAt = nextRefreshAt;
+    state.refreshIntervalMs = intervalMs;
+    scheduleHealthRefresh();
+    return advanced;
+  } catch {
+    return false;
+  }
+}
+function scheduleHealthRefresh() {
+  if (healthTimer !== null) window.clearTimeout(healthTimer);
+  if (state.nextRefreshAt === null) return;
+  healthTimer = window.setTimeout(async () => {
+    const advanced = await refreshHealth();
+    if (advanced) await refresh();
+  }, Math.max(1000, state.nextRefreshAt - Date.now() + 100));
+}
 function scheduleRefresh() {
   if (refreshTimer !== null) window.clearTimeout(refreshTimer);
-  state.nextRefreshAt = Date.now() + AUTO_REFRESH_MS;
-  renderFreshness(state.error || !state.payload || elapsed(state.payload.generated_at) > 120000);
   refreshTimer = window.setTimeout(async () => {
     await refresh();
     scheduleRefresh();

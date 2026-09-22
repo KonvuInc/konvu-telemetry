@@ -1494,6 +1494,7 @@ class ServiceTests(unittest.TestCase):
             health = load_health(251.0)
         self.assertEqual(health["status"], "stale")
         self.assertEqual(health["stale_for_seconds"], 151)
+        self.assertEqual(health["next_poll_at"], "1970-01-01T00:02:40+00:00")
 
     def test_collector_keeps_polling_when_health_state_cannot_be_written(self) -> None:
         with (
