@@ -1561,6 +1561,21 @@ class ServiceTests(unittest.TestCase):
             collect_forever(60, IncrementalLiveState(), Lock())
         recorded.assert_called_once()
 
+    def test_first_snapshot_with_session_data_is_recorded(self) -> None:
+        with (
+            patch(
+                "konvu_telemetry.service.build_snapshot",
+                return_value={"sessions": [{"id": "session"}]},
+            ),
+            patch("konvu_telemetry.service.write_snapshot"),
+            patch("konvu_telemetry.service.write_health"),
+            patch("konvu_telemetry.service.record_first_snapshot_ready") as recorded,
+            patch("konvu_telemetry.service.time.sleep", side_effect=StopIteration),
+            self.assertRaises(StopIteration),
+        ):
+            collect_forever(60, IncrementalLiveState(), Lock())
+        recorded.assert_called_once()
+
     def test_dashboard_rejects_non_local_or_malformed_origins(self) -> None:
         self.assertTrue(local_request_allowed("127.0.0.1:7824", None))
         self.assertTrue(

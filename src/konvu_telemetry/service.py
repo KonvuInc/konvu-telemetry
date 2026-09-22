@@ -25,7 +25,11 @@ from .storage import (
     valid_session_id,
     write_private_json,
 )
-from .tracking import record_collector_failure, record_dashboard_opened
+from .tracking import (
+    record_collector_failure,
+    record_dashboard_opened,
+    record_first_snapshot_ready,
+)
 
 LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost"})
 LOGGER = logging.getLogger(__name__)
@@ -106,7 +110,10 @@ def collect_forever(
         started_at = time.time()
         try:
             with snapshot_lock:
-                write_snapshot(build_snapshot(started_at, live_state))
+                snapshot = build_snapshot(started_at, live_state)
+                write_snapshot(snapshot)
+            if isinstance(snapshot.get("sessions"), list) and snapshot["sessions"]:
+                record_first_snapshot_ready()
             write_health(time.time(), interval_seconds=interval_seconds)
         except Exception as error:
             record_collector_failure()

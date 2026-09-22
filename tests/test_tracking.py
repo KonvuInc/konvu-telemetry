@@ -1,4 +1,6 @@
 import json
+from contextlib import redirect_stdout
+from io import StringIO
 import tempfile
 import unittest
 from pathlib import Path
@@ -66,13 +68,29 @@ class TrackingStoreTests(unittest.TestCase):
             events = json.loads((directory / "tracking-queue.json").read_text())
             self.assertEqual([event["event"] for event in events], ["telemetry active day"])
 
+    def test_first_snapshot_event_is_queued_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            store = TrackingStore(
+                directory / "tracking-state.json",
+                directory / "tracking-queue.json",
+                sender=lambda _payload: None,
+            )
+
+            store.record_first_snapshot_ready()
+            store.record_first_snapshot_ready()
+
+            events = json.loads((directory / "tracking-queue.json").read_text())
+            self.assertEqual([event["event"] for event in events], ["first snapshot ready"])
+
     def test_cli_opt_out_disables_tracking(self) -> None:
         with (
             patch("konvu_telemetry.cli.set_tracking_enabled") as set_enabled,
             patch("konvu_telemetry.cli.tracking_status") as status,
         ):
             status.return_value.enabled = False
-            cli.main(["telemetry", "off"])
+            with redirect_stdout(StringIO()):
+                cli.main(["telemetry", "off"])
 
         set_enabled.assert_called_once_with(False)
 

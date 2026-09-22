@@ -22,6 +22,7 @@ POSTHOG_BATCH_URL = "https://us.i.posthog.com/batch/"
 DELIVERY_TIMEOUT_SECONDS = 0.5
 ALLOWED_EVENT_PROPERTIES: dict[str, frozenset[str]] = {
     "telemetry setup completed": frozenset({"duration_bucket"}),
+    "first snapshot ready": frozenset(),
     "dashboard opened": frozenset({"data_available"}),
     "telemetry active day": frozenset(),
     "collector failed": frozenset({"stage"}),
@@ -100,6 +101,17 @@ class TrackingStore:
             write_private_json(self._state_path, state)
             queue = self._queue()
             queue.append({"event": "telemetry active day", "properties": {}})
+            write_private_json(self._queue_path, queue)
+
+    def record_first_snapshot_ready(self) -> None:
+        with self._lock:
+            state = self._state()
+            if not bool(state["enabled"]) or bool(state.get("first_snapshot_ready")):
+                return
+            state["first_snapshot_ready"] = True
+            write_private_json(self._state_path, state)
+            queue = self._queue()
+            queue.append({"event": "first snapshot ready", "properties": {}})
             write_private_json(self._queue_path, queue)
 
     def send_queued(self) -> None:
@@ -190,6 +202,14 @@ def record_dashboard_opened(data_available: bool) -> None:
     try:
         _STORE.record("dashboard opened", {"data_available": data_available})
         _STORE.record_active_day(date.today().isoformat())
+        flush_in_background()
+    except Exception:
+        return
+
+
+def record_first_snapshot_ready() -> None:
+    try:
+        _STORE.record_first_snapshot_ready()
         flush_in_background()
     except Exception:
         return
