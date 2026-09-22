@@ -134,17 +134,35 @@ class IncrementalLiveState:
             subagent_match = re.search(rb'"source"\s*:\s*\{\s*"subagent"\s*:', header)
             parent_match = re.search(rb'"parent_thread_id"\s*:\s*"([^"\\]+)"', header)
             other_match = re.search(rb'"other"\s*:\s*"([^"\\]+)"', header)
+            nickname_match = re.search(rb'"agent_nickname"\s*:\s*"([^"\\]+)"', header)
+            path_match = re.search(rb'"agent_path"\s*:\s*"([^"\\]+)"', header)
             source: object = None
             if source_match is not None:
                 source = source_match.group(1).decode("utf-8", "replace")
             elif subagent_match is not None:
-                source = {
-                    "subagent": {
+                subagent: dict[str, object]
+                if b'"thread_spawn"' in header:
+                    spawned: dict[str, object] = {}
+                    if parent_match is not None:
+                        spawned["parent_thread_id"] = parent_match.group(1).decode(
+                            "utf-8", "replace"
+                        )
+                    if nickname_match is not None:
+                        spawned["agent_nickname"] = nickname_match.group(1).decode(
+                            "utf-8", "replace"
+                        )
+                    if path_match is not None:
+                        spawned["agent_path"] = path_match.group(1).decode(
+                            "utf-8", "replace"
+                        )
+                    subagent = {"thread_spawn": spawned}
+                else:
+                    subagent = {
                         "other": other_match.group(1).decode("utf-8", "replace")
                         if other_match is not None
                         else None
                     }
-                }
+                source = {"subagent": subagent}
             payload: dict[str, object] = {
                 "id": decoded_session_id,
                 "source": source,
