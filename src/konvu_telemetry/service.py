@@ -25,7 +25,7 @@ from .storage import (
     valid_session_id,
     write_private_json,
 )
-from .tracking import record_collector_failure
+from .tracking import record_collector_failure, record_dashboard_opened
 
 LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost"})
 LOGGER = logging.getLogger(__name__)
@@ -158,6 +158,8 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
             self.send_error(403)
             return
         path = urlparse(self.path).path
+        if path == "/":
+            record_dashboard_opened(data_available=snapshot_path().is_file())
         if path == "/healthz":
             health = load_health()
             payload = json.dumps(health).encode("utf-8")

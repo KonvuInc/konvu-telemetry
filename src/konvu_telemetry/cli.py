@@ -8,6 +8,7 @@ import sys
 
 from .collector import main as collector_main
 from .installer import service_status, setup, uninstall
+from .tracking import set_tracking_enabled, tracking_status
 
 
 def installer_main(arguments: list[str]) -> None:
@@ -24,8 +25,23 @@ def installer_main(arguments: list[str]) -> None:
         print(json.dumps(uninstall(), indent=2))
 
 
-def main() -> None:
-    if len(sys.argv) > 1 and sys.argv[1] in {"setup", "status", "uninstall"}:
-        installer_main(sys.argv[1:])
+def tracking_main(arguments: list[str]) -> None:
+    parser = argparse.ArgumentParser(description="Control anonymous product analytics")
+    parser.add_argument("command", choices=["on", "off", "status"])
+    args = parser.parse_args(arguments)
+    if args.command == "on":
+        set_tracking_enabled(True)
+    elif args.command == "off":
+        set_tracking_enabled(False)
+    print(json.dumps({"enabled": tracking_status().enabled}))
+
+
+def main(arguments: list[str] | None = None) -> None:
+    command = sys.argv[1:] if arguments is None else arguments
+    if command and command[0] == "telemetry":
+        tracking_main(command[1:])
+        return
+    if command and command[0] in {"setup", "status", "uninstall"}:
+        installer_main(command)
         return
     collector_main()

@@ -1315,6 +1315,21 @@ class ServiceTests(unittest.TestCase):
             handler.send_response.assert_called_once_with(304)
             handler._write_payload.assert_not_called()
 
+    def test_dashboard_open_records_whether_local_data_exists(self) -> None:
+        handler = object.__new__(DashboardRequestHandler)
+        handler.headers = {"Host": "127.0.0.1:7824"}
+        handler.path = "/"
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory) / "live-sessions.json"
+            snapshot.write_text("{}")
+            with (
+                patch("konvu_telemetry.service.snapshot_path", return_value=snapshot),
+                patch("konvu_telemetry.service.record_dashboard_opened") as recorded,
+                patch("http.server.SimpleHTTPRequestHandler.do_GET"),
+            ):
+                DashboardRequestHandler.do_GET(handler)
+        recorded.assert_called_once_with(data_available=True)
+
     def test_refreshed_session_reads_existing_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

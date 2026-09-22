@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from importlib.metadata import PackageNotFoundError, version
 import json
 from pathlib import Path
@@ -90,6 +91,17 @@ class TrackingStore:
             queue.append({"event": event, "properties": properties})
             write_private_json(self._queue_path, queue)
 
+    def record_active_day(self, day: str) -> None:
+        with self._lock:
+            state = self._state()
+            if not bool(state["enabled"]) or state.get("active_day") == day:
+                return
+            state["active_day"] = day
+            write_private_json(self._state_path, state)
+            queue = self._queue()
+            queue.append({"event": "telemetry active day", "properties": {}})
+            write_private_json(self._queue_path, queue)
+
     def send_queued(self) -> None:
         with self._lock:
             queue = self._queue()
@@ -175,11 +187,30 @@ def record_setup_completed(duration_seconds: float) -> None:
 
 
 def record_dashboard_opened(data_available: bool) -> None:
-    _record("dashboard opened", {"data_available": data_available})
+    try:
+        _STORE.record("dashboard opened", {"data_available": data_available})
+        _STORE.record_active_day(date.today().isoformat())
+        flush_in_background()
+    except Exception:
+        return
 
 
 def record_collector_failure() -> None:
     _record("collector failed", {"stage": "snapshot"})
+
+
+def set_tracking_enabled(enabled: bool) -> None:
+    try:
+        _STORE.set_enabled(enabled)
+    except Exception:
+        return
+
+
+def tracking_status() -> TrackingStatus:
+    try:
+        return _STORE.status()
+    except Exception:
+        return TrackingStatus(enabled=False)
 
 
 def flush_in_background() -> None:
