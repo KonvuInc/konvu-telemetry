@@ -109,19 +109,49 @@ class IncrementalLiveState:
 
     @staticmethod
     def _lightweight_codex_item(raw_line: bytes) -> dict[str, object] | None:
-        """Keep accounting metadata from huge tool payloads without allocating their contents."""
+        """Keep required metadata from oversized Codex records."""
         header = raw_line
         types = IncrementalLiveState._codex_types(header)
         timestamp = re.search(rb'"timestamp"\s*:\s*"([^"\\]+)"', header)
-        if len(types) < 2 or timestamp is None:
+        if not types or timestamp is None:
             return None
-        top_type, payload_type = types[:2]
+        top_type = types[0]
+        decoded_timestamp = timestamp.group(1).decode("utf-8", "replace")
+        if top_type == "compacted":
+            return {
+                "type": "compacted",
+                "timestamp": decoded_timestamp,
+                "payload": {},
+            }
+        if top_type == "session_meta":
+            session_id = re.search(rb'"id"\s*:\s*"([^"\\]+)"', header)
+            if session_id is None:
+                return None
+            decoded_session_id = session_id.group(1).decode("utf-8", "replace")
+            if not valid_session_id(decoded_session_id):
+                return None
+            source_match = re.search(rb'"source"\s*:\s*"([^"\\]+)"', header)
+            source: object = (
+                source_match.group(1).decode("utf-8", "replace")
+                if source_match is not None
+                else {"subagent": {}}
+                if re.search(rb'"source"\s*:\s*\{\s*"subagent"\s*:', header)
+                else None
+            )
+            return {
+                "type": "session_meta",
+                "timestamp": decoded_timestamp,
+                "payload": {"id": decoded_session_id, "source": source},
+            }
+        if len(types) < 2:
+            return None
+        payload_type = types[1]
         if top_type != "event_msg" or payload_type != "item_completed":
             return None
         item_type = types[2] if len(types) > 2 else ""
         return {
             "type": "event_msg",
-            "timestamp": timestamp.group(1).decode("utf-8", "replace"),
+            "timestamp": decoded_timestamp,
             "payload": {"type": "item_completed", "item": {"type": item_type}},
         }
 
