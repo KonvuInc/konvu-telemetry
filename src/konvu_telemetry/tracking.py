@@ -7,12 +7,12 @@ from importlib.metadata import PackageNotFoundError, version
 import json
 from pathlib import Path
 import platform
-from threading import Lock
+from threading import Lock, Thread
 from typing import Callable
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
-from .storage import write_private_json
+from .storage import tracking_queue_path, tracking_state_path, write_private_json
 
 Sender = Callable[[bytes], None]
 
@@ -148,3 +148,48 @@ class TrackingStore:
         except (OSError, json.JSONDecodeError):
             return []
         return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+_STORE = TrackingStore(tracking_state_path(), tracking_queue_path())
+_FLUSH_LOCK = Lock()
+
+
+def _record(event: str, properties: dict[str, object]) -> None:
+    try:
+        _STORE.record(event, properties)
+        flush_in_background()
+    except Exception:
+        return
+
+
+def record_setup_completed(duration_seconds: float) -> None:
+    if duration_seconds < 1:
+        bucket = "under_1_second"
+    elif duration_seconds < 5:
+        bucket = "under_5_seconds"
+    elif duration_seconds < 15:
+        bucket = "under_15_seconds"
+    else:
+        bucket = "15_seconds_or_more"
+    _record("telemetry setup completed", {"duration_bucket": bucket})
+
+
+def record_dashboard_opened(data_available: bool) -> None:
+    _record("dashboard opened", {"data_available": data_available})
+
+
+def record_collector_failure() -> None:
+    _record("collector failed", {"stage": "snapshot"})
+
+
+def flush_in_background() -> None:
+    if not _FLUSH_LOCK.acquire(blocking=False):
+        return
+
+    def flush() -> None:
+        try:
+            _STORE.send_queued()
+        finally:
+            _FLUSH_LOCK.release()
+
+    Thread(target=flush, daemon=True).start()

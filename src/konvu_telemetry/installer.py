@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Literal
 
 from .service import load_health
+from .tracking import record_setup_completed
 
 LABEL = "com.konvu.telemetry"
 PORT = 7824
@@ -469,6 +470,7 @@ def restore_installation(states: list[FileState], restart_service: bool) -> None
 def setup(interval: int, open_browser: bool) -> dict[str, str]:
     if sys.platform != "darwin":
         raise RuntimeError("Konvu setup currently supports macOS only")
+    started_at = time.monotonic()
     validate_integrations()
     claude_path, codex_path = integration_paths()
     states = [
@@ -499,6 +501,7 @@ def setup(interval: int, open_browser: bool) -> dict[str, str]:
         raise
     if open_browser:
         webbrowser.open(dashboard)
+    record_setup_completed(time.monotonic() - started_at)
     return {
         "claude_statusline": claude,
         "claude_desktop_hook": claude_desktop,

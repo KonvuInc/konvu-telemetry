@@ -11,6 +11,24 @@ from konvu_telemetry import installer
 
 
 class InstallerTests(unittest.TestCase):
+    def test_successful_setup_records_a_duration_bucket(self) -> None:
+        with (
+            patch.object(installer.sys, "platform", "darwin"),
+            patch.object(installer, "validate_integrations"),
+            patch.object(installer, "install_launcher"),
+            patch.object(installer, "install_claude_statusline", return_value="installed"),
+            patch.object(
+                installer, "install_claude_desktop_hook", return_value="installed"
+            ),
+            patch.object(installer, "install_codex_hook", return_value="installed"),
+            patch.object(installer, "install_launch_agent"),
+            patch.object(installer, "record_setup_completed") as recorded,
+        ):
+            installer.setup(60, False)
+
+        recorded.assert_called_once()
+        self.assertIsInstance(recorded.call_args.args[0], float)
+
     def test_setup_merges_konvu_hooks_without_removing_existing_hooks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)

@@ -25,6 +25,7 @@ from .storage import (
     valid_session_id,
     write_private_json,
 )
+from .tracking import record_collector_failure
 
 LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost"})
 LOGGER = logging.getLogger(__name__)
@@ -108,6 +109,7 @@ def collect_forever(
                 write_snapshot(build_snapshot(started_at, live_state))
             write_health(time.time(), interval_seconds=interval_seconds)
         except Exception as error:
+            record_collector_failure()
             try:
                 write_health(
                     time.time(), f"{type(error).__name__}: {error}", interval_seconds

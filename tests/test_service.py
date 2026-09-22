@@ -1538,11 +1538,13 @@ class ServiceTests(unittest.TestCase):
                 "konvu_telemetry.service.build_snapshot", side_effect=OSError("full")
             ),
             patch("konvu_telemetry.service.write_health", side_effect=OSError("full")),
+            patch("konvu_telemetry.service.record_collector_failure") as recorded,
             patch("konvu_telemetry.service.time.sleep", side_effect=StopIteration),
             self.assertLogs("konvu_telemetry.service", level="ERROR"),
             self.assertRaises(StopIteration),
         ):
             collect_forever(60, IncrementalLiveState(), Lock())
+        recorded.assert_called_once()
 
     def test_dashboard_rejects_non_local_or_malformed_origins(self) -> None:
         self.assertTrue(local_request_allowed("127.0.0.1:7824", None))
