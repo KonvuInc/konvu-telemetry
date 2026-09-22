@@ -16,7 +16,10 @@ def telemetry_consent() -> bool:
     if not sys.stdin.isatty():
         return False
     try:
-        response = input("Send anonymous usage telemetry to Konvu? [y/N] ")
+        response = input(
+            "Help improve Konvu with anonymous product insights? Your prompts, code, "
+            "files, and Claude/Codex usage stay on your computer. [y/N] "
+        )
     except EOFError:
         return False
     return response.strip().lower() in {"y", "yes"}

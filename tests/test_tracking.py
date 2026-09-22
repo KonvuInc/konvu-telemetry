@@ -433,6 +433,18 @@ class TrackingStoreTests(unittest.TestCase):
 
         configured.assert_called_once_with(60, True, False)
 
+    def test_telemetry_consent_prompt_explains_what_stays_local(self) -> None:
+        with (
+            patch.object(cli.sys.stdin, "isatty", return_value=True),
+            patch("builtins.input", return_value="yes") as asked,
+        ):
+            self.assertTrue(cli.telemetry_consent())
+
+        asked.assert_called_once_with(
+            "Help improve Konvu with anonymous product insights? Your prompts, code, "
+            "files, and Claude/Codex usage stay on your computer. [y/N] "
+        )
+
     def test_cli_opt_out_does_not_report_success_when_write_fails(self) -> None:
         with patch(
             "konvu_telemetry.tracking.TrackingStore.set_enabled",
