@@ -41,17 +41,12 @@ class InstallerTests(unittest.TestCase):
                 patch.object(installer, "console_launcher", return_value=console),
             ):
                 self.assertEqual(installer.install_claude_statusline(), "installed")
-                self.assertEqual(installer.install_claude_desktop_hook(), "installed")
                 self.assertEqual(installer.install_codex_hook(), "installed")
             settings = json.loads((claude / "settings.json").read_text())
             hooks = json.loads((codex / "hooks.json").read_text())
             self.assertIn(installer.LAUNCHER_NAME, settings["statusLine"]["command"])
             self.assertNotIn("-I", settings["statusLine"]["command"])
-            self.assertEqual(settings["hooks"]["Stop"][0]["hooks"][0]["timeout"], 5)
-            self.assertIn(
-                installer.LAUNCHER_NAME,
-                settings["hooks"]["Stop"][0]["hooks"][0]["command"],
-            )
+            self.assertNotIn("Stop", settings["hooks"])
             self.assertEqual(
                 hooks["hooks"]["Stop"][0]["hooks"][0]["command"], "keep-me"
             )
@@ -110,38 +105,52 @@ class InstallerTests(unittest.TestCase):
             )
             self.assertFalse(wrapper.exists())
 
-    def test_claude_desktop_hook_update_and_removal_keep_other_hooks(self) -> None:
+    def test_setup_removes_a_legacy_claude_stop_hook_and_keeps_foreign_ones(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
-            claude = home / ".claude"
-            claude.mkdir()
-            console = home / "bin" / "konvu"
+            claude_path = home / ".claude" / "settings.json"
+            codex_path = home / ".codex" / "hooks.json"
+            claude_path.parent.mkdir()
+            codex_path.parent.mkdir()
+            codex_path.write_text("{}")
+            console = home / "bin" / "konvu-telemetry"
             console.parent.mkdir()
             console.write_text("#!/bin/sh\nexit 0\n")
             console.chmod(0o700)
-            path = claude / "settings.json"
-            path.write_text(
-                json.dumps(
-                    {
-                        "hooks": {
-                            "Stop": [
-                                {"hooks": [{"type": "command", "command": "keep-me"}]}
-                            ]
-                        }
-                    }
-                )
-            )
+            foreign = {"hooks": [{"type": "command", "command": "keep-me"}]}
             with (
                 patch.object(installer.Path, "home", return_value=home),
                 patch.object(installer, "console_launcher", return_value=console),
+                patch.object(installer.sys, "platform", "darwin"),
+                patch.object(installer, "stop_launch_agent"),
+                patch.object(installer, "start_launch_agent"),
             ):
-                self.assertEqual(installer.install_claude_desktop_hook(), "installed")
-                self.assertEqual(installer.install_claude_desktop_hook(), "updated")
-                self.assertTrue(installer.remove_claude_desktop_hook())
-            groups = json.loads(path.read_text())["hooks"]["Stop"]
+                legacy = {
+                    "type": "command",
+                    "command": f"{installer.launcher_path()} claude-hook",
+                    "timeout": 5,
+                }
+                claude_path.write_text(
+                    json.dumps({"hooks": {"Stop": [foreign, {"hooks": [legacy]}]}})
+                )
+                self.assertEqual(
+                    installer.setup(60, False)["claude_stop_hook"], "removed"
+                )
+                self.assertEqual(
+                    json.loads(claude_path.read_text())["hooks"]["Stop"], [foreign]
+                )
+                # A second run has nothing left to clean up and must not report otherwise.
+                self.assertEqual(
+                    installer.setup(60, False)["claude_stop_hook"], "absent"
+                )
+                self.assertEqual(
+                    json.loads(claude_path.read_text())["hooks"]["Stop"], [foreign]
+                )
+                self.assertTrue(installer.uninstall()["claude_statusline"])
             self.assertEqual(
-                groups,
-                [{"hooks": [{"type": "command", "command": "keep-me"}]}],
+                json.loads(claude_path.read_text())["hooks"]["Stop"], [foreign]
             )
 
     def test_prompt_hooks_are_idempotent_and_leave_other_hooks_alone(self) -> None:
@@ -408,7 +417,7 @@ class InstallerTests(unittest.TestCase):
                 result,
                 {
                     "claude_statusline": True,
-                    "claude_desktop_hook": True,
+                    "claude_stop_hook": False,
                     "claude_prompt_hook": True,
                     "codex_hook": True,
                     "codex_prompt_hook": True,

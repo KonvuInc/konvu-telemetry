@@ -10,7 +10,9 @@ Konvu Telemetry is one Python package with a single resident process. The proces
 - Browser notifications require an open dashboard tab and browser permission.
 - A session alerts when it was active in the last twenty minutes, its cost is complete, and its next-ten-prompt forecast exceeds `ALERT_FORECAST_USD`. It alerts again only after `ALERT_FORECAST_RENOTIFY_SECONDS` and only if the forecast has not fallen since the last alert; falling to or below the threshold re-arms it.
 - Claude and Codex integrations read precomputed session files; they do not parse transcripts in a hook invocation.
-- Desktop clients collapse a hook `systemMessage` into a hidden notice, so each provider gets two hooks and exactly one of them speaks per turn. The terminal CLI keeps the `Stop` hook; the desktop app keeps the `UserPromptSubmit` hook, which returns `hookSpecificOutput.additionalContext` asking the model to end its reply with the usage box.
+- Each client reports usage in exactly one place: the Claude Code CLI in its status line, Claude Desktop in a box appended to the reply, the Codex CLI in its `Stop` hook, and Codex Desktop in a box appended to the reply.
+- Desktop clients collapse a hook `systemMessage` into a hidden notice, so the desktop path uses a `UserPromptSubmit` hook returning `hookSpecificOutput.additionalContext` that asks the model to end its reply with the usage box.
+- Claude installs no `Stop` hook. Setup removes the one earlier versions installed and leaves every other `Stop` entry in the file alone; `claude-hook` remains a silent no-op so settings written by an older version keep working.
 - Claude is identified as desktop by `CLAUDE_CODE_ENTRYPOINT=claude-desktop` in the hook environment; Codex by its recorded client (Desktop app or VS Code) as opposed to the TUI, read from the rollout's `session_meta` record. An absent, unreadable, or unrecognized client means CLI, so the desktop path is never entered by accident.
 - The desktop box is rate-limited exactly like the Codex CLI hook: `CODEX_DISPLAY_COST_THRESHOLD_USD` of spend, `CODEX_DISPLAY_MIN_TASKS` prompts, and a meaningful change since the last one. Its state file is keyed by provider and session, so two providers cannot overwrite each other's entry for the same identifier.
 
@@ -23,7 +25,7 @@ Konvu Telemetry is one Python package with a single resident process. The proces
 5. `pricing.py` applies the bundled local price table and marks missing prices explicitly.
 6. `analytics.py` derives prompt series, personal baselines, forecasts, compaction state, and alert decisions. Expired valid baselines remain usable while one background refresh rebuilds them.
 7. `snapshot.py` writes a bounded dashboard summary plus detailed per-session documents. Unchanged detail documents are not rewritten.
-8. `display.py` renders the Claude status line and both providers' hook output from per-session documents, choosing the Stop hook or the `UserPromptSubmit` context injection by client.
+8. `display.py` renders the Claude status line, the Codex `Stop` hook, and both providers' desktop `UserPromptSubmit` context from per-session documents.
 9. `dashboard/` contains static HTML, CSS, JavaScript, and images served by the local process.
 
 ## Local files
@@ -36,10 +38,10 @@ Konvu Telemetry is one Python package with a single resident process. The proces
 | `~/.konvu/telemetry/baselines.json` | Local historical medians | `0600` |
 | `~/.konvu/telemetry/health.json` | Collector freshness and last error | `0600` |
 | `~/.konvu/telemetry/notification-state.json` | Alert suppression state | `0600` |
-| `~/.konvu/telemetry/codex-display-state.json` | Hook display rate-limit state, keyed by provider and session | `0600` |
+| `~/.konvu/telemetry/codex-display-state.json` | Display rate-limit state for both providers, keyed by provider and session; the filename is legacy | `0600` |
 | `~/.konvu/telemetry/collector*.log` | LaunchAgent stdout and stderr | User-owned |
 | `~/Library/LaunchAgents/com.konvu.telemetry.plist` | Per-user service definition | User-owned |
-| `~/.claude/settings.json` | Optional Claude status line plus `Stop` and `UserPromptSubmit` hook merge | `0600` after write |
+| `~/.claude/settings.json` | Optional Claude status line plus `UserPromptSubmit` hook merge | `0600` after write |
 | `~/.codex/hooks.json` | Optional Codex `Stop` and `UserPromptSubmit` hook merge | `0600` after write |
 
 Raw transcripts remain in `~/.claude/projects` and `~/.codex/sessions`. Normalized session files expire after seven days. Uninstall removes the service, launcher, and Konvu-owned config entries but preserves telemetry data for manual inspection or deletion.

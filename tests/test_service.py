@@ -40,10 +40,10 @@ from konvu_telemetry.display import (
     baseline_text,
     claude_hook,
     claude_prompt_hook,
-    codex_display_is_worth_showing,
     codex_hook,
     codex_is_desktop,
     codex_prompt_hook,
+    display_is_worth_showing,
     quota_usage_text,
     record_claude_quotas,
     refreshed_session,
@@ -1371,34 +1371,18 @@ class ServiceTests(unittest.TestCase):
             hook()
         return stdout.getvalue()
 
-    def test_claude_stop_hook_renders_the_box_only_outside_the_desktop_app(
-        self,
-    ) -> None:
+    def test_claude_stop_hook_prints_nothing_for_any_client(self) -> None:
         session = {
             "id": "00000000-0000-0000-0000-000000000001",
-            "total_cost_usd": 1.25,
+            "total_cost_usd": 25.0,
             "cost_status": "complete",
-            "projected_next_10_tasks_usd": 0.5,
+            "projected_next_10_tasks_usd": 5.0,
+            "task_count": 9,
             "context_tokens": 500,
             "context_window_tokens": 1000,
         }
-        box = (
-            "╭─ Konvu usage\n"
-            "│ 💸 $1.2 total · $0.5 for the next 10 prompts\n"
-            "│ 🧠 50% context\n"
-            "╰─"
-        )
-        self.assertEqual(
-            json.loads(self.run_claude_hook(claude_hook, "cli", session)),
-            {"systemMessage": box},
-        )
-        self.assertEqual(
-            json.loads(self.run_claude_hook(claude_hook, None, session)),
-            {"systemMessage": box},
-        )
-        self.assertEqual(
-            self.run_claude_hook(claude_hook, "claude-desktop", session), ""
-        )
+        for entrypoint in ("cli", "claude-desktop", None):
+            self.assertEqual(self.run_claude_hook(claude_hook, entrypoint, session), "")
 
     def test_claude_prompt_hook_injects_context_only_in_the_desktop_app(self) -> None:
         session = {
@@ -1425,8 +1409,9 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.run_claude_hook(claude_prompt_hook, "cli", session), "")
         self.assertEqual(self.run_claude_hook(claude_prompt_hook, None, session), "")
 
-    def test_claude_hooks_stay_silent_when_the_session_file_is_missing(self) -> None:
-        self.assertEqual(self.run_claude_hook(claude_hook, "cli", None), "")
+    def test_claude_prompt_hook_stays_silent_when_the_session_file_is_missing(
+        self,
+    ) -> None:
         self.assertEqual(
             self.run_claude_hook(claude_prompt_hook, "claude-desktop", None), ""
         )
@@ -1532,14 +1517,14 @@ class ServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory) / "display-state.json"
             with patch(
-                "konvu_telemetry.display.codex_display_state_path", return_value=state
+                "konvu_telemetry.display.display_state_path", return_value=state
             ):
-                self.assertTrue(codex_display_is_worth_showing(session, "codex"))
-                self.assertFalse(codex_display_is_worth_showing(session, "codex"))
+                self.assertTrue(display_is_worth_showing("codex", session))
+                self.assertFalse(display_is_worth_showing("codex", session))
                 # A same-id session on the other provider keeps its own rate-limit entry.
-                self.assertTrue(codex_display_is_worth_showing(session, "claude"))
-                self.assertFalse(codex_display_is_worth_showing(session, "claude"))
-                self.assertFalse(codex_display_is_worth_showing(session, "bogus"))
+                self.assertTrue(display_is_worth_showing("claude", session))
+                self.assertFalse(display_is_worth_showing("claude", session))
+                self.assertFalse(display_is_worth_showing("bogus", session))
             self.assertEqual(
                 set(json.loads(state.read_text())),
                 {
@@ -1547,6 +1532,53 @@ class ServiceTests(unittest.TestCase):
                     "claude:00000000-0000-0000-0000-000000000001",
                 },
             )
+
+    def test_display_rate_limit_still_reads_pre_upgrade_state(self) -> None:
+        session_id = "00000000-0000-0000-0000-000000000001"
+        session = {
+            "id": session_id,
+            "task_count": 9,
+            "total_cost_usd": 25.0,
+            "projected_next_10_tasks_usd": 5.0,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "display-state.json"
+            state.write_text(
+                json.dumps(
+                    {
+                        session_id: {
+                            "task_count": 9,
+                            "total_cost_usd": 25.0,
+                            "forecast_usd": 5.0,
+                            "shown_at": time.time(),
+                        }
+                    }
+                )
+            )
+            with patch(
+                "konvu_telemetry.display.display_state_path", return_value=state
+            ):
+                self.assertFalse(display_is_worth_showing("codex", session))
+                moved_on = {**session, "task_count": 20, "total_cost_usd": 40.0}
+                self.assertTrue(display_is_worth_showing("codex", moved_on))
+            self.assertEqual(
+                set(json.loads(state.read_text())),
+                {session_id, f"codex:{session_id}"},
+            )
+
+    def test_display_rate_limit_needs_cost_and_prompts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "display-state.json"
+            with patch(
+                "konvu_telemetry.display.display_state_path", return_value=state
+            ):
+                for session in (
+                    {"id": "s", "task_count": 9, "total_cost_usd": 1.0},
+                    {"id": "s", "task_count": 2, "total_cost_usd": 25.0},
+                    {"id": "s", "task_count": 9},
+                ):
+                    self.assertFalse(display_is_worth_showing("codex", session))
+            self.assertFalse(state.exists())
 
     def test_codex_is_desktop_covers_every_recorded_client(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1614,7 +1646,7 @@ class ServiceTests(unittest.TestCase):
             patch("konvu_telemetry.display.codex_turn_tool_calls", return_value=1),
             patch("konvu_telemetry.display.refreshed_session", return_value=session),
             patch(
-                "konvu_telemetry.display.codex_display_is_worth_showing",
+                "konvu_telemetry.display.display_is_worth_showing",
                 return_value=True,
             ),
             patch(
@@ -1643,7 +1675,7 @@ class ServiceTests(unittest.TestCase):
             patch("konvu_telemetry.display.codex_turn_tool_calls", return_value=1),
             patch("konvu_telemetry.display.refreshed_session", return_value=session),
             patch(
-                "konvu_telemetry.display.codex_display_is_worth_showing",
+                "konvu_telemetry.display.display_is_worth_showing",
                 return_value=False,
             ),
             patch(

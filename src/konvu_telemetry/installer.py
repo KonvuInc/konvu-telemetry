@@ -340,15 +340,6 @@ def install_codex_prompt_hook(
     )
 
 
-def install_claude_desktop_hook(
-    ensure_launcher: bool = True, create_backup: bool = True
-) -> Literal["installed", "updated"]:
-    """Register a Stop hook shared by Claude Code Desktop sessions."""
-    if ensure_launcher:
-        install_launcher()
-    return install_hook(claude_settings_path(), "Stop", "claude-hook", create_backup)
-
-
 def install_claude_prompt_hook(
     ensure_launcher: bool = True, create_backup: bool = True
 ) -> Literal["installed", "updated"]:
@@ -474,9 +465,8 @@ def setup(interval: int, open_browser: bool) -> dict[str, str]:
     try:
         install_launcher()
         claude = install_claude_statusline(ensure_launcher=False, create_backup=False)
-        claude_desktop = install_claude_desktop_hook(
-            ensure_launcher=False, create_backup=False
-        )
+        # Older versions installed a Claude Stop hook; the status line covers the CLI now.
+        claude_stop_removed = remove_claude_stop_hook(create_backup=False)
         claude_prompt = install_claude_prompt_hook(
             ensure_launcher=False, create_backup=False
         )
@@ -495,7 +485,7 @@ def setup(interval: int, open_browser: bool) -> dict[str, str]:
         webbrowser.open(dashboard)
     return {
         "claude_statusline": claude,
-        "claude_desktop_hook": claude_desktop,
+        "claude_stop_hook": "removed" if claude_stop_removed else "absent",
         "claude_prompt_hook": claude_prompt,
         "codex_hook": codex,
         "codex_prompt_hook": codex_prompt,
@@ -581,8 +571,8 @@ def remove_codex_prompt_hook(create_backup: bool = True) -> bool:
     )
 
 
-def remove_claude_desktop_hook(create_backup: bool = True) -> bool:
-    """Remove only Konvu's Claude Code Desktop Stop hook."""
+def remove_claude_stop_hook(create_backup: bool = True) -> bool:
+    """Remove only Konvu's Claude Stop hook, which older versions installed."""
     return remove_hook(claude_settings_path(), "Stop", "claude-hook", create_backup)
 
 
@@ -612,7 +602,7 @@ def uninstall() -> dict[str, bool]:
         stop_launch_agent()
         result = {
             "claude_statusline": remove_claude_statusline(create_backup=False),
-            "claude_desktop_hook": remove_claude_desktop_hook(create_backup=False),
+            "claude_stop_hook": remove_claude_stop_hook(create_backup=False),
             "claude_prompt_hook": remove_claude_prompt_hook(create_backup=False),
             "codex_hook": remove_codex_hook(create_backup=False),
             "codex_prompt_hook": remove_codex_prompt_hook(create_backup=False),

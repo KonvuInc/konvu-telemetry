@@ -2,10 +2,11 @@
 
 ## Unreleased
 
-- Show usage in Claude Desktop and Codex Desktop, which collapse hook system messages into a hidden notice. Setup now also registers a `UserPromptSubmit` hook per provider that injects the usage box as context the reply ends with.
-- Suppress the Stop hooks on both desktop apps so a turn reports its usage once.
-- Render the Claude Code status line's Stop hook with the same boxed summary Codex already used.
-- Rate-limit the desktop box on the same thresholds as the Codex CLI hook: $10 of spend, five prompts, and a meaningful change since the last one. Display state is now keyed by provider and session instead of session alone.
+- Show usage in Claude Desktop and Codex Desktop, which collapse hook system messages into a hidden notice. Setup registers a `UserPromptSubmit` hook per provider that injects the usage box as context, and the reply ends with it.
+- Each client now reports usage in exactly one place: the Claude Code CLI in its status line, Claude Desktop in the appended box, the Codex CLI in its Stop hook box, and Codex Desktop in the appended box.
+- Stop reporting Claude usage from a Stop hook. Setup removes the Claude `Stop` entry earlier versions installed, leaving any hooks you added yourself untouched, and the `claude-hook` command stays accepted but silent for settings written by older versions.
+- Suppress the Codex Stop hook on Codex Desktop so a turn is not reported twice. Codex CLI output is unchanged.
+- Rate-limit the desktop box on the same thresholds as the Codex CLI hook: $10 of spend, five prompts, and a meaningful change since the last one. Display state is keyed by provider and session, and pre-upgrade entries are still read so no session is reported twice across an upgrade.
 
 ## 0.2.2 - 2026-09-21
 

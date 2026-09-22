@@ -26,7 +26,7 @@ from .parsers import (
 )
 from .storage import (
     claude_quota_path,
-    codex_display_state_path,
+    display_state_path,
     session_path,
     snapshot_path,
     valid_session_id,
@@ -388,19 +388,6 @@ def prompt_context_payload(session: dict[str, object], quota_text: str) -> str:
     )
 
 
-def display_is_worth_showing(provider: str, session: dict[str, object]) -> bool:
-    """Gate a rich usage box on a working session that has changed since the last one."""
-    total_cost = session.get("total_cost_usd")
-    task_count = session.get("task_count")
-    return (
-        isinstance(total_cost, (int, float))
-        and total_cost >= CODEX_DISPLAY_COST_THRESHOLD_USD
-        and isinstance(task_count, int)
-        and task_count >= CODEX_DISPLAY_MIN_TASKS
-        and codex_display_is_worth_showing(session, provider)
-    )
-
-
 def codex_hook() -> None:
     """Return the boxed Codex CLI usage message from its local session file."""
     try:
@@ -439,25 +426,9 @@ def codex_hook() -> None:
 
 
 def claude_hook() -> None:
-    """Return a usage message for a Claude Code CLI session."""
-    if claude_is_desktop():
-        return
-    try:
-        payload = json.load(sys.stdin)
-    except json.JSONDecodeError:
-        return
-    if not isinstance(payload, dict):
-        return
-    session_id = payload.get("session_id")
-    if not isinstance(session_id, str) or not valid_session_id(session_id):
-        return
-    session = refreshed_session("claude", session_id)
-    if not isinstance(session, dict):
-        return
-    if not isinstance(session.get("total_cost_usd"), (int, float)):
-        return
-    lines = usage_box_lines(session, recorded_quota_usage_text("claude"))
-    print(json.dumps({"systemMessage": "\n".join(lines)}))
+    """Accept the Claude Stop hook without output; the status line reports CLI usage."""
+    # Retained so settings written by older versions keep working instead of erroring.
+    return
 
 
 def claude_prompt_hook() -> None:
@@ -526,8 +497,8 @@ def refreshed_session(provider: str, session_id: str) -> dict[str, object] | Non
     )
 
 
-def codex_display_is_worth_showing(session: dict[str, object], provider: str) -> bool:
-    """Rate-limit usage summaries to meaningful changes in a working session."""
+def display_is_worth_showing(provider: str, session: dict[str, object]) -> bool:
+    """Rate-limit a provider's usage box to meaningful changes in a working session."""
     session_id = session.get("id")
     task_count = session.get("task_count")
     total_cost = session.get("total_cost_usd")
@@ -536,17 +507,22 @@ def codex_display_is_worth_showing(session: dict[str, object], provider: str) ->
         provider not in ALLOWED_PROVIDERS
         or not isinstance(session_id, str)
         or not isinstance(task_count, int)
+        or task_count < CODEX_DISPLAY_MIN_TASKS
         or not isinstance(total_cost, (int, float))
+        or total_cost < CODEX_DISPLAY_COST_THRESHOLD_USD
     ):
         return False
     # Providers share one state file, so the key has to carry both dimensions of the identity.
     state_key = f"{provider}:{session_id}"
     try:
-        raw_state = json.loads(codex_display_state_path().read_text())
+        raw_state = json.loads(display_state_path().read_text())
     except (OSError, json.JSONDecodeError):
         raw_state = {}
     state = raw_state if isinstance(raw_state, dict) else {}
     previous = state.get(state_key)
+    # Entries written before the key was namespaced are still the same session's history.
+    if not isinstance(previous, dict):
+        previous = state.get(session_id)
     if not isinstance(previous, dict):
         previous = {}
     previous_iteration = previous.get("task_count")
@@ -570,5 +546,5 @@ def codex_display_is_worth_showing(session: dict[str, object], provider: str) ->
         "forecast_usd": forecast,
         "shown_at": time.time(),
     }
-    write_private_json(codex_display_state_path(), state)
+    write_private_json(display_state_path(), state)
     return True
