@@ -25,6 +25,7 @@ from konvu_telemetry.analytics import (
     load_baselines,
     scaled_precompact_forecast,
     single_configuration,
+    single_model_effort,
     task_series,
 )
 from konvu_telemetry.config import (
@@ -269,16 +270,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(
             BASELINE_MILESTONES,
             (
-                10,
-                20,
-                30,
-                40,
-                50,
-                60,
-                70,
-                80,
-                90,
-                100,
+                *range(1, 101),
                 150,
                 200,
                 250,
@@ -950,7 +942,7 @@ class ServiceTests(unittest.TestCase):
         self.assertTrue(is_human_claude_prompt(record))
         self.assertTrue(is_claude_prompt(record))
 
-    def test_cumulative_median_keeps_finished_sessions_in_the_population(self) -> None:
+    def test_cumulative_median_uses_sessions_that_reached_each_checkpoint(self) -> None:
         series = [
             [(1.0, 1)] * 250,
             [(2.0, 2)] * 250,
@@ -961,11 +953,11 @@ class ServiceTests(unittest.TestCase):
         ]
         points = cumulative_median_checkpoints(series)
         self.assertEqual(points[0]["sessions"], 6)
-        self.assertEqual(points[-1]["sessions"], 6)
-        self.assertEqual(points[0]["median_cost_usd"], 35.0)
-        self.assertEqual(points[1]["median_cost_usd"], 70.0)
+        self.assertEqual(points[-1]["sessions"], 5)
+        self.assertEqual(points[9]["median_cost_usd"], 35.0)
+        self.assertEqual(points[19]["median_cost_usd"], 65.0)
 
-    def test_cumulative_median_is_monotonic_across_all_sessions(self) -> None:
+    def test_cumulative_median_does_not_carry_finished_sessions_forward(self) -> None:
         series = [
             *[[(100.0, 100)] * 10 for _ in range(5)],
             [(1.0, 1)] * 20,
@@ -975,10 +967,10 @@ class ServiceTests(unittest.TestCase):
             [(5.0, 5)] * 20,
         ]
         points = cumulative_median_checkpoints(series)
-        self.assertEqual(points[0]["median_cost_usd"], 525.0)
-        self.assertEqual(points[1]["median_cost_usd"], 550.0)
-        self.assertEqual(points[0]["median_tokens"], 525)
-        self.assertEqual(points[1]["median_tokens"], 550)
+        self.assertEqual(points[9]["median_cost_usd"], 525.0)
+        self.assertEqual(points[19]["median_cost_usd"], 555.0)
+        self.assertEqual(points[9]["median_tokens"], 525)
+        self.assertEqual(points[19]["median_tokens"], 555)
 
     def test_incremental_reader_keeps_large_prompt_boundary_without_retaining_text(
         self,
@@ -1856,7 +1848,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual([row["cumulative_cost_usd"] for row in rows], [1.0, 1.0, 4.0])
         self.assertEqual([row["priced"] for row in rows], [True, False, True])
 
-    def test_configuration_baseline_never_mislabels_mixed_or_fast_work(self) -> None:
+    def test_configuration_baseline_matches_model_and_effort_only(self) -> None:
         standard = UsageEvent(
             "codex",
             "session",
@@ -1882,14 +1874,15 @@ class ServiceTests(unittest.TestCase):
             "medium",
         )
         self.assertIsNone(single_configuration([standard, fast]))
+        self.assertEqual(single_model_effort([standard, fast]), ("model", "medium"))
         series = [(1.0, 1)] * 10
         samples = [
-            ("model", "medium", "standard", series),
-            ("model", "medium", "standard", series),
-            ("model", "medium", "standard", series),
-            ("model", "medium", "standard", series),
-            ("model", "medium", "standard", series),
-            (None, None, None, series),
+            ("model", "medium", series),
+            ("model", "medium", series),
+            ("model", "medium", series),
+            ("model", "medium", series),
+            ("model", "medium", series),
+            (None, None, series),
         ]
         with (
             patch(
@@ -1909,60 +1902,43 @@ class ServiceTests(unittest.TestCase):
             10,
             10,
             baseline,
-            "model",
-            "medium",
-            "standard",
+            model="model",
+            effort="medium",
             cost_usd=10,
-            comparison_scope="model_effort_speed",
+            comparison_scope="model_effort",
         )
         provider = baseline_comparison(
             "codex",
             10,
             10,
             baseline,
-            "model",
-            "medium",
-            "standard",
+            model="model",
+            effort="medium",
             cost_usd=10,
             comparison_scope="provider",
-        )
-        wrong_speed = baseline_comparison(
-            "codex",
-            10,
-            10,
-            baseline,
-            "model",
-            "medium",
-            "fast",
-            cost_usd=10,
-            comparison_scope="model_effort_speed",
         )
         unavailable_match = baseline_comparison(
             "codex",
             10,
             10,
             baseline,
-            "model",
-            "medium",
-            "fast",
+            model="other-model",
+            effort="medium",
             cost_usd=10,
-            comparison_scope="model_effort_speed",
+            comparison_scope="model_effort",
         )
         extrapolated_match = baseline_comparison(
             "codex",
             20,
             20,
             baseline,
-            "model",
-            "medium",
-            "standard",
+            model="model",
+            effort="medium",
             cost_usd=20,
-            comparison_scope="model_effort_speed",
+            comparison_scope="model_effort",
         )
-        self.assertEqual(matched["scope"], "model_effort_speed")
-        self.assertEqual(matched["speed"], "standard")
+        self.assertEqual(matched["scope"], "model_effort")
         self.assertEqual(provider["scope"], "provider")
-        self.assertIsNone(wrong_speed)
         self.assertIsNone(unavailable_match)
         self.assertIsNone(extrapolated_match)
         self.assertEqual(
@@ -1970,16 +1946,22 @@ class ServiceTests(unittest.TestCase):
             {"median_next_10_usd": 10.0, "sessions": 6},
         )
 
-    def test_snapshot_exposes_only_uniform_comparison_configuration(self) -> None:
+    def test_snapshot_keeps_short_post_compact_model_effort_baseline(self) -> None:
         session_id = "00000000-0000-0000-0000-000000000001"
         records = [
             {
                 "timestamp": "2026-01-01T00:00:00Z",
                 "sessionId": session_id,
-                "message": {"role": "user", "content": "question"},
+                "type": "system",
+                "subtype": "compact_boundary",
             },
             {
                 "timestamp": "2026-01-01T00:00:01Z",
+                "sessionId": session_id,
+                "message": {"role": "user", "content": "question"},
+            },
+            {
+                "timestamp": "2026-01-01T00:00:02Z",
                 "sessionId": session_id,
                 "effort": "medium",
                 "message": {
@@ -2033,16 +2015,17 @@ class ServiceTests(unittest.TestCase):
             ):
                 snapshot = build_snapshot(1767225602.0)
         session = snapshot["sessions"][0]
+        self.assertTrue(session["since_compact"])
         self.assertEqual(session["speed"], "fast")
         self.assertEqual(
             session["comparison_configuration"],
-            {"model": "model", "effort": "medium", "speed": "fast"},
+            {"model": "model", "effort": "medium"},
         )
-        self.assertEqual(session["baseline"]["scope"], "model_effort_speed")
+        self.assertEqual(session["baseline"]["scope"], "model_effort")
         self.assertEqual(session["baselines"]["provider"]["scope"], "provider")
         self.assertEqual(
-            session["baselines"]["model_effort_speed"]["scope"],
-            "model_effort_speed",
+            session["baselines"]["model_effort"]["scope"],
+            "model_effort",
         )
 
     def test_sessions_without_a_forecast_never_alert(self) -> None:

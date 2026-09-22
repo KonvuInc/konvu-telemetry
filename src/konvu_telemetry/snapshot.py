@@ -21,14 +21,13 @@ from .analytics import (
     locate_compactions,
     next_ten_forecast,
     scaled_precompact_forecast,
-    single_configuration,
+    single_model_effort,
 )
 from .config import (
     ACTIVITY_FRESHNESS_SECONDS,
     DASHBOARD_SESSION_WINDOW_SECONDS,
     DEFAULT_LIVE_WINDOW_SECONDS,
     FORECAST_MIN_SAMPLES,
-    FORECAST_WINDOW,
     LIVE_ACTIVITY_SECONDS,
     MAX_CONTEXT_HISTORY_POINTS,
     MAX_SUMMARY_ITERATION_POINTS,
@@ -381,11 +380,11 @@ def build_snapshot(
             for event in main_thread_events
             if latest_compact is None or event.timestamp > latest_compact
         ]
-        baseline_configuration = single_configuration(baseline_events)
-        baseline_model, baseline_effort, baseline_speed = (
+        baseline_configuration = single_model_effort(baseline_events)
+        baseline_model, baseline_effort = (
             baseline_configuration
             if baseline_configuration is not None
-            else ("unknown", "standard", "standard")
+            else ("unknown", "standard")
         )
         claude_provider_baseline = baseline_comparison(
             "claude",
@@ -394,7 +393,6 @@ def build_snapshot(
             baselines,
             model=baseline_model,
             effort=baseline_effort,
-            speed=baseline_speed,
             since_compact=since_compact,
             cost_usd=comparison_cost,
             comparison_scope="provider",
@@ -406,16 +404,11 @@ def build_snapshot(
             baselines,
             model=baseline_model,
             effort=baseline_effort,
-            speed=baseline_speed,
             since_compact=since_compact,
             cost_usd=comparison_cost,
-            comparison_scope="model_effort_speed",
+            comparison_scope="model_effort",
         )
         claude_baseline = claude_configuration_baseline
-        if since_compact and comparison_task_count < FORECAST_WINDOW:
-            claude_baseline = None
-            claude_provider_baseline = None
-            claude_configuration_baseline = None
         sessions.append(
             {
                 "id": session_id,
@@ -431,7 +424,6 @@ def build_snapshot(
                     {
                         "model": baseline_model,
                         "effort": baseline_effort,
-                        "speed": baseline_speed,
                     }
                     if baseline_configuration is not None
                     else None
@@ -465,7 +457,7 @@ def build_snapshot(
                 "baseline": claude_baseline,
                 "baselines": {
                     "provider": claude_provider_baseline,
-                    "model_effort_speed": claude_configuration_baseline,
+                    "model_effort": claude_configuration_baseline,
                 },
                 "context_tokens": context_event.usage.context_tokens,
                 "context_window_tokens": context_window,
@@ -681,11 +673,11 @@ def build_snapshot(
         total_tokens = sum(event.usage.total_tokens for event in all_events)
         total_cost_status, unpriced_event_count = cost_status(all_events, prices)
         last_task_start = starts[-1] if starts else None
-        baseline_configuration = single_configuration(events)
-        baseline_model, baseline_effort, baseline_speed = (
+        baseline_configuration = single_model_effort(events)
+        baseline_model, baseline_effort = (
             baseline_configuration
             if baseline_configuration is not None
-            else ("unknown", "standard", "standard")
+            else ("unknown", "standard")
         )
         codex_provider_baseline = baseline_comparison(
             "codex",
@@ -694,7 +686,6 @@ def build_snapshot(
             baselines,
             model=baseline_model,
             effort=baseline_effort,
-            speed=baseline_speed,
             cost_usd=(sum(known_costs) + sum(known_child_costs))
             if total_cost_status == "complete"
             else None,
@@ -707,11 +698,10 @@ def build_snapshot(
             baselines,
             model=baseline_model,
             effort=baseline_effort,
-            speed=baseline_speed,
             cost_usd=(sum(known_costs) + sum(known_child_costs))
             if total_cost_status == "complete"
             else None,
-            comparison_scope="model_effort_speed",
+            comparison_scope="model_effort",
         )
         codex_baseline = codex_configuration_baseline
         sessions.append(
@@ -729,7 +719,6 @@ def build_snapshot(
                     {
                         "model": baseline_model,
                         "effort": baseline_effort,
-                        "speed": baseline_speed,
                     }
                     if baseline_configuration is not None
                     else None
@@ -759,7 +748,7 @@ def build_snapshot(
                 "baseline": codex_baseline,
                 "baselines": {
                     "provider": codex_provider_baseline,
-                    "model_effort_speed": codex_configuration_baseline,
+                    "model_effort": codex_configuration_baseline,
                 },
                 "active_subagents": sum(
                     1 for _, _, _, is_live, _ in child_entries if is_live

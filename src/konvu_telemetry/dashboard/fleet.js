@@ -186,9 +186,8 @@ function sortedRows() {
     });
 }
 const effort = (s) => s.reasoning_effort || s.effort || null;
-const speed = (s) => s.service_tier || s.speed || null;
 function configurationLabel(s) {
-  return [s.model || providerName(s.provider), effort(s) ? effort(s) + " effort" : "Effort unrecorded", speed(s)].filter(Boolean).join(" · ");
+  return [s.model || providerName(s.provider), effort(s) ? effort(s) + " effort" : "Effort unrecorded"].filter(Boolean).join(" · ");
 }
 function titleCell(s) {
   return (
@@ -341,7 +340,7 @@ function donut(s) {
   );
 }
 function recordedBaselineComparison(s) {
-  const scope = state.baselineMode === "matched" ? "model_effort_speed" : "provider";
+  const scope = state.baselineMode === "matched" ? "model_effort" : "provider";
   const baseline = s.baselines?.[scope] || (s.baseline?.scope === scope ? s.baseline : null);
   const overhead = baseline?.cost_overhead_percent;
   if (!finite(overhead)) return null;
@@ -349,7 +348,7 @@ function recordedBaselineComparison(s) {
   if (ratio < 0) return null;
   return {
     ratio,
-    matched: baseline.scope === "model_effort_speed",
+    matched: baseline.scope === "model_effort",
     recorded: true,
     median: baseline.median_cost_usd,
     samples: baseline.sample_sessions,
@@ -365,7 +364,7 @@ function spendComparison(s) {
         "The collector recalculates this from your stored local median every six hours. Medians are a comparison only; alerts follow the next-ten-prompt forecast.",
     };
   }
-  const label = c.matched ? "model + effort + speed median" : providerName(s.provider) + " general median";
+  const label = c.matched ? "model + effort median" : providerName(s.provider) + " general median";
   return {
     ratio: c.ratio,
     label: c.ratio.toFixed(2) + "× " + label,

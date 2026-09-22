@@ -388,6 +388,14 @@ def single_configuration(events: list[UsageEvent]) -> tuple[str, str, str] | Non
     return next(iter(configurations)) if len(configurations) == 1 else None
 
 
+def single_model_effort(events: list[UsageEvent]) -> tuple[str, str] | None:
+    """Return one priced model and effort when a task series is uniform."""
+    configurations = {
+        (event.model, event.effort) for event in events if requires_pricing(event)
+    }
+    return next(iter(configurations)) if len(configurations) == 1 else None
+
+
 def deduplicate_usage_events(events: list[UsageEvent]) -> list[UsageEvent]:
     """Keep one event per message, preferring an explicitly marked subagent copy."""
     deduplicated: dict[str, UsageEvent] = {}
@@ -406,8 +414,8 @@ def deduplicate_usage_events(events: list[UsageEvent]) -> list[UsageEvent]:
 
 def historical_task_series(
     provider: str, since: float, prices: dict[str, dict[str, float]]
-) -> Iterator[tuple[str | None, str | None, str | None, list[tuple[float, int]]]]:
-    """Read completed task curves and trustworthy model-effort-speed cohorts."""
+) -> Iterator[tuple[str | None, str | None, list[tuple[float, int]]]]:
+    """Read completed task curves and trustworthy model-effort cohorts."""
     if provider == "claude":
         for root in claude_roots():
             if not root.is_dir():
@@ -436,13 +444,11 @@ def historical_task_series(
                 if starts and events and cost_status(events, prices)[0] == "complete":
                     series = task_series(events, starts, prices)
                     if series is not None:
-                        configuration = single_configuration(main_events)
-                        model, effort, speed = (
-                            configuration
-                            if configuration is not None
-                            else (None, None, None)
+                        configuration = single_model_effort(main_events)
+                        model, effort = (
+                            configuration if configuration is not None else (None, None)
                         )
-                        yield model, effort, speed, series
+                        yield model, effort, series
         return
     roots: list[tuple[Path, list[UsageEvent]]] = []
     children: dict[str, list[UsageEvent]] = defaultdict(list)
@@ -494,11 +500,9 @@ def historical_task_series(
             continue
         series = task_series(events, starts, prices)
         if series is not None:
-            configuration = single_configuration(main_events)
-            model, effort, speed = (
-                configuration if configuration is not None else (None, None, None)
-            )
-            yield model, effort, speed, series
+            configuration = single_model_effort(main_events)
+            model, effort = configuration if configuration is not None else (None, None)
+            yield model, effort, series
 
 
 @file_cached
@@ -579,9 +583,9 @@ def median_absolute_percentage_error(samples: list[tuple[float, float]]) -> floa
     return float(median(errors)) if errors else 0.0
 
 
-def configuration_key(model: str, effort: str, speed: str) -> str:
-    """Build a stable model, effort, and pricing-tier baseline key."""
-    return json.dumps([model, effort, speed], separators=(",", ":"))
+def configuration_key(model: str, effort: str) -> str:
+    """Build a stable model and effort baseline key."""
+    return json.dumps([model, effort], separators=(",", ":"))
 
 
 def next_ten_forecast(costs: list[float], provider: str) -> float:
@@ -743,18 +747,16 @@ def build_baselines(
         configuration_series: dict[str, list[list[tuple[float, int]]]] = defaultdict(
             list
         )
-        configuration_labels: dict[str, tuple[str, str, str]] = {}
+        configuration_labels: dict[str, tuple[str, str]] = {}
         forecast_samples: list[tuple[float, float]] = []
-        for model, effort, speed, series in historical_task_series(
-            provider, since, prices
-        ):
+        for model, effort, series in historical_task_series(provider, since, prices):
             provider_series.append(series)
             forecast_sample = forecast_backtest_sample(series)
             if forecast_sample is not None:
                 forecast_samples.append(forecast_sample)
-            if model is not None and effort is not None and speed is not None:
-                key = configuration_key(model, effort, speed)
-                configuration_labels[key] = (model, effort, speed)
+            if model is not None and effort is not None:
+                key = configuration_key(model, effort)
+                configuration_labels[key] = (model, effort)
                 configuration_series[key].append(series)
         providers[provider] = cumulative_median_checkpoints(provider_series)
         provider_forecast_values = [
@@ -781,13 +783,12 @@ def build_baselines(
         }
         configurations[provider] = {}
         for key, cohort_series in configuration_series.items():
-            model, effort, speed = configuration_labels[key]
+            model, effort = configuration_labels[key]
             config_checkpoints = cumulative_median_checkpoints(cohort_series)
             if config_checkpoints:
                 configurations[provider][key] = {
                     "model": model,
                     "effort": effort,
-                    "speed": speed,
                     "checkpoints": config_checkpoints,
                 }
     compact_windows = claude_compact_next_ten_costs(since, prices)
@@ -814,29 +815,26 @@ def build_baselines(
 def cumulative_median_checkpoints(
     series: list[list[tuple[float, int]]],
 ) -> list[dict[str, object]]:
-    """Return cumulative medians across all recent sessions at every checkpoint."""
-    if len(series) < BASELINE_MIN_SESSIONS:
-        return []
+    """Return cumulative sums of per-prompt medians for reached sessions."""
+    milestones = set(BASELINE_MILESTONES)
     observed_iterations = max((len(row) for row in series), default=0)
+    cumulative_cost = 0.0
+    cumulative_tokens = 0.0
     checkpoints: list[dict[str, object]] = []
-    for iteration in BASELINE_MILESTONES:
-        if iteration > observed_iterations:
+    for iteration in range(1, observed_iterations + 1):
+        cohort = [row for row in series if len(row) >= iteration]
+        if len(cohort) < BASELINE_MIN_SESSIONS:
             break
-        values = [
-            (
-                sum(cost for cost, _ in row[: min(iteration, len(row))]),
-                sum(tokens for _, tokens in row[: min(iteration, len(row))]),
-            )
-            for row in series
-        ]
-        median_cost = float(median(value[0] for value in values))
-        median_tokens = int(median(value[1] for value in values))
+        cumulative_cost += float(median(row[iteration - 1][0] for row in cohort))
+        cumulative_tokens += float(median(row[iteration - 1][1] for row in cohort))
+        if iteration not in milestones:
+            continue
         checkpoints.append(
             {
                 "iterations": iteration,
-                "sessions": len(values),
-                "median_cost_usd": round(median_cost, 6),
-                "median_tokens": median_tokens,
+                "sessions": len(cohort),
+                "median_cost_usd": round(cumulative_cost, 6),
+                "median_tokens": int(cumulative_tokens),
             }
         )
     return checkpoints
@@ -908,10 +906,9 @@ def baseline_comparison(
     baseline: dict[str, object],
     model: str = "unknown",
     effort: str = "standard",
-    speed: str = "standard",
     since_compact: bool = False,
     cost_usd: float | None = None,
-    comparison_scope: Literal["provider", "model_effort_speed"] = "provider",
+    comparison_scope: Literal["provider", "model_effort"] = "provider",
 ) -> dict[str, object] | None:
     def eligible_checkpoints(value: object) -> list[dict[str, object]]:
         if not isinstance(value, list):
@@ -953,7 +950,7 @@ def baseline_comparison(
         configurations.get(provider) if isinstance(configurations, dict) else None
     )
     configuration = (
-        provider_configurations.get(configuration_key(model, effort, speed))
+        provider_configurations.get(configuration_key(model, effort))
         if isinstance(provider_configurations, dict)
         else None
     )
@@ -961,9 +958,9 @@ def baseline_comparison(
         configuration.get("checkpoints") if isinstance(configuration, dict) else None
     )
     configuration_checkpoints = eligible_checkpoints(config_checkpoints)
-    if comparison_scope == "model_effort_speed":
+    if comparison_scope == "model_effort":
         eligible = configuration_checkpoints
-        scope = "model_effort_speed"
+        scope = "model_effort"
     else:
         eligible = provider_checkpoints
     if not covers(eligible):
@@ -1039,5 +1036,4 @@ def baseline_comparison(
         "scope": scope,
         "model": model,
         "effort": effort,
-        "speed": speed,
     }
