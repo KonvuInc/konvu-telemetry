@@ -1,21 +1,26 @@
-"""Claude status-line and Codex hook output."""
+"""Claude status-line and provider hook output."""
 
 from __future__ import annotations
 
 import json
 import math
+import os
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from .config import (
     ACTIVITY_FRESHNESS_SECONDS,
     ALERT_QUOTA_5H_PERCENT,
     ALERT_QUOTA_WEEKLY_PERCENT,
     ALLOWED_PROVIDERS,
+    CLAUDE_DESKTOP_ENTRYPOINT,
     CODEX_DISPLAY_COST_THRESHOLD_USD,
+    CODEX_DISPLAY_MIN_TASKS,
 )
 from .parsers import (
     claude_hook_transcript,
+    codex_client_in_file,
     codex_hook_transcript,
     codex_turn_tool_calls,
 )
@@ -26,6 +31,12 @@ from .storage import (
     snapshot_path,
     valid_session_id,
     write_private_json,
+)
+
+# Desktop clients hide hook system messages, so the box has to ride in as model context instead.
+PROMPT_BOX_INSTRUCTION = (
+    "Append the block below verbatim as the very last thing in your reply, "
+    "after all other text including any closing line, with no commentary."
 )
 
 
@@ -321,52 +332,19 @@ def statusline() -> None:
         print(norm)
 
 
-def codex_hook() -> None:
-    """Return a compact Codex hook message from its local session file."""
-    try:
-        payload = json.load(sys.stdin)
-    except json.JSONDecodeError:
-        print(json.dumps({"suppressOutput": True}))
-        return
-    if not isinstance(payload, dict):
-        print(json.dumps({"suppressOutput": True}))
-        return
-    session_id: str | None = None
-    for key in ("session_id", "thread_id", "id"):
-        value = payload.get(key)
-        if isinstance(value, str):
-            session_id = value
-            break
-    if session_id is None or not valid_session_id(session_id):
-        print(json.dumps({"suppressOutput": True}))
-        return
-    turn_id = payload.get("turn_id")
-    transcript = codex_hook_transcript(payload, session_id)
-    if (
-        not isinstance(turn_id, str)
-        or transcript is None
-        or codex_turn_tool_calls(transcript, turn_id) <= 0
-    ):
-        print(json.dumps({"suppressOutput": True}))
-        return
-    session = refreshed_session("codex", session_id)
-    if not isinstance(session, dict):
-        print(json.dumps({"suppressOutput": True}))
-        return
-    quota_text = recorded_quota_usage_text("codex")
+def claude_is_desktop() -> bool:
+    """Detect the Claude desktop app, which hides hook system messages in a dropdown."""
+    return os.environ.get("CLAUDE_CODE_ENTRYPOINT") == CLAUDE_DESKTOP_ENTRYPOINT
+
+
+def codex_is_desktop(transcript: Path | None) -> bool:
+    """Detect a Codex desktop client from its rollout metadata, failing closed to the CLI."""
+    return transcript is not None and codex_client_in_file(transcript) == "desktop"
+
+
+def usage_box_lines(session: dict[str, object], quota_text: str) -> list[str]:
+    """Build the boxed usage summary shared by every rich display surface."""
     total_cost = session.get("total_cost_usd")
-    task_count = session.get("task_count")
-    show_usage = (
-        isinstance(total_cost, (int, float))
-        and total_cost >= CODEX_DISPLAY_COST_THRESHOLD_USD
-        and isinstance(task_count, int)
-        and task_count >= 5
-        and codex_display_is_worth_showing(session)
-    )
-    if not show_usage:
-        print(json.dumps({"suppressOutput": True}))
-        return
-    norm = baseline_text(session)
     complete = session.get("cost_status") == "complete"
     forecast = session.get("projected_next_10_tasks_usd")
     forecast_text = (
@@ -390,14 +368,80 @@ def codex_hook() -> None:
     subagents = subagent_usage_text(session)
     if subagents:
         lines.insert(2, f"│ {subagents}")
+    norm = baseline_text(session)
     if norm:
         lines.append(f"│ {norm}")
     lines.append("╰─")
+    return lines
+
+
+def prompt_context_payload(session: dict[str, object], quota_text: str) -> str:
+    """Serialize the usage box as UserPromptSubmit context the model must echo back."""
+    box = "\n".join(usage_box_lines(session, quota_text))
+    return json.dumps(
+        {
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": f"{PROMPT_BOX_INSTRUCTION}\n\n{box}",
+            }
+        }
+    )
+
+
+def display_is_worth_showing(provider: str, session: dict[str, object]) -> bool:
+    """Gate a rich usage box on a working session that has changed since the last one."""
+    total_cost = session.get("total_cost_usd")
+    task_count = session.get("task_count")
+    return (
+        isinstance(total_cost, (int, float))
+        and total_cost >= CODEX_DISPLAY_COST_THRESHOLD_USD
+        and isinstance(task_count, int)
+        and task_count >= CODEX_DISPLAY_MIN_TASKS
+        and codex_display_is_worth_showing(session, provider)
+    )
+
+
+def codex_hook() -> None:
+    """Return the boxed Codex CLI usage message from its local session file."""
+    try:
+        payload = json.load(sys.stdin)
+    except json.JSONDecodeError:
+        print(json.dumps({"suppressOutput": True}))
+        return
+    if not isinstance(payload, dict):
+        print(json.dumps({"suppressOutput": True}))
+        return
+    session_id: str | None = None
+    for key in ("session_id", "thread_id", "id"):
+        value = payload.get(key)
+        if isinstance(value, str):
+            session_id = value
+            break
+    if session_id is None or not valid_session_id(session_id):
+        print(json.dumps({"suppressOutput": True}))
+        return
+    turn_id = payload.get("turn_id")
+    transcript = codex_hook_transcript(payload, session_id)
+    if (
+        not isinstance(turn_id, str)
+        or transcript is None
+        or codex_turn_tool_calls(transcript, turn_id) <= 0
+        or codex_is_desktop(transcript)
+    ):
+        print(json.dumps({"suppressOutput": True}))
+        return
+    session = refreshed_session("codex", session_id)
+    if not isinstance(session, dict) or not display_is_worth_showing("codex", session):
+        print(json.dumps({"suppressOutput": True}))
+        return
+    lines = usage_box_lines(session, recorded_quota_usage_text("codex"))
     print(json.dumps({"systemMessage": "\n" + "\n".join(lines)}))
 
 
 def claude_hook() -> None:
-    """Return a compact usage message for a Claude Code Desktop session."""
+    """Return a usage message for a Claude Code CLI session."""
+    if claude_is_desktop():
+        return
     try:
         payload = json.load(sys.stdin)
     except json.JSONDecodeError:
@@ -410,18 +454,58 @@ def claude_hook() -> None:
     session = refreshed_session("claude", session_id)
     if not isinstance(session, dict):
         return
-    total_cost = session.get("total_cost_usd")
-    if not isinstance(total_cost, (int, float)):
+    if not isinstance(session.get("total_cost_usd"), (int, float)):
         return
-    lines = [
-        "Konvu usage",
-        f"💸 {money(total_cost)} total",
-        f"🧠 {context_usage_text(session)}",
-    ]
-    norm = baseline_text(session)
-    if norm:
-        lines.append(norm)
+    lines = usage_box_lines(session, recorded_quota_usage_text("claude"))
     print(json.dumps({"systemMessage": "\n".join(lines)}))
+
+
+def claude_prompt_hook() -> None:
+    """Inject the usage box as visible context for a Claude desktop turn."""
+    if not claude_is_desktop():
+        return
+    try:
+        payload = json.load(sys.stdin)
+    except json.JSONDecodeError:
+        return
+    if not isinstance(payload, dict):
+        return
+    session_id = payload.get("session_id")
+    if not isinstance(session_id, str) or not valid_session_id(session_id):
+        return
+    session = refreshed_session("claude", session_id)
+    if not isinstance(session, dict) or not display_is_worth_showing("claude", session):
+        return
+    print(prompt_context_payload(session, recorded_quota_usage_text("claude")))
+
+
+def codex_prompt_hook() -> None:
+    """Inject the usage box as visible context for a Codex desktop turn."""
+    try:
+        payload = json.load(sys.stdin)
+    except json.JSONDecodeError:
+        print(json.dumps({"suppressOutput": True}))
+        return
+    if not isinstance(payload, dict):
+        print(json.dumps({"suppressOutput": True}))
+        return
+    session_id: str | None = None
+    for key in ("session_id", "thread_id", "id"):
+        value = payload.get(key)
+        if isinstance(value, str):
+            session_id = value
+            break
+    if session_id is None or not valid_session_id(session_id):
+        print(json.dumps({"suppressOutput": True}))
+        return
+    if not codex_is_desktop(codex_hook_transcript(payload, session_id)):
+        print(json.dumps({"suppressOutput": True}))
+        return
+    session = refreshed_session("codex", session_id)
+    if not isinstance(session, dict) or not display_is_worth_showing("codex", session):
+        print(json.dumps({"suppressOutput": True}))
+        return
+    print(prompt_context_payload(session, recorded_quota_usage_text("codex")))
 
 
 def refreshed_session(provider: str, session_id: str) -> dict[str, object] | None:
@@ -442,24 +526,27 @@ def refreshed_session(provider: str, session_id: str) -> dict[str, object] | Non
     )
 
 
-def codex_display_is_worth_showing(session: dict[str, object]) -> bool:
-    """Rate-limit Codex summaries to meaningful changes in a working session."""
+def codex_display_is_worth_showing(session: dict[str, object], provider: str) -> bool:
+    """Rate-limit usage summaries to meaningful changes in a working session."""
     session_id = session.get("id")
     task_count = session.get("task_count")
     total_cost = session.get("total_cost_usd")
     forecast = session.get("projected_next_10_tasks_usd")
     if (
-        not isinstance(session_id, str)
+        provider not in ALLOWED_PROVIDERS
+        or not isinstance(session_id, str)
         or not isinstance(task_count, int)
         or not isinstance(total_cost, (int, float))
     ):
         return False
+    # Providers share one state file, so the key has to carry both dimensions of the identity.
+    state_key = f"{provider}:{session_id}"
     try:
         raw_state = json.loads(codex_display_state_path().read_text())
     except (OSError, json.JSONDecodeError):
         raw_state = {}
     state = raw_state if isinstance(raw_state, dict) else {}
-    previous = state.get(session_id)
+    previous = state.get(state_key)
     if not isinstance(previous, dict):
         previous = {}
     previous_iteration = previous.get("task_count")
@@ -477,7 +564,7 @@ def codex_display_is_worth_showing(session: dict[str, object]) -> bool:
     )
     if not enough_turns or not (cost_changed or forecast_changed):
         return False
-    state[session_id] = {
+    state[state_key] = {
         "task_count": task_count,
         "total_cost_usd": total_cost,
         "forecast_usd": forecast,

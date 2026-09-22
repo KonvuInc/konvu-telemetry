@@ -8,6 +8,7 @@ from threading import Lock
 import time
 import unittest
 from pathlib import Path
+from typing import Callable
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -38,7 +39,11 @@ from konvu_telemetry.config import (
 from konvu_telemetry.display import (
     baseline_text,
     claude_hook,
+    claude_prompt_hook,
+    codex_display_is_worth_showing,
     codex_hook,
+    codex_is_desktop,
+    codex_prompt_hook,
     quota_usage_text,
     record_claude_quotas,
     refreshed_session,
@@ -1339,28 +1344,249 @@ class ServiceTests(unittest.TestCase):
                 )
         self.assertIsNone(payload)
 
-    def test_claude_desktop_hook_returns_a_usage_message(self) -> None:
+    def run_claude_hook(
+        self,
+        hook: Callable[[], None],
+        entrypoint: str | None,
+        session: dict[str, object] | None,
+    ) -> str:
+        """Run a Claude hook against one client entrypoint and return its stdout."""
         session_id = "00000000-0000-0000-0000-000000000001"
         stdout = StringIO()
+        environment = (
+            {} if entrypoint is None else {"CLAUDE_CODE_ENTRYPOINT": entrypoint}
+        )
         with (
+            patch.dict(os.environ, environment, clear=True),
             patch.object(
                 sys, "stdin", StringIO(json.dumps({"session_id": session_id}))
             ),
             patch.object(sys, "stdout", stdout),
+            patch("konvu_telemetry.display.refreshed_session", return_value=session),
             patch(
-                "konvu_telemetry.display.refreshed_session",
-                return_value={
-                    "total_cost_usd": 1.25,
-                    "context_tokens": 500,
-                    "context_window_tokens": 1000,
-                },
+                "konvu_telemetry.display.display_is_worth_showing", return_value=True
+            ),
+            patch("konvu_telemetry.display.recorded_quota_usage_text", return_value=""),
+        ):
+            hook()
+        return stdout.getvalue()
+
+    def test_claude_stop_hook_renders_the_box_only_outside_the_desktop_app(
+        self,
+    ) -> None:
+        session = {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "total_cost_usd": 1.25,
+            "cost_status": "complete",
+            "projected_next_10_tasks_usd": 0.5,
+            "context_tokens": 500,
+            "context_window_tokens": 1000,
+        }
+        box = (
+            "╭─ Konvu usage\n"
+            "│ 💸 $1.2 total · $0.5 for the next 10 prompts\n"
+            "│ 🧠 50% context\n"
+            "╰─"
+        )
+        self.assertEqual(
+            json.loads(self.run_claude_hook(claude_hook, "cli", session)),
+            {"systemMessage": box},
+        )
+        self.assertEqual(
+            json.loads(self.run_claude_hook(claude_hook, None, session)),
+            {"systemMessage": box},
+        )
+        self.assertEqual(
+            self.run_claude_hook(claude_hook, "claude-desktop", session), ""
+        )
+
+    def test_claude_prompt_hook_injects_context_only_in_the_desktop_app(self) -> None:
+        session = {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "total_cost_usd": 25.0,
+            "cost_status": "complete",
+            "projected_next_10_tasks_usd": 5.0,
+            "task_count": 9,
+            "context_tokens": 500,
+            "context_window_tokens": 1000,
+        }
+        payload = json.loads(
+            self.run_claude_hook(claude_prompt_hook, "claude-desktop", session)
+        )
+        self.assertNotIn("systemMessage", payload)
+        self.assertEqual(
+            payload["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit"
+        )
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("verbatim as the very last thing in your reply", context)
+        self.assertIn("╭─ Konvu usage", context)
+        self.assertIn("│ 💸 $25.0 total · $5.0 for the next 10 prompts", context)
+        self.assertTrue(context.endswith("╰─"))
+        self.assertEqual(self.run_claude_hook(claude_prompt_hook, "cli", session), "")
+        self.assertEqual(self.run_claude_hook(claude_prompt_hook, None, session), "")
+
+    def test_claude_hooks_stay_silent_when_the_session_file_is_missing(self) -> None:
+        self.assertEqual(self.run_claude_hook(claude_hook, "cli", None), "")
+        self.assertEqual(
+            self.run_claude_hook(claude_prompt_hook, "claude-desktop", None), ""
+        )
+
+    def run_codex_hook(
+        self,
+        hook: Callable[[], None],
+        client: str,
+        session: dict[str, object] | None,
+    ) -> str:
+        """Run a Codex hook against one recorded client and return its stdout."""
+        session_id = "00000000-0000-0000-0000-000000000001"
+        stdout = StringIO()
+        with (
+            patch.object(
+                sys,
+                "stdin",
+                StringIO(json.dumps({"session_id": session_id, "turn_id": "turn"})),
+            ),
+            patch.object(sys, "stdout", stdout),
+            patch(
+                "konvu_telemetry.display.codex_hook_transcript",
+                return_value=Path("session.jsonl"),
+            ),
+            patch("konvu_telemetry.display.codex_turn_tool_calls", return_value=1),
+            patch("konvu_telemetry.display.codex_client_in_file", return_value=client),
+            patch("konvu_telemetry.display.refreshed_session", return_value=session),
+            patch(
+                "konvu_telemetry.display.display_is_worth_showing", return_value=True
+            ),
+            patch(
+                "konvu_telemetry.display.recorded_quota_usage_text",
+                return_value="3% weekly limit",
             ),
         ):
-            claude_hook()
+            hook()
+        return stdout.getvalue()
+
+    def test_codex_stop_hook_keeps_cli_output_and_suppresses_the_desktop_app(
+        self,
+    ) -> None:
+        session = {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "total_cost_usd": 25.4,
+            "task_count": 5,
+            "cost_status": "complete",
+            "projected_next_10_tasks_usd": 4.9,
+            "context_tokens": 650,
+            "context_window_tokens": 1000,
+        }
         self.assertEqual(
-            json.loads(stdout.getvalue()),
-            {"systemMessage": "Konvu usage\n💸 $1.2 total\n🧠 50% context"},
+            json.loads(self.run_codex_hook(codex_hook, "cli", session)),
+            {
+                "systemMessage": "\n╭─ Konvu usage\n"
+                "│ 💸 $25.4 total · $4.9 for the next 10 prompts\n"
+                "│ 🧠 65% context · 3% weekly limit\n"
+                "╰─"
+            },
         )
+        self.assertEqual(
+            json.loads(self.run_codex_hook(codex_hook, "unknown", session)).keys(),
+            {"systemMessage"},
+        )
+        self.assertEqual(
+            json.loads(self.run_codex_hook(codex_hook, "desktop", session)),
+            {"suppressOutput": True},
+        )
+
+    def test_codex_prompt_hook_injects_context_only_for_the_desktop_originator(
+        self,
+    ) -> None:
+        session = {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "total_cost_usd": 25.4,
+            "task_count": 5,
+            "cost_status": "complete",
+            "projected_next_10_tasks_usd": 4.9,
+            "context_tokens": 650,
+            "context_window_tokens": 1000,
+        }
+        payload = json.loads(self.run_codex_hook(codex_prompt_hook, "desktop", session))
+        self.assertNotIn("systemMessage", payload)
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("verbatim as the very last thing in your reply", context)
+        self.assertIn("│ 🧠 65% context · 3% weekly limit", context)
+        for client in ("cli", "unknown"):
+            self.assertEqual(
+                json.loads(self.run_codex_hook(codex_prompt_hook, client, session)),
+                {"suppressOutput": True},
+            )
+        self.assertEqual(
+            json.loads(self.run_codex_hook(codex_prompt_hook, "desktop", None)),
+            {"suppressOutput": True},
+        )
+
+    def test_display_rate_limit_suppresses_an_immediate_second_show(self) -> None:
+        session = {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "task_count": 9,
+            "total_cost_usd": 25.0,
+            "projected_next_10_tasks_usd": 5.0,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "display-state.json"
+            with patch(
+                "konvu_telemetry.display.codex_display_state_path", return_value=state
+            ):
+                self.assertTrue(codex_display_is_worth_showing(session, "codex"))
+                self.assertFalse(codex_display_is_worth_showing(session, "codex"))
+                # A same-id session on the other provider keeps its own rate-limit entry.
+                self.assertTrue(codex_display_is_worth_showing(session, "claude"))
+                self.assertFalse(codex_display_is_worth_showing(session, "claude"))
+                self.assertFalse(codex_display_is_worth_showing(session, "bogus"))
+            self.assertEqual(
+                set(json.loads(state.read_text())),
+                {
+                    "codex:00000000-0000-0000-0000-000000000001",
+                    "claude:00000000-0000-0000-0000-000000000001",
+                },
+            )
+
+    def test_codex_is_desktop_covers_every_recorded_client(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            meta = {"type": "session_meta", "payload": {"originator": "Codex Desktop"}}
+            vscode = root / "vscode.jsonl"
+            vscode.write_text(
+                json.dumps({"type": "session_meta", "payload": {"source": "vscode"}})
+                + "\n"
+            )
+            desktop = root / "desktop.jsonl"
+            desktop.write_text(json.dumps(meta) + "\n")
+            late = root / "late.jsonl"
+            late.write_text(
+                json.dumps({"type": "event_msg", "payload": {}})
+                + "\n"
+                + json.dumps(meta)
+                + "\n"
+            )
+            tui = root / "tui.jsonl"
+            tui.write_text(
+                json.dumps(
+                    {"type": "session_meta", "payload": {"originator": "codex-tui"}}
+                )
+                + "\n"
+            )
+            exec_run = root / "exec.jsonl"
+            exec_run.write_text(
+                json.dumps(
+                    {"type": "session_meta", "payload": {"originator": "codex_exec"}}
+                )
+                + "\n"
+            )
+            broken = root / "broken.jsonl"
+            broken.write_text("not json\n")
+            for path in (vscode, desktop, late):
+                self.assertTrue(codex_is_desktop(path), path.name)
+            for path in (tui, exec_run, broken, root / "missing.jsonl"):
+                self.assertFalse(codex_is_desktop(path), path.name)
+            self.assertFalse(codex_is_desktop(None))
 
     def test_codex_hook_includes_quota_with_context_and_never_alone(self) -> None:
         session_id = "00000000-0000-0000-0000-000000000001"

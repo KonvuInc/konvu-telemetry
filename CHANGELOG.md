@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Show usage in Claude Desktop and Codex Desktop, which collapse hook system messages into a hidden notice. Setup now also registers a `UserPromptSubmit` hook per provider that injects the usage box as context the reply ends with.
+- Suppress the Stop hooks on both desktop apps so a turn reports its usage once.
+- Render the Claude Code status line's Stop hook with the same boxed summary Codex already used.
+- Rate-limit the desktop box on the same thresholds as the Codex CLI hook: $10 of spend, five prompts, and a meaningful change since the last one. Display state is now keyed by provider and session instead of session alone.
+
 ## 0.2.2 - 2026-09-21
 
 - Keep Codex quota usage visible alongside session context when quota data is available.

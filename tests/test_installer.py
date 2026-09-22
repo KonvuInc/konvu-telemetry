@@ -144,6 +144,61 @@ class InstallerTests(unittest.TestCase):
                 [{"hooks": [{"type": "command", "command": "keep-me"}]}],
             )
 
+    def test_prompt_hooks_are_idempotent_and_leave_other_hooks_alone(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            claude = home / ".claude"
+            codex = home / ".codex"
+            claude.mkdir()
+            codex.mkdir()
+            console = home / "bin" / "konvu"
+            console.parent.mkdir()
+            console.write_text("#!/bin/sh\nexit 0\n")
+            console.chmod(0o700)
+            kept = {"hooks": [{"type": "command", "command": "keep-me"}]}
+            for path in (claude / "settings.json", codex / "hooks.json"):
+                path.write_text(json.dumps({"hooks": {"UserPromptSubmit": [kept]}}))
+            with (
+                patch.object(installer.Path, "home", return_value=home),
+                patch.object(installer, "console_launcher", return_value=console),
+            ):
+                self.assertEqual(installer.install_claude_prompt_hook(), "installed")
+                self.assertEqual(installer.install_claude_prompt_hook(), "updated")
+                self.assertEqual(installer.install_codex_prompt_hook(), "installed")
+                self.assertEqual(installer.install_codex_prompt_hook(), "updated")
+                for path, command in (
+                    (claude / "settings.json", "claude-prompt-hook"),
+                    (codex / "hooks.json", "codex-prompt-hook"),
+                ):
+                    groups = json.loads(path.read_text())["hooks"]["UserPromptSubmit"]
+                    self.assertEqual(len(groups), 2)
+                    self.assertEqual(groups[0], kept)
+                    self.assertEqual(groups[1]["hooks"][0]["timeout"], 5)
+                    self.assertTrue(
+                        installer.is_konvu_hook(
+                            groups[1]["hooks"][0]["command"], command
+                        )
+                    )
+                self.assertTrue(installer.remove_claude_prompt_hook())
+                self.assertFalse(installer.remove_claude_prompt_hook())
+                self.assertTrue(installer.remove_codex_prompt_hook())
+                self.assertFalse(installer.remove_codex_prompt_hook())
+            for path in (claude / "settings.json", codex / "hooks.json"):
+                self.assertEqual(
+                    json.loads(path.read_text())["hooks"]["UserPromptSubmit"], [kept]
+                )
+
+    def test_setup_rejects_a_malformed_user_prompt_submit_hook_list(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            claude_path = home / ".claude" / "settings.json"
+            claude_path.parent.mkdir()
+            (home / ".codex").mkdir()
+            claude_path.write_text(json.dumps({"hooks": {"UserPromptSubmit": {}}}))
+            with patch.object(installer.Path, "home", return_value=home):
+                with self.assertRaisesRegex(ValueError, "hooks.UserPromptSubmit"):
+                    installer.validate_integrations()
+
     def test_similar_command_name_is_not_treated_as_konvu_owned(self) -> None:
         self.assertFalse(installer.is_konvu_command("/tmp/not-konvu-launcher-helper"))
         self.assertFalse(installer.is_konvu_command("echo konvu-launcher"))
@@ -328,6 +383,13 @@ class InstallerTests(unittest.TestCase):
                 installer.setup(60, False)
                 installed = json.loads(codex_path.read_text())
                 self.assertEqual(len(installed["hooks"]["Stop"]), 2)
+                self.assertEqual(len(installed["hooks"]["UserPromptSubmit"]), 1)
+                self.assertEqual(
+                    len(
+                        json.loads(claude_path.read_text())["hooks"]["UserPromptSubmit"]
+                    ),
+                    1,
+                )
                 self.assertEqual(
                     json.loads(installer.claude_statusline_state_path().read_text())[
                         "statusLine"
@@ -347,7 +409,9 @@ class InstallerTests(unittest.TestCase):
                 {
                     "claude_statusline": True,
                     "claude_desktop_hook": True,
+                    "claude_prompt_hook": True,
                     "codex_hook": True,
+                    "codex_prompt_hook": True,
                 },
             )
             self.assertEqual(
