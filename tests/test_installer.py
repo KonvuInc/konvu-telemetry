@@ -11,6 +11,54 @@ from konvu_telemetry import installer
 
 
 class InstallerTests(unittest.TestCase):
+    def test_console_launcher_skips_a_stale_py_path_injected_script(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stale = root / "stale" / "konvu-telemetry"
+            current = root / "current" / "bin" / "konvu-telemetry"
+            stale.parent.mkdir()
+            current.parent.mkdir(parents=True)
+            stale.write_text(
+                "#!/bin/sh\n"
+                'if [ -n "$PYTHONPATH" ]; then\n'
+                "  echo claude-prompt-hook codex-prompt-hook\n"
+                "else\n"
+                "  echo claude-hook codex-hook\n"
+                "fi\n"
+            )
+            current.write_text("#!/bin/sh\necho claude-prompt-hook codex-prompt-hook\n")
+            stale.chmod(0o700)
+            current.chmod(0o700)
+            with (
+                patch.object(installer.sys, "argv", [str(stale), "setup"]),
+                patch.object(installer.site, "USER_BASE", str(root / "current")),
+                patch.object(
+                    installer.sysconfig,
+                    "get_path",
+                    return_value=str(root / "missing"),
+                ),
+                patch.dict(os.environ, {"PYTHONPATH": str(root / "source")}),
+            ):
+                self.assertEqual(installer.console_launcher(), current)
+
+    def test_console_launcher_rejects_only_stale_scripts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stale = root / "konvu-telemetry"
+            stale.write_text("#!/bin/sh\necho claude-hook codex-hook\n")
+            stale.chmod(0o700)
+            with (
+                patch.object(installer.sys, "argv", [str(stale), "setup"]),
+                patch.object(installer.site, "USER_BASE", None),
+                patch.object(
+                    installer.sysconfig,
+                    "get_path",
+                    return_value=str(root / "missing"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "current telemetry launcher"),
+            ):
+                installer.console_launcher()
+
     def test_setup_merges_konvu_hooks_without_removing_existing_hooks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)

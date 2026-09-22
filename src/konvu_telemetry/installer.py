@@ -27,6 +27,7 @@ CLAUDE_STATUSLINE_ORIGINAL_NAME = "konvu-claude-statusline-original"
 CLAUDE_STATUSLINE_STATE_NAME = "konvu-claude-statusline-state.json"
 CONSOLE_COMMAND = "konvu-telemetry"
 HOOK_TIMEOUT_SECONDS = 5
+REQUIRED_CONSOLE_COMMANDS = ("claude-prompt-hook", "codex-prompt-hook")
 
 
 @dataclass(frozen=True)
@@ -78,10 +79,35 @@ def console_launcher() -> Path:
     if scripts is not None:
         candidates.append(Path(scripts) / CONSOLE_COMMAND)
     for candidate in candidates:
-        if candidate.name == CONSOLE_COMMAND and candidate.is_file():
+        if (
+            candidate.name == CONSOLE_COMMAND
+            and candidate.is_file()
+            and console_launcher_is_compatible(candidate)
+        ):
             return candidate
     raise RuntimeError(
-        "Could not find the installed telemetry launcher; run setup via `konvu-telemetry setup`"
+        "Could not find a current telemetry launcher; install this version and run "
+        "setup through its `konvu-telemetry` executable"
+    )
+
+
+def console_launcher_is_compatible(candidate: Path) -> bool:
+    """Reject a stale script that only imports this version through PYTHONPATH."""
+    environment = dict(os.environ)
+    environment.pop("PYTHONPATH", None)
+    try:
+        result = subprocess.run(
+            [str(candidate), "--help"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=environment,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and all(
+        command in result.stdout for command in REQUIRED_CONSOLE_COMMANDS
     )
 
 
