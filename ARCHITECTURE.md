@@ -6,7 +6,8 @@ Konvu Telemetry is one Python package with a single resident process. The proces
 
 - The collector never modifies provider transcripts.
 - The dashboard server binds only to IPv4 loopback and rejects non-local `Host` and `Origin` values.
-- The package has no runtime Python dependencies and contains no outbound network client.
+- The package has no runtime Python dependencies. Its only outbound client sends a small allowlisted set of anonymous product events to PostHog in a background thread with a 500 ms timeout.
+- Product analytics uses a random install ID. It does not create person profiles and sends no transcripts, prompts, code, paths, command arguments, usage data, raw errors, environment variables, account IDs, or workspace IDs.
 - Browser notifications require an open dashboard tab and browser permission.
 - A session alerts when it was active in the last twenty minutes, its cost is complete, and its next-ten-prompt forecast exceeds `ALERT_FORECAST_USD`. It alerts again only after `ALERT_FORECAST_RENOTIFY_SECONDS` and only if the forecast has not fallen since the last alert; falling to or below the threshold re-arms it.
 - Claude and Codex integrations read precomputed session files; they do not parse transcripts in a hook invocation.
@@ -33,6 +34,8 @@ Konvu Telemetry is one Python package with a single resident process. The proces
 | `~/.konvu/telemetry/baselines.json` | Local historical medians | `0600` |
 | `~/.konvu/telemetry/health.json` | Collector freshness and last error | `0600` |
 | `~/.konvu/telemetry/notification-state.json` | Alert suppression state | `0600` |
+| `~/.konvu/telemetry/tracking-state.json` | Anonymous install ID and local analytics preference | `0600` |
+| `~/.konvu/telemetry/tracking-queue.json` | Pending anonymous analytics events | `0600` |
 | `~/.konvu/telemetry/collector*.log` | LaunchAgent stdout and stderr | User-owned |
 | `~/Library/LaunchAgents/com.konvu.telemetry.plist` | Per-user service definition | User-owned |
 | `~/.claude/settings.json` | Optional Claude status line merge | `0600` after write |
@@ -48,6 +51,8 @@ Raw transcripts remain in `~/.claude/projects` and `~/.codex/sessions`. Normaliz
 | `KONVU_LIVE_USAGE_CLAUDE_DIR` | Claude transcript roots, separated by the platform path separator |
 | `KONVU_LIVE_USAGE_CODEX_DIR` | Codex transcript roots, separated by the platform path separator |
 | `KONVU_TELEMETRY_PRICING_PATH` | Local pricing JSON file |
+
+Run `konvu-telemetry telemetry off` to disable anonymous product analytics and delete pending events. `telemetry on` restores the default behavior, and `telemetry status` prints the local state.
 
 ## Failure behavior
 

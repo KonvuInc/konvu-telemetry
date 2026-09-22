@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Use only the four event names and allowlisted properties in the spec.
+- Use only the five event names and allowlisted properties in the spec.
 - Send no prompts, code, transcripts, raw errors, paths, arguments, environment variables, usage data, user IDs, or workspace IDs.
 - Include anonymous `distinct_id`, `$process_person_profile: false`, and `$ip: "0"` on every event.
 - `telemetry off` deletes unsent events. Failed sends retain them.

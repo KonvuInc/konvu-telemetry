@@ -15,6 +15,7 @@ All events use one random UUID generated per install as `distinct_id`, plus `$pr
 | Event | When | Allowed properties |
 | --- | --- | --- |
 | `telemetry setup completed` | Setup finishes successfully | `cli_version`, `os_family`, `duration_bucket` |
+| `first snapshot ready` | First snapshot containing session data is written | `cli_version`, `os_family` |
 | `dashboard opened` | The root local dashboard document is requested | `cli_version`, `os_family`, `data_available` |
 | `telemetry active day` | First dashboard open on a local calendar day | `cli_version`, `os_family` |
 | `collector failed` | A snapshot collection attempt fails | `cli_version`, `os_family`, `stage` |
