@@ -13,6 +13,8 @@ const COLORS = {
   red: "#A60808",
 };
 const BURNING_FORECAST_USD = 4;
+const AUTO_REFRESH_MS = 15000;
+const MANUAL_REFRESH_COOLDOWN_MS = 10000;
 const state = {
   payload: null,
   view: "ledger",
@@ -23,11 +25,14 @@ const state = {
   chart: "cumulative",
   error: false,
   refreshInFlight: false,
+  nextRefreshAt: Date.now(),
+  manualRefreshAvailableAt: 0,
   snapshotEtag: null,
   detailRequest: 0,
   now: Date.now(),
   lastOpener: null,
 };
+let refreshTimer = null;
 const $ = (selector) => document.querySelector(selector);
 const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const finite = (value) => typeof value === "number" && Number.isFinite(value);
@@ -1109,8 +1114,7 @@ function render() {
     stale = state.error || !state.payload || elapsed(state.payload.generated_at) > 120000;
   $("#live-dot").className = "live-dot" + (rows.length && !stale && !state.error ? " active" : "");
   $("#live-count").textContent = rows.length;
-  $("#freshness").textContent = state.error ? "Collector unreachable" : "Updated " + age(state.payload?.generated_at) + " ago";
-  $("#freshness").classList.toggle("stale", stale);
+  renderFreshness(stale);
   document.querySelectorAll("[data-provider]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.provider === state.provider)));
   $("#baseline-mode").value = state.baselineMode;
   $("#ledger-toolbar").hidden = state.view === "graph";
@@ -1125,7 +1129,22 @@ function render() {
   renderAccounts();
   renderInspector();
 }
+function renderFreshness(stale) {
+  state.now = Date.now();
+  const remainingSeconds = Math.max(0, Math.ceil((state.nextRefreshAt - state.now) / 1000));
+  const progress = Math.max(0, Math.min(1, 1 - (state.nextRefreshAt - state.now) / AUTO_REFRESH_MS));
+  const coolingDown = state.now < state.manualRefreshAvailableAt;
+  const button = $("#freshness");
+  button.style.setProperty("--progress", String(progress));
+  button.disabled = state.refreshInFlight || coolingDown;
+  button.title = coolingDown
+    ? "Manual refresh available in " + Math.ceil((state.manualRefreshAvailableAt - state.now) / 1000) + "s"
+    : (state.error ? "Collector unreachable. " : "") + "Refresh now; next ping in " + remainingSeconds + "s";
+  button.setAttribute("aria-label", button.title);
+  button.classList.toggle("stale", Boolean(stale));
+}
 function bindEvents() {
+  $("#freshness").addEventListener("click", refreshNow);
   document.addEventListener(
     "toggle",
     (event) => {
@@ -1240,6 +1259,21 @@ async function refresh() {
   } else if (chart) document.querySelector('[data-chart="' + chart + '"]')?.focus({ preventScroll: true });
   else if (baseline) $("#baseline-mode")?.focus({ preventScroll: true });
   else if (axis) document.querySelector('[data-axis="' + axis + '"]')?.focus({ preventScroll: true });
+}
+function scheduleRefresh() {
+  if (refreshTimer !== null) window.clearTimeout(refreshTimer);
+  state.nextRefreshAt = Date.now() + AUTO_REFRESH_MS;
+  renderFreshness(state.error || !state.payload || elapsed(state.payload.generated_at) > 120000);
+  refreshTimer = window.setTimeout(async () => {
+    await refresh();
+    scheduleRefresh();
+  }, AUTO_REFRESH_MS);
+}
+async function refreshNow() {
+  if (state.refreshInFlight || Date.now() < state.manualRefreshAvailableAt) return;
+  state.manualRefreshAvailableAt = Date.now() + MANUAL_REFRESH_COOLDOWN_MS;
+  await refresh();
+  scheduleRefresh();
 }
 function contextCompactions(s) {
   return compacts(s).filter((event) => nonnegative(event.cumulative_cost_usd));
@@ -1783,5 +1817,7 @@ function browserAlerts(payload) {
 initialUrl();
 bindEvents();
 bindNotificationPanel();
-refresh();
-setInterval(refresh, 15000);
+refresh().finally(scheduleRefresh);
+setInterval(() => {
+  renderFreshness(state.error || !state.payload || elapsed(state.payload.generated_at) > 120000);
+}, 1000);

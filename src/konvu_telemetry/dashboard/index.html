@@ -11,7 +11,7 @@
     <header class="top">
       <div class="brand"><img src="/konvu-ghost.svg" alt="Konvu" /><strong>Coding Agents monitoring</strong></div>
       <div class="top-actions">
-        <span class="freshness" id="freshness"></span>
+        <button class="freshness" id="freshness" type="button"></button>
         <div class="notification-wrap">
           <button
             id="konvu-alert-control"
@@ -29,34 +29,15 @@
               <button id="notification-close" aria-label="Close notification settings">×</button>
             </div>
             <p id="notification-status" class="notification-status" role="status"></p>
-            <p class="notification-intro">Browser alerts bring you back to a session that needs a look.</p>
+            <h3 class="notification-section-title">Set up alerts</h3>
             <ol class="notification-steps">
-              <li>
-                <strong>Allow this site to notify you.</strong>
-                <p id="notification-help"></p>
-                <button id="notification-enable" class="notification-primary">Allow notifications</button>
-              </li>
-              <li>
-                <strong>Allow alerts on your computer.</strong>
-                <p>On Mac: System Settings → Notifications → your browser or this website → Allow notifications. Make sure Focus isn’t silencing it.</p>
-                <a href="https://support.apple.com/guide/mac-help/mchl205da693/mac" target="_blank" rel="noopener noreferrer">Notification settings guide ↗</a>
-              </li>
-              <li>
-                <strong>Keep this dashboard open.</strong>
-                <p>Another tab is fine. Keep the browser running and your computer awake.</p>
-              </li>
-              <li>
-                <strong>Check that a test reaches you.</strong>
-                <div class="notification-test-actions"><button id="notification-test" class="notification-secondary">Send test notification</button></div>
-                <p id="notification-delivery"></p>
-              </li>
+              <li><button id="notification-enable" class="notification-primary">Allow notifications</button><p id="notification-help"></p></li>
+              <li><strong>Mac:</strong> System Settings → Notifications → your browser → Allow Notifications. Turn off Focus if alerts are muted.</li>
+              <li><button id="notification-test" class="notification-secondary">Send test notification</button><p id="notification-delivery"></p></li>
             </ol>
             <p id="notification-feedback" role="status"></p>
-            <details class="notification-rules" open>
-              <summary>When we notify you</summary>
-              <p>We alert when an active session is forecast to spend more than $4 over its next 10 prompts.</p>
-              <p>Repeat alerts wait at least 5 minutes and only arrive if the forecast has not come down since the last one.</p>
-            </details>
+            <h3 class="notification-section-title">When we ping</h3>
+            <p class="notification-intro">When an active agent is forecast to spend a lot more money soon. Repeats wait 5 minutes.</p>
           </section>
         </div>
       </div>
