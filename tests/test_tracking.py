@@ -4,7 +4,7 @@ from datetime import datetime
 from io import StringIO
 from queue import SimpleQueue
 import tempfile
-from threading import Lock
+from threading import Event, Lock, Thread
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -64,6 +64,19 @@ class TrackingStoreTests(unittest.TestCase):
             self.assertFalse(store.status().enabled)
             self.assertEqual(state_path.read_text(), "{broken")
 
+    def test_non_uuid_install_id_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            state_path = directory / "tracking-state.json"
+            state_path.write_text(
+                json.dumps({"enabled": True, "install_id": "person@example.com"})
+            )
+            store = self.store(directory)
+
+            self.assertFalse(store.status().enabled)
+            store.record("dashboard opened", {"data_available": True})
+            self.assertFalse((directory / "tracking-queue.json").exists())
+
     def test_opt_out_clears_queued_events(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
@@ -87,6 +100,42 @@ class TrackingStoreTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(OSError, "read only"):
                     store.set_enabled(False)
+
+    def test_opt_out_waits_for_an_in_flight_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            sending = Event()
+            release = Event()
+            opted_out = Event()
+
+            def blocked_sender(_payload: bytes) -> None:
+                sending.set()
+                release.wait(2)
+
+            delivery_store = self.enabled_store(directory, sender=blocked_sender)
+            opt_out_store = self.store(directory)
+            delivery_store.record("dashboard opened", {"data_available": True})
+            delivery = Thread(target=delivery_store.send_queued)
+            delivery.start()
+            self.assertTrue(sending.wait(1))
+
+            def opt_out() -> None:
+                opt_out_store.set_enabled(False)
+                opted_out.set()
+
+            disabling = Thread(target=opt_out)
+            disabling.start()
+            completed_while_sending = opted_out.wait(0.1)
+            release.set()
+            delivery.join(1)
+            disabling.join(1)
+
+            self.assertFalse(completed_while_sending)
+            self.assertTrue(opted_out.is_set())
+            self.assertFalse(opt_out_store.status().enabled)
+            self.assertEqual(
+                json.loads((directory / "tracking-queue.json").read_text()), []
+            )
 
     def test_successful_delivery_sends_only_allowlisted_properties(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -148,15 +197,61 @@ class TrackingStoreTests(unittest.TestCase):
             )
             store.record("dashboard opened", {"data_available": True})
 
-            store.send_queued()
-            store.send_queued()
+            first_delay = store.send_queued()
+            second_delay = store.send_queued()
             now[0] += 60
-            store.send_queued()
+            third_delay = store.send_queued()
 
             self.assertEqual(len(sent), 2)
+            self.assertEqual((first_delay, second_delay, third_delay), (60, 60, 120))
             first = sent[0]["batch"][0]["properties"]["$insert_id"]
             second = sent[1]["batch"][0]["properties"]["$insert_id"]
             self.assertEqual(first, second)
+
+    def test_legacy_queue_is_migrated_before_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            sent: list[dict[str, object]] = []
+            state = {
+                "enabled": True,
+                "install_id": "00000000-0000-4000-8000-000000000001",
+            }
+            (directory / "tracking-state.json").write_text(json.dumps(state))
+            (directory / "tracking-queue.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "event": "dashboard opened",
+                            "properties": {"data_available": True},
+                        }
+                    ]
+                )
+            )
+            store = self.store(
+                directory,
+                sender=lambda payload: sent.append(json.loads(payload)),
+            )
+
+            store.send_queued()
+
+            event = sent[0]["batch"][0]
+            self.assertEqual(event["properties"]["$insert_id"], event["uuid"])
+            datetime.fromisoformat(event["timestamp"])
+
+    def test_legacy_first_snapshot_marker_is_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            state = {
+                "enabled": True,
+                "install_id": "00000000-0000-4000-8000-000000000001",
+                "first_snapshot_ready": True,
+            }
+            (directory / "tracking-state.json").write_text(json.dumps(state))
+            store = self.store(directory)
+
+            store.record_first_snapshot_ready()
+
+            self.assertFalse((directory / "tracking-queue.json").exists())
 
     def test_active_day_is_recorded_once_per_calendar_day(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -304,6 +399,62 @@ class TrackingStoreTests(unittest.TestCase):
             tracking.flush_in_background()
 
         self.assertFalse(worker_lock.locked())
+
+    def test_background_delivery_retries_without_another_event(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            now = [1_000.0]
+            attempts = [0]
+            timers = []
+
+            def sender(_payload: bytes) -> None:
+                attempts[0] += 1
+                if attempts[0] == 1:
+                    raise OSError("offline")
+
+            store = self.enabled_store(
+                directory,
+                sender=sender,
+                clock=lambda: now[0],
+            )
+            store.record("dashboard opened", {"data_available": True})
+
+            class ImmediateThread:
+                def __init__(self, target, daemon: bool) -> None:
+                    self.target = target
+
+                def start(self) -> None:
+                    self.target()
+
+            class CapturingTimer:
+                def __init__(self, interval: float, function) -> None:
+                    self.interval = interval
+                    self.function = function
+                    self.daemon = False
+
+                def start(self) -> None:
+                    timers.append(self)
+
+                def is_alive(self) -> bool:
+                    return True
+
+            with (
+                patch("konvu_telemetry.tracking._store", return_value=store),
+                patch("konvu_telemetry.tracking._PENDING_EVENTS", SimpleQueue()),
+                patch("konvu_telemetry.tracking._WORKER_LOCK", Lock()),
+                patch("konvu_telemetry.tracking._RETRY_TIMER", None, create=True),
+                patch("konvu_telemetry.tracking.Thread", ImmediateThread),
+                patch("konvu_telemetry.tracking.Timer", CapturingTimer, create=True),
+            ):
+                tracking.flush_in_background()
+                self.assertEqual(timers[0].interval, 60)
+                now[0] += 60
+                timers[0].function()
+
+            self.assertEqual(attempts[0], 2)
+            self.assertEqual(
+                json.loads((directory / "tracking-queue.json").read_text()), []
+            )
 
     def test_redirected_delivery_is_not_accepted(self) -> None:
         response = Mock()

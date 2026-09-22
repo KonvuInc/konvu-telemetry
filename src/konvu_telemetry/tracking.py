@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 import platform
 from queue import Empty, SimpleQueue
-from threading import Lock, Thread
+from threading import Lock, Thread, Timer
 import time
 from typing import Callable, Iterator, Literal, TypedDict
 from urllib.request import Request, urlopen
@@ -209,22 +209,19 @@ class TrackingStore:
             write_private_json(self._state_path, state)
             self._append("collector failed", {"stage": "snapshot"})
 
-    def send_queued(self) -> None:
+    def send_queued(self) -> float | None:
         with self._locked():
             kind, state = self._read_state()
             queue = self._sanitized_queue()
             next_send_at = state.get("next_send_at")
+            if kind != "valid" or not bool(state["enabled"]) or not queue:
+                return None
             if (
-                kind != "valid"
-                or not bool(state["enabled"])
-                or not queue
-                or (
-                    isinstance(next_send_at, (int, float))
-                    and not isinstance(next_send_at, bool)
-                    and self._clock() < next_send_at
-                )
+                isinstance(next_send_at, (int, float))
+                and not isinstance(next_send_at, bool)
+                and self._clock() < next_send_at
             ):
-                return
+                return next_send_at - self._clock()
             payload = json.dumps(
                 {
                     "api_key": POSTHOG_PROJECT_KEY,
@@ -234,18 +231,13 @@ class TrackingStore:
                     ],
                 }
             ).encode()
-        try:
-            self._sender(payload)
-        except Exception:
-            self._record_delivery_failure()
-            return
-        with self._locked():
-            kind, state = self._read_state()
-            if kind != "valid" or not bool(state["enabled"]):
-                return
+            try:
+                self._sender(payload)
+            except Exception:
+                return self._record_delivery_failure(state)
             current = self._sanitized_queue()
             if current[: len(queue)] != queue:
-                return
+                return None
             state = dict(state)
             if any(item["event"] == "telemetry setup completed" for item in queue):
                 state["setup_delivered"] = True
@@ -255,25 +247,27 @@ class TrackingStore:
             state.pop("next_send_at", None)
             write_private_json(self._state_path, state)
             write_private_json(self._queue_path, current[len(queue) :])
+            return None
 
-    def _record_delivery_failure(self) -> None:
-        with self._locked():
-            kind, state = self._read_state()
-            if kind != "valid" or not bool(state["enabled"]):
-                return
-            previous = state.get("delivery_failures")
-            failures = previous + 1 if isinstance(previous, int) else 1
-            delay = min(
-                INITIAL_RETRY_SECONDS * (2 ** min(failures - 1, 10)),
-                MAX_RETRY_SECONDS,
-            )
-            state = dict(state)
-            state["delivery_failures"] = failures
-            state["next_send_at"] = self._clock() + delay
-            try:
-                write_private_json(self._state_path, state)
-            except OSError:
-                pass
+    def _record_delivery_failure(self, state: dict[str, object]) -> float:
+        previous = state.get("delivery_failures")
+        failures = (
+            previous + 1
+            if isinstance(previous, int) and not isinstance(previous, bool)
+            else 1
+        )
+        delay = min(
+            INITIAL_RETRY_SECONDS * (2 ** min(failures - 1, 10)),
+            MAX_RETRY_SECONDS,
+        )
+        state = dict(state)
+        state["delivery_failures"] = failures
+        state["next_send_at"] = self._clock() + delay
+        try:
+            write_private_json(self._state_path, state)
+        except OSError:
+            pass
+        return float(delay)
 
     def _append(
         self,
@@ -335,9 +329,12 @@ class TrackingStore:
             not isinstance(value, dict)
             or not isinstance(value.get("enabled"), bool)
             or not isinstance(value.get("install_id"), str)
-            or not value["install_id"]
+            or not self._valid_uuid(value["install_id"])
         ):
             return "invalid", {}
+        if value.get("first_snapshot_ready") is True:
+            value = dict(value)
+            value["first_snapshot_delivered"] = True
         return "valid", value
 
     @staticmethod
@@ -352,6 +349,7 @@ class TrackingStore:
         if not isinstance(value, list):
             return []
         sanitized: list[QueuedEvent] = []
+        migrated = False
         for item in value:
             if not isinstance(item, dict):
                 continue
@@ -359,14 +357,19 @@ class TrackingStore:
             properties = item.get("properties")
             timestamp = item.get("timestamp")
             event_id = item.get("uuid")
-            if (
-                not isinstance(event, str)
-                or not isinstance(properties, dict)
-                or not isinstance(timestamp, str)
-                or not isinstance(event_id, str)
-                or not self._valid_timestamp(timestamp)
-                or not self._valid_uuid(event_id)
-            ):
+            if not isinstance(event, str) or not isinstance(properties, dict):
+                continue
+            if timestamp is None:
+                timestamp = datetime.fromtimestamp(
+                    self._clock(), timezone.utc
+                ).isoformat()
+                migrated = True
+            elif not isinstance(timestamp, str) or not self._valid_timestamp(timestamp):
+                continue
+            if event_id is None:
+                event_id = str(uuid4())
+                migrated = True
+            elif not isinstance(event_id, str) or not self._valid_uuid(event_id):
                 continue
             normalized = self._normalize_properties(event, properties)
             if normalized is not None:
@@ -378,7 +381,10 @@ class TrackingStore:
                         "uuid": event_id,
                     }
                 )
-        return sanitized[-MAX_QUEUED_EVENTS:]
+        bounded = sanitized[-MAX_QUEUED_EVENTS:]
+        if migrated:
+            write_private_json(self._queue_path, bounded)
+        return bounded
 
     @staticmethod
     def _valid_timestamp(value: object) -> bool:
@@ -422,6 +428,8 @@ class TrackingStore:
 
 _PENDING_EVENTS: SimpleQueue[tuple[str, dict[str, object]]] = SimpleQueue()
 _WORKER_LOCK = Lock()
+_RETRY_LOCK = Lock()
+_RETRY_TIMER: Timer | None = None
 
 
 def _store() -> TrackingStore:
@@ -473,6 +481,27 @@ def tracking_status() -> TrackingStatus:
     return _store().status()
 
 
+def _schedule_retry(delay: float) -> None:
+    global _RETRY_TIMER
+
+    def retry() -> None:
+        global _RETRY_TIMER
+        with _RETRY_LOCK:
+            _RETRY_TIMER = None
+        flush_in_background()
+
+    with _RETRY_LOCK:
+        if _RETRY_TIMER is not None and _RETRY_TIMER.is_alive():
+            return
+        timer = Timer(max(0.0, delay), retry)
+        timer.daemon = True
+        _RETRY_TIMER = timer
+        try:
+            timer.start()
+        except Exception:
+            _RETRY_TIMER = None
+
+
 def flush_in_background() -> None:
     if not _WORKER_LOCK.acquire(blocking=False):
         return
@@ -493,7 +522,9 @@ def flush_in_background() -> None:
                     store.record_collector_failure(str(properties["day"]))
                 else:
                     store.record(action, properties)
-            store.send_queued()
+            retry_delay = store.send_queued()
+            if retry_delay is not None:
+                _schedule_retry(retry_delay)
         except Exception:
             pass
         finally:

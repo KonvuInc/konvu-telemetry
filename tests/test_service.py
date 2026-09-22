@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from scripts.update_pricing import validated_payload
 
+from konvu_telemetry import service
 from konvu_telemetry.analytics import (
     apply_notification_tracking,
     baseline_comparison,
@@ -1331,6 +1332,23 @@ class ServiceTests(unittest.TestCase):
                 DashboardRequestHandler.do_GET(handler)
         recorded.assert_called_once_with(data_available=False)
 
+    def test_dashboard_open_does_not_read_snapshot_for_analytics(self) -> None:
+        handler = object.__new__(DashboardRequestHandler)
+        handler.headers = {"Host": "127.0.0.1:7824"}
+        handler.path = "/"
+        with (
+            patch.object(service, "_DASHBOARD_DATA_AVAILABLE", True, create=True),
+            patch(
+                "konvu_telemetry.service.snapshot_path",
+                side_effect=AssertionError("request read snapshot"),
+            ),
+            patch("konvu_telemetry.service.record_dashboard_opened") as recorded,
+            patch("http.server.SimpleHTTPRequestHandler.do_GET"),
+        ):
+            DashboardRequestHandler.do_GET(handler)
+
+        recorded.assert_called_once_with(data_available=True)
+
     def test_dashboard_data_matches_the_visible_activity_window(self) -> None:
         snapshot = {
             "live_activity_window_seconds": 1_200,
@@ -1574,6 +1592,7 @@ class ServiceTests(unittest.TestCase):
         recorded.assert_called_once()
 
     def test_first_snapshot_with_session_data_is_recorded(self) -> None:
+        service._DASHBOARD_DATA_AVAILABLE = False
         with (
             patch(
                 "konvu_telemetry.service.build_snapshot",
@@ -1591,6 +1610,7 @@ class ServiceTests(unittest.TestCase):
         ):
             collect_forever(60, IncrementalLiveState(), Lock())
         recorded.assert_called_once()
+        self.assertTrue(service._DASHBOARD_DATA_AVAILABLE)
 
     def test_dashboard_rejects_non_local_or_malformed_origins(self) -> None:
         self.assertTrue(local_request_allowed("127.0.0.1:7824", None))

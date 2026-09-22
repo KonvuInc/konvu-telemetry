@@ -32,6 +32,7 @@ from .storage import (
 
 LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost"})
 LOGGER = logging.getLogger(__name__)
+_DASHBOARD_DATA_AVAILABLE = False
 
 
 def record_collector_failure() -> None:
@@ -50,6 +51,12 @@ def record_first_snapshot_ready() -> None:
     from .tracking import record_first_snapshot_ready as record
 
     record()
+
+
+def flush_tracking_in_background() -> None:
+    from .tracking import flush_in_background
+
+    flush_in_background()
 
 
 def snapshot_has_dashboard_data(snapshot: object, now: float) -> bool:
@@ -74,14 +81,6 @@ def snapshot_has_dashboard_data(snapshot: object, now: float) -> bool:
         if -60 <= elapsed <= window:
             return True
     return False
-
-
-def stored_snapshot_has_dashboard_data(now: float) -> bool:
-    try:
-        snapshot = json.loads(snapshot_path().read_text())
-    except (OSError, json.JSONDecodeError):
-        return False
-    return snapshot_has_dashboard_data(snapshot, now)
 
 
 def local_request_allowed(host: str, origin: str | None) -> bool:
@@ -155,13 +154,17 @@ def collect_forever(
     interval_seconds: int, live_state: IncrementalLiveState, snapshot_lock: Lock
 ) -> None:
     """Refresh local session files until the operating system stops the service."""
+    global _DASHBOARD_DATA_AVAILABLE
     while True:
         started_at = time.time()
         try:
             with snapshot_lock:
                 snapshot = build_snapshot(started_at, live_state)
                 write_snapshot(snapshot)
-            if snapshot_has_dashboard_data(snapshot, time.time()):
+            _DASHBOARD_DATA_AVAILABLE = snapshot_has_dashboard_data(
+                snapshot, time.time()
+            )
+            if _DASHBOARD_DATA_AVAILABLE:
                 record_first_snapshot_ready()
             write_health(time.time(), interval_seconds=interval_seconds)
         except Exception as error:
@@ -215,9 +218,7 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
             return
         path = urlparse(self.path).path
         if path == "/":
-            record_dashboard_opened(
-                data_available=stored_snapshot_has_dashboard_data(time.time())
-            )
+            record_dashboard_opened(data_available=_DASHBOARD_DATA_AVAILABLE)
         if path == "/healthz":
             health = load_health()
             payload = json.dumps(health).encode("utf-8")
@@ -274,6 +275,7 @@ def run_local_service(interval_seconds: int, port: int) -> None:
         daemon=True,
     )
     collector.start()
+    flush_tracking_in_background()
     print(
         f"Konvu dashboard running at http://127.0.0.1:{port}/; "
         "use `konvu-telemetry dashboard` to open it"
