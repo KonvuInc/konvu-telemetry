@@ -7,16 +7,12 @@ import math
 import sys
 import time
 from datetime import datetime, timezone
-from urllib.request import Request, urlopen
-
 from .config import (
     ACTIVITY_FRESHNESS_SECONDS,
     ALERT_QUOTA_5H_PERCENT,
     ALERT_QUOTA_WEEKLY_PERCENT,
     ALLOWED_PROVIDERS,
     CODEX_DISPLAY_COST_THRESHOLD_USD,
-    DASHBOARD_PORT,
-    HOOK_REFRESH_AFTER_SECONDS,
 )
 from .parsers import (
     claude_hook_transcript,
@@ -26,8 +22,6 @@ from .parsers import (
 from .storage import (
     claude_quota_path,
     codex_display_state_path,
-    health_path,
-    parse_timestamp,
     session_path,
     snapshot_path,
     valid_session_id,
@@ -431,40 +425,10 @@ def claude_hook() -> None:
 
 
 def refreshed_session(provider: str, session_id: str) -> dict[str, object] | None:
-    """Ask the resident collector to incrementally refresh one rendered session."""
+    """Read one recent rendered session from the collector snapshot."""
     if provider not in ALLOWED_PROVIDERS or not valid_session_id(session_id):
         return None
     path = session_path(provider, session_id)
-    try:
-        health = json.loads(health_path().read_text())
-        last_success = (
-            parse_timestamp(health.get("last_success_at"))
-            if isinstance(health, dict) and health.get("status") == "healthy"
-            else None
-        )
-        if (
-            last_success is not None
-            and time.time() - last_success <= HOOK_REFRESH_AFTER_SECONDS
-        ):
-            payload = json.loads(path.read_text())
-            if isinstance(payload, dict):
-                return {str(key): value for key, value in payload.items()}
-    except (OSError, json.JSONDecodeError, ValueError):
-        pass
-    try:
-        request = Request(
-            f"http://127.0.0.1:{DASHBOARD_PORT}/api/refresh?provider={provider}&session={session_id}",
-        )
-        with urlopen(
-            request,
-            timeout=1.0,
-        ) as response:
-            payload = json.loads(response.read())
-        session = payload.get("session") if isinstance(payload, dict) else None
-        if isinstance(session, dict):
-            return {str(key): value for key, value in session.items()}
-    except (OSError, TimeoutError, ValueError, json.JSONDecodeError):
-        pass
     try:
         if time.time() - path.stat().st_mtime > ACTIVITY_FRESHNESS_SECONDS:
             return None

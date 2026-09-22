@@ -119,9 +119,6 @@ def collect_forever(
 class DashboardRequestHandler(SimpleHTTPRequestHandler):
     """Serve the local dashboard and the latest local session snapshot."""
 
-    live_state: IncrementalLiveState
-    snapshot_lock: Lock
-
     def _write_payload(self, payload: bytes) -> None:
         try:
             self.wfile.write(payload)
@@ -173,27 +170,6 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
                 return
             self._serve_json_file(session_path(provider, session_id))
             return
-        if path == "/api/refresh":
-            query = parse_qs(urlparse(self.path).query)
-            provider = query.get("provider", [""])[0]
-            session_id = query.get("session", [""])[0]
-            if provider not in ALLOWED_PROVIDERS or not valid_session_id(session_id):
-                self.send_error(400)
-                return
-            with self.snapshot_lock:
-                write_snapshot(build_snapshot(time.time(), self.live_state))
-                try:
-                    candidate = json.loads(
-                        session_path(provider, session_id).read_text()
-                    )
-                    session = candidate if isinstance(candidate, dict) else None
-                except (OSError, json.JSONDecodeError):
-                    session = None
-            payload = json.dumps({"session": session}).encode("utf-8")
-            self.send_response(200)
-            self._secure_headers("application/json; charset=utf-8", len(payload))
-            self._write_payload(payload)
-            return
         super().do_GET()
 
     def _secure_headers(self, content_type: str, content_length: int) -> None:
@@ -224,8 +200,6 @@ def run_local_service(interval_seconds: int, port: int) -> None:
     live_state = IncrementalLiveState()
     snapshot_lock = Lock()
     handler = partial(DashboardRequestHandler, directory=str(directory))
-    DashboardRequestHandler.live_state = live_state
-    DashboardRequestHandler.snapshot_lock = snapshot_lock
     server = ThreadingHTTPServer(("127.0.0.1", port), handler)
     collector = Thread(
         target=collect_forever,
