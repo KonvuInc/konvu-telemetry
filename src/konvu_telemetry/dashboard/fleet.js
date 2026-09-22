@@ -13,7 +13,6 @@ const COLORS = {
   red: "#A60808",
 };
 const BURNING_FORECAST_USD = 4;
-const AUTO_REFRESH_MS = 15000;
 const MANUAL_REFRESH_COOLDOWN_MS = 10000;
 const state = {
   payload: null,
@@ -33,7 +32,6 @@ const state = {
   now: Date.now(),
   lastOpener: null,
 };
-let refreshTimer = null;
 let healthTimer = null;
 const $ = (selector) => document.querySelector(selector);
 const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -1288,18 +1286,10 @@ function scheduleHealthRefresh() {
     if (advanced) await refresh();
   }, Math.max(1000, state.nextRefreshAt - Date.now() + 100));
 }
-function scheduleRefresh() {
-  if (refreshTimer !== null) window.clearTimeout(refreshTimer);
-  refreshTimer = window.setTimeout(async () => {
-    await refresh();
-    scheduleRefresh();
-  }, AUTO_REFRESH_MS);
-}
 async function refreshNow() {
   if (state.refreshInFlight || Date.now() < state.manualRefreshAvailableAt) return;
   state.manualRefreshAvailableAt = Date.now() + MANUAL_REFRESH_COOLDOWN_MS;
   await refresh();
-  scheduleRefresh();
 }
 function contextCompactions(s) {
   return compacts(s).filter((event) => nonnegative(event.cumulative_cost_usd));
@@ -1843,7 +1833,7 @@ function browserAlerts(payload) {
 initialUrl();
 bindEvents();
 bindNotificationPanel();
-refresh().finally(scheduleRefresh);
+refresh();
 setInterval(() => {
   renderFreshness(state.error || !state.payload || elapsed(state.payload.generated_at) > 120000);
 }, 1000);
