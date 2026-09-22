@@ -10,14 +10,33 @@ from .collector import main as collector_main
 from .installer import service_status, setup, uninstall
 
 
+def telemetry_consent() -> bool:
+    """Ask interactive setup users before enabling product analytics."""
+    if not sys.stdin.isatty():
+        return False
+    response = input("Send anonymous usage telemetry to Konvu? [y/N] ")
+    return response.strip().lower() in {"y", "yes"}
+
+
 def installer_main(arguments: list[str]) -> None:
     parser = argparse.ArgumentParser(description="Install Konvu's local usage monitor")
     parser.add_argument("command", choices=["setup", "status", "uninstall"])
     parser.add_argument("--interval", type=int, default=60)
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--telemetry", choices=["on", "off"])
     args = parser.parse_args(arguments)
     if args.command == "setup":
-        print(json.dumps(setup(max(1, args.interval), not args.no_browser), indent=2))
+        tracking_enabled = (
+            args.telemetry == "on"
+            if args.telemetry is not None
+            else telemetry_consent()
+        )
+        print(
+            json.dumps(
+                setup(max(1, args.interval), not args.no_browser, tracking_enabled),
+                indent=2,
+            )
+        )
     elif args.command == "status":
         print(json.dumps(service_status(), indent=2))
     else:

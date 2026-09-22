@@ -473,13 +473,12 @@ def restore_installation(states: list[FileState], restart_service: bool) -> None
         start_launch_agent()
 
 
-def setup(interval: int, open_browser: bool) -> dict[str, str]:
+def setup(
+    interval: int, open_browser: bool, tracking_enabled: bool = False
+) -> dict[str, str]:
     if sys.platform != "darwin":
         raise RuntimeError("Konvu setup currently supports macOS only")
     started_at = time.monotonic()
-    default_tracking_enabled = not (
-        launch_agent_path().is_file() or launcher_path().is_file()
-    )
     validate_integrations()
     claude_path, codex_path = integration_paths()
     states = [
@@ -512,7 +511,7 @@ def setup(interval: int, open_browser: bool) -> dict[str, str]:
         webbrowser.open(dashboard)
     record_setup_completed(
         time.monotonic() - started_at,
-        default_enabled=default_tracking_enabled,
+        default_enabled=tracking_enabled,
     )
     return {
         "claude_statusline": claude,

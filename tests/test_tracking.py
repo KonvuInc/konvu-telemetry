@@ -266,6 +266,21 @@ class TrackingStoreTests(unittest.TestCase):
                 [event["event"] for event in events], ["telemetry active day"]
             )
 
+    def test_active_day_is_not_marked_when_queue_write_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            store = self.enabled_store(directory)
+
+            with patch(
+                "konvu_telemetry.tracking.write_private_json",
+                side_effect=OSError("read only"),
+            ):
+                with self.assertRaisesRegex(OSError, "read only"):
+                    store.record_active_day("2026-09-22")
+
+            state = json.loads((directory / "tracking-state.json").read_text())
+            self.assertNotIn("active_day", state)
+
     def test_first_snapshot_event_is_queued_once(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
@@ -315,6 +330,21 @@ class TrackingStoreTests(unittest.TestCase):
 
             events = json.loads((directory / "tracking-queue.json").read_text())
             self.assertEqual([event["event"] for event in events], ["collector failed"])
+
+    def test_collector_failure_is_not_marked_when_queue_write_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            store = self.enabled_store(directory)
+
+            with patch(
+                "konvu_telemetry.tracking.write_private_json",
+                side_effect=OSError("read only"),
+            ):
+                with self.assertRaisesRegex(OSError, "read only"):
+                    store.record_collector_failure("2026-09-22")
+
+            state = json.loads((directory / "tracking-state.json").read_text())
+            self.assertNotIn("collector_failure_day", state)
 
     def test_invalid_allowlisted_property_value_is_not_queued(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -379,6 +409,29 @@ class TrackingStoreTests(unittest.TestCase):
 
             state = json.loads((directory / "tracking-state.json").read_text())
             self.assertFalse(state["enabled"])
+
+    def test_setup_uses_explicit_telemetry_flag_without_prompting(self) -> None:
+        with (
+            patch("konvu_telemetry.cli.setup") as configured,
+            patch("konvu_telemetry.cli.telemetry_consent") as consent,
+            redirect_stdout(StringIO()),
+        ):
+            configured.return_value = {}
+            cli.main(["setup", "--telemetry", "on"])
+
+        configured.assert_called_once_with(60, True, True)
+        consent.assert_not_called()
+
+    def test_setup_prompts_for_telemetry_without_a_flag(self) -> None:
+        with (
+            patch("konvu_telemetry.cli.setup") as configured,
+            patch("konvu_telemetry.cli.telemetry_consent", return_value=False),
+            redirect_stdout(StringIO()),
+        ):
+            configured.return_value = {}
+            cli.main(["setup"])
+
+        configured.assert_called_once_with(60, True, False)
 
     def test_cli_opt_out_does_not_report_success_when_write_fails(self) -> None:
         with patch(

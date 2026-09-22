@@ -32,9 +32,9 @@ class InstallerTests(unittest.TestCase):
 
         recorded.assert_called_once()
         self.assertIsInstance(recorded.call_args.args[0], float)
-        self.assertTrue(recorded.call_args.kwargs["default_enabled"])
+        self.assertFalse(recorded.call_args.kwargs["default_enabled"])
 
-    def test_setup_keeps_an_existing_install_opted_out_by_default(self) -> None:
+    def test_setup_respects_explicit_telemetry_consent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
             launch_agent = (
@@ -57,9 +57,9 @@ class InstallerTests(unittest.TestCase):
                 patch.object(installer, "install_launch_agent"),
                 patch.object(installer, "record_setup_completed") as recorded,
             ):
-                installer.setup(60, False)
+                installer.setup(60, False, tracking_enabled=True)
 
-        self.assertFalse(recorded.call_args.kwargs["default_enabled"])
+        self.assertTrue(recorded.call_args.kwargs["default_enabled"])
 
     def test_setup_merges_konvu_hooks_without_removing_existing_hooks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

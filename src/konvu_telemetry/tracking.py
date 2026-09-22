@@ -190,10 +190,10 @@ class TrackingStore:
                 or state.get("active_day") == day
             ):
                 return
+            self._append("telemetry active day", {})
             state = dict(state)
             state["active_day"] = day
             write_private_json(self._state_path, state)
-            self._append("telemetry active day", {})
 
     def record_collector_failure(self, day: str) -> None:
         with self._locked():
@@ -204,10 +204,10 @@ class TrackingStore:
                 or state.get("collector_failure_day") == day
             ):
                 return
+            self._append("collector failed", {"stage": "snapshot"})
             state = dict(state)
             state["collector_failure_day"] = day
             write_private_json(self._state_path, state)
-            self._append("collector failed", {"stage": "snapshot"})
 
     def send_queued(self) -> float | None:
         with self._locked():
