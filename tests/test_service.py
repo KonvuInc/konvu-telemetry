@@ -1018,6 +1018,42 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(first.prompts["session"], [1767225600.0])
         self.assertEqual(len(second.events), 2)
 
+    def test_fleet_telemetry_keeps_oversized_codex_compaction(self) -> None:
+        session_id = "00000000-0000-0000-0000-000000000001"
+        records = [
+            {
+                "timestamp": "2026-01-01T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": session_id,
+                    "source": "cli",
+                    "base_instructions": "x" * 1_000_000,
+                },
+            },
+            {
+                "timestamp": "2026-01-01T00:00:01Z",
+                "type": "compacted",
+                "payload": {"replacement_history": ["x" * 1_000_000]},
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / f"{session_id}.jsonl"
+            transcript.write_text(
+                "\n".join(json.dumps(record) for record in records) + "\n"
+            )
+            TELEMETRY_CACHE.clear()
+            parsed = parse_telemetry(transcript, "codex")
+        self.assertEqual(parsed.session_id, session_id)
+        self.assertEqual(
+            parsed.compactions,
+            [
+                {
+                    "timestamp": "2026-01-01T00:00:01+00:00",
+                    "source": "codex_compacted",
+                }
+            ],
+        )
+
     def test_fleet_telemetry_incrementally_reads_bounded_appends(self) -> None:
         session_id = "00000000-0000-0000-0000-000000000001"
         prompt = {
