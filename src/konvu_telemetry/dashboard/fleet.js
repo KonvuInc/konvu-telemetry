@@ -13,6 +13,7 @@ const COLORS = {
   red: "#A60808",
 };
 const BURNING_FORECAST_USD = 4;
+const MANUAL_REFRESH_COOLDOWN_MS = 10000;
 const state = {
   payload: null,
   view: "ledger",
@@ -23,11 +24,15 @@ const state = {
   chart: "cumulative",
   error: false,
   refreshInFlight: false,
+  nextRefreshAt: null,
+  refreshIntervalMs: null,
+  manualRefreshAvailableAt: 0,
   snapshotEtag: null,
   detailRequest: 0,
   now: Date.now(),
   lastOpener: null,
 };
+let healthTimer = null;
 const $ = (selector) => document.querySelector(selector);
 const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const finite = (value) => typeof value === "number" && Number.isFinite(value);
@@ -1109,8 +1114,7 @@ function render() {
     stale = state.error || !state.payload || elapsed(state.payload.generated_at) > 120000;
   $("#live-dot").className = "live-dot" + (rows.length && !stale && !state.error ? " active" : "");
   $("#live-count").textContent = rows.length;
-  $("#freshness").textContent = state.error ? "Collector unreachable" : "Updated " + age(state.payload?.generated_at) + " ago";
-  $("#freshness").classList.toggle("stale", stale);
+  renderFreshness(stale);
   document.querySelectorAll("[data-provider]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.provider === state.provider)));
   $("#baseline-mode").value = state.baselineMode;
   $("#ledger-toolbar").hidden = state.view === "graph";
@@ -1125,7 +1129,22 @@ function render() {
   renderAccounts();
   renderInspector();
 }
+function renderFreshness(stale) {
+  state.now = Date.now();
+  const remainingSeconds = state.nextRefreshAt === null ? null : Math.max(0, Math.ceil((state.nextRefreshAt - state.now) / 1000));
+  const progress = state.nextRefreshAt === null || state.refreshIntervalMs === null ? 0 : Math.max(0, Math.min(1, 1 - (state.nextRefreshAt - state.now) / state.refreshIntervalMs));
+  const coolingDown = state.now < state.manualRefreshAvailableAt;
+  const button = $("#freshness");
+  button.style.setProperty("--progress", String(progress));
+  button.disabled = state.refreshInFlight || coolingDown;
+  button.title = coolingDown
+    ? "Manual refresh available in " + Math.ceil((state.manualRefreshAvailableAt - state.now) / 1000) + "s"
+    : (state.error ? "Collector unreachable. " : "") + (remainingSeconds === null ? "Waiting for collector schedule" : "Refresh now; next collector sync in " + remainingSeconds + "s");
+  button.setAttribute("aria-label", button.title);
+  button.classList.toggle("stale", Boolean(stale));
+}
 function bindEvents() {
+  $("#freshness").addEventListener("click", refreshNow);
   document.addEventListener(
     "toggle",
     (event) => {
@@ -1207,8 +1226,10 @@ async function refresh() {
   if (axisDragging || state.refreshInFlight) return;
   state.refreshInFlight = true;
   try {
+    const health = refreshHealth();
     const headers = state.snapshotEtag ? { "If-None-Match": state.snapshotEtag } : {};
     const response = await fetch("/api/live-sessions", { cache: "no-store", headers });
+    await health;
     if (response.status === 304) {
       state.error = false;
       render();
@@ -1240,6 +1261,35 @@ async function refresh() {
   } else if (chart) document.querySelector('[data-chart="' + chart + '"]')?.focus({ preventScroll: true });
   else if (baseline) $("#baseline-mode")?.focus({ preventScroll: true });
   else if (axis) document.querySelector('[data-axis="' + axis + '"]')?.focus({ preventScroll: true });
+}
+async function refreshHealth() {
+  try {
+    const response = await fetch("/healthz", { cache: "no-store" });
+    const health = await response.json();
+    const nextRefreshAt = Date.parse(health?.next_poll_at);
+    const intervalMs = Number(health?.interval_seconds) * 1000;
+    if (!Number.isFinite(nextRefreshAt) || !Number.isFinite(intervalMs) || intervalMs <= 0) return false;
+    const advanced = nextRefreshAt !== state.nextRefreshAt;
+    state.nextRefreshAt = nextRefreshAt;
+    state.refreshIntervalMs = intervalMs;
+    scheduleHealthRefresh();
+    return advanced;
+  } catch {
+    return false;
+  }
+}
+function scheduleHealthRefresh() {
+  if (healthTimer !== null) window.clearTimeout(healthTimer);
+  if (state.nextRefreshAt === null) return;
+  healthTimer = window.setTimeout(async () => {
+    const advanced = await refreshHealth();
+    if (advanced) await refresh();
+  }, Math.max(1000, state.nextRefreshAt - Date.now() + 100));
+}
+async function refreshNow() {
+  if (state.refreshInFlight || Date.now() < state.manualRefreshAvailableAt) return;
+  state.manualRefreshAvailableAt = Date.now() + MANUAL_REFRESH_COOLDOWN_MS;
+  await refresh();
 }
 function contextCompactions(s) {
   return compacts(s).filter((event) => nonnegative(event.cumulative_cost_usd));
@@ -1784,4 +1834,6 @@ initialUrl();
 bindEvents();
 bindNotificationPanel();
 refresh();
-setInterval(refresh, 15000);
+setInterval(() => {
+  renderFreshness(state.error || !state.payload || elapsed(state.payload.generated_at) > 120000);
+}, 1000);

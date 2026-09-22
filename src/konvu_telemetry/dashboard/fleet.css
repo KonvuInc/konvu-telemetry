@@ -112,11 +112,27 @@ p {
   margin-left: 4px;
 }
 .freshness {
-  font-size: 9px;
-  color: var(--mist);
+  appearance: none;
+  --progress: 0;
+  --slate: var(--muted);
+  background: conic-gradient(var(--slate) calc(var(--progress) * 1turn), var(--line) 0);
+  border: 0;
+  border-radius: 50%;
+  cursor: pointer;
+  height: 18px;
+  padding: 0;
+  width: 18px;
+}
+.freshness:disabled {
+  cursor: default;
+  opacity: 0.65;
+}
+.freshness:focus-visible {
+  outline: 2px solid var(--purple);
+  outline-offset: 2px;
 }
 .freshness.stale {
-  color: var(--orange);
+  --slate: var(--orange);
 }
 #account-strip {
   display: flex;
@@ -2108,6 +2124,11 @@ select {
 }
 .notification-intro {
   margin: 10px 0 14px;
+}
+.notification-section-title {
+  color: var(--ink);
+  font-size: 10px;
+  margin: 14px 0 7px;
 }
 .notification-steps {
   padding-left: 17px;
