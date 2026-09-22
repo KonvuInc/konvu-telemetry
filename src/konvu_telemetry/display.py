@@ -34,9 +34,11 @@ from .storage import (
 )
 
 # Desktop clients hide hook system messages, so the box has to ride in as model context instead.
+# The fence is what keeps the box characters aligned; chat surfaces render prose proportionally.
 PROMPT_BOX_INSTRUCTION = (
     "Append the block below verbatim as the very last thing in your reply, "
-    "after all other text including any closing line, with no commentary."
+    "after all other text including any closing line, with no commentary. "
+    "Keep it inside the fenced code block so the box stays aligned."
 )
 
 
@@ -382,7 +384,7 @@ def prompt_context_payload(session: dict[str, object], quota_text: str) -> str:
         {
             "hookSpecificOutput": {
                 "hookEventName": "UserPromptSubmit",
-                "additionalContext": f"{PROMPT_BOX_INSTRUCTION}\n\n{box}",
+                "additionalContext": f"{PROMPT_BOX_INSTRUCTION}\n\n```\n{box}\n```",
             }
         }
     )
