@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.4 - 2026-09-22
+
+- Synchronize manual and scheduled dashboard refreshes.
+- Keep Codex guardian reviews attached to their parent sessions.
+- Add opt-in anonymous product telemetry.
+
 ## 0.2.3 - 2026-09-22
 
 - Improve dashboard refresh and alert controls.
