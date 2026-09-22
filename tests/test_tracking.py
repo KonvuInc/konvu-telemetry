@@ -527,6 +527,14 @@ class TrackingStoreTests(unittest.TestCase):
         self.assertEqual(stopped.exception.code, 0)
         self.assertIn("telemetry", output.getvalue())
 
+    def test_setup_help_explains_the_telemetry_flag(self) -> None:
+        output = StringIO()
+        with redirect_stdout(output), self.assertRaises(SystemExit) as stopped:
+            cli.main(["setup", "--help"])
+
+        self.assertEqual(stopped.exception.code, 0)
+        self.assertIn("without an interactive prompt", output.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

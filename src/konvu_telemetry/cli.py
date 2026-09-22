@@ -27,7 +27,11 @@ def installer_main(arguments: list[str]) -> None:
     parser.add_argument("command", choices=["setup", "status", "uninstall"])
     parser.add_argument("--interval", type=int, default=60)
     parser.add_argument("--no-browser", action="store_true")
-    parser.add_argument("--telemetry", choices=["on", "off"])
+    parser.add_argument(
+        "--telemetry",
+        choices=["on", "off"],
+        help="Set anonymous telemetry without an interactive prompt.",
+    )
     args = parser.parse_args(arguments)
     if args.command == "setup":
         tracking_enabled = (
