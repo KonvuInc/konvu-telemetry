@@ -14,7 +14,11 @@ import time
 from urllib.parse import parse_qs, urlparse
 import webbrowser
 
-from .config import ALLOWED_PROVIDERS, DEFAULT_HEALTH_STALE_SECONDS
+from .config import (
+    ALLOWED_PROVIDERS,
+    DEFAULT_HEALTH_STALE_SECONDS,
+    LIVE_ACTIVITY_SECONDS,
+)
 from .live import IncrementalLiveState
 from .snapshot import build_snapshot, write_snapshot
 from .storage import (
@@ -25,9 +29,52 @@ from .storage import (
     valid_session_id,
     write_private_json,
 )
+from .tracking import (
+    flush_in_background as flush_tracking_in_background,
+    record_collector_failure,
+    record_dashboard_opened,
+    record_first_snapshot_ready,
+)
 
 LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost"})
 LOGGER = logging.getLogger(__name__)
+_DASHBOARD_DATA_AVAILABLE = False
+
+
+def snapshot_has_dashboard_data(snapshot: object, now: float) -> bool:
+    if not isinstance(snapshot, dict):
+        return False
+    sessions = snapshot.get("sessions")
+    configured_window = snapshot.get("live_activity_window_seconds")
+    window = (
+        float(configured_window)
+        if isinstance(configured_window, (int, float))
+        and not isinstance(configured_window, bool)
+        and configured_window > 0
+        else float(LIVE_ACTIVITY_SECONDS)
+    )
+    for session in sessions if isinstance(sessions, list) else []:
+        if not isinstance(session, dict):
+            continue
+        last_activity = parse_timestamp(session.get("last_activity_at"))
+        if last_activity is None:
+            continue
+        elapsed = now - last_activity
+        if -60 <= elapsed <= window:
+            return True
+    return False
+
+
+def initialize_dashboard_data_available(now: float | None = None) -> None:
+    """Restore dashboard visibility state once when the resident service starts."""
+    global _DASHBOARD_DATA_AVAILABLE
+    try:
+        snapshot = json.loads(snapshot_path().read_text())
+    except (OSError, json.JSONDecodeError):
+        _DASHBOARD_DATA_AVAILABLE = False
+        return
+    current_time = time.time() if now is None else now
+    _DASHBOARD_DATA_AVAILABLE = snapshot_has_dashboard_data(snapshot, current_time)
 
 
 def local_request_allowed(host: str, origin: str | None) -> bool:
@@ -101,13 +148,21 @@ def collect_forever(
     interval_seconds: int, live_state: IncrementalLiveState, snapshot_lock: Lock
 ) -> None:
     """Refresh local session files until the operating system stops the service."""
+    global _DASHBOARD_DATA_AVAILABLE
     while True:
         started_at = time.time()
         try:
             with snapshot_lock:
-                write_snapshot(build_snapshot(started_at, live_state))
+                snapshot = build_snapshot(started_at, live_state)
+                write_snapshot(snapshot)
+            _DASHBOARD_DATA_AVAILABLE = snapshot_has_dashboard_data(
+                snapshot, time.time()
+            )
+            if _DASHBOARD_DATA_AVAILABLE:
+                record_first_snapshot_ready()
             write_health(time.time(), interval_seconds=interval_seconds)
         except Exception as error:
+            record_collector_failure()
             try:
                 write_health(
                     time.time(), f"{type(error).__name__}: {error}", interval_seconds
@@ -156,6 +211,8 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
             self.send_error(403)
             return
         path = urlparse(self.path).path
+        if path == "/":
+            record_dashboard_opened(data_available=_DASHBOARD_DATA_AVAILABLE)
         if path == "/healthz":
             health = load_health()
             payload = json.dumps(health).encode("utf-8")
@@ -211,7 +268,9 @@ def run_local_service(interval_seconds: int, port: int) -> None:
         args=(interval_seconds, live_state, snapshot_lock),
         daemon=True,
     )
+    initialize_dashboard_data_available()
     collector.start()
+    flush_tracking_in_background()
     print(
         f"Konvu dashboard running at http://127.0.0.1:{port}/; "
         "use `konvu-telemetry dashboard` to open it"
