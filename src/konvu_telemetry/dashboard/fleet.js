@@ -1139,7 +1139,7 @@ function renderFreshness(stale) {
   button.disabled = state.refreshInFlight || coolingDown;
   button.title = coolingDown
     ? "Manual refresh available in " + Math.ceil((state.manualRefreshAvailableAt - state.now) / 1000) + "s"
-    : (state.error ? "Collector unreachable. " : "") + "Refresh now; next ping in " + remainingSeconds + "s";
+    : (state.error ? "Collector unreachable. " : "") + "Refresh now; next sync in " + remainingSeconds + "s";
   button.setAttribute("aria-label", button.title);
   button.classList.toggle("stale", Boolean(stale));
 }
