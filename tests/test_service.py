@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from scripts.update_pricing import validated_payload
 
+from konvu_telemetry import service
 from konvu_telemetry.analytics import (
     apply_notification_tracking,
     baseline_comparison,
@@ -83,6 +84,7 @@ from konvu_telemetry.service import (
     collect_forever,
     load_health,
     local_request_allowed,
+    snapshot_has_dashboard_data,
     write_health,
 )
 from konvu_telemetry.snapshot import (
@@ -1315,6 +1317,66 @@ class ServiceTests(unittest.TestCase):
             handler.send_response.assert_called_once_with(304)
             handler._write_payload.assert_not_called()
 
+    def test_dashboard_open_records_whether_visible_data_exists(self) -> None:
+        handler = object.__new__(DashboardRequestHandler)
+        handler.headers = {"Host": "127.0.0.1:7824"}
+        handler.path = "/"
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory) / "live-sessions.json"
+            snapshot.write_text('{"generated_at":"2026-01-01T00:00:00Z","sessions":[]}')
+            with (
+                patch("konvu_telemetry.service.snapshot_path", return_value=snapshot),
+                patch("konvu_telemetry.service.record_dashboard_opened") as recorded,
+                patch("http.server.SimpleHTTPRequestHandler.do_GET"),
+            ):
+                DashboardRequestHandler.do_GET(handler)
+        recorded.assert_called_once_with(data_available=False)
+
+    def test_dashboard_open_does_not_read_snapshot_for_analytics(self) -> None:
+        handler = object.__new__(DashboardRequestHandler)
+        handler.headers = {"Host": "127.0.0.1:7824"}
+        handler.path = "/"
+        with (
+            patch.object(service, "_DASHBOARD_DATA_AVAILABLE", True, create=True),
+            patch(
+                "konvu_telemetry.service.snapshot_path",
+                side_effect=AssertionError("request read snapshot"),
+            ),
+            patch("konvu_telemetry.service.record_dashboard_opened") as recorded,
+            patch("http.server.SimpleHTTPRequestHandler.do_GET"),
+        ):
+            DashboardRequestHandler.do_GET(handler)
+
+        recorded.assert_called_once_with(data_available=True)
+
+    def test_dashboard_data_matches_the_visible_activity_window(self) -> None:
+        snapshot = {
+            "live_activity_window_seconds": 1_200,
+            "sessions": [
+                {"last_activity_at": "2026-01-01T00:00:00+00:00"},
+            ],
+        }
+
+        self.assertTrue(snapshot_has_dashboard_data(snapshot, 1_767_225_630.0))
+        self.assertFalse(snapshot_has_dashboard_data(snapshot, 1_767_226_801.0))
+
+    def test_service_initializes_dashboard_visibility_from_disk(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory) / "live-sessions.json"
+            snapshot.write_text(
+                json.dumps(
+                    {
+                        "live_activity_window_seconds": 1_200,
+                        "sessions": [{"last_activity_at": "2026-01-01T00:00:00+00:00"}],
+                    }
+                )
+            )
+            service._DASHBOARD_DATA_AVAILABLE = False
+            with patch("konvu_telemetry.service.snapshot_path", return_value=snapshot):
+                service.initialize_dashboard_data_available(1_767_225_630.0)
+
+        self.assertTrue(service._DASHBOARD_DATA_AVAILABLE)
+
     def test_refreshed_session_reads_existing_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1538,11 +1600,34 @@ class ServiceTests(unittest.TestCase):
                 "konvu_telemetry.service.build_snapshot", side_effect=OSError("full")
             ),
             patch("konvu_telemetry.service.write_health", side_effect=OSError("full")),
+            patch("konvu_telemetry.service.record_collector_failure") as recorded,
             patch("konvu_telemetry.service.time.sleep", side_effect=StopIteration),
             self.assertLogs("konvu_telemetry.service", level="ERROR"),
             self.assertRaises(StopIteration),
         ):
             collect_forever(60, IncrementalLiveState(), Lock())
+        recorded.assert_called_once()
+
+    def test_first_snapshot_with_session_data_is_recorded(self) -> None:
+        service._DASHBOARD_DATA_AVAILABLE = False
+        with (
+            patch(
+                "konvu_telemetry.service.build_snapshot",
+                return_value={
+                    "live_activity_window_seconds": 1_200,
+                    "sessions": [{"last_activity_at": "2026-01-01T00:00:00+00:00"}],
+                },
+            ),
+            patch("konvu_telemetry.service.write_snapshot"),
+            patch("konvu_telemetry.service.write_health"),
+            patch("konvu_telemetry.service.record_first_snapshot_ready") as recorded,
+            patch("konvu_telemetry.service.time.time", return_value=1_767_225_630.0),
+            patch("konvu_telemetry.service.time.sleep", side_effect=StopIteration),
+            self.assertRaises(StopIteration),
+        ):
+            collect_forever(60, IncrementalLiveState(), Lock())
+        recorded.assert_called_once()
+        self.assertTrue(service._DASHBOARD_DATA_AVAILABLE)
 
     def test_dashboard_rejects_non_local_or_malformed_origins(self) -> None:
         self.assertTrue(local_request_allowed("127.0.0.1:7824", None))

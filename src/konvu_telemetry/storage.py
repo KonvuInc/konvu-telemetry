@@ -165,6 +165,14 @@ def notification_state_path() -> Path:
     return home_dir() / "notification-state.json"
 
 
+def tracking_state_path() -> Path:
+    return home_dir() / "tracking-state.json"
+
+
+def tracking_queue_path() -> Path:
+    return home_dir() / "tracking-queue.json"
+
+
 def claude_quota_path() -> Path:
     return home_dir() / "claude-quotas.json"
 

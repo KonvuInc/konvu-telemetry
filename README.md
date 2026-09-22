@@ -48,7 +48,15 @@ Costs are estimates, not provider invoices. See [ACCURACY.md](ACCURACY.md) for t
 
 ## Privacy
 
-Konvu Telemetry has no account, API key, analytics service, or outbound network calls. It stores derived usage data in `~/.konvu/telemetry`; provider transcript files are never changed.
+Konvu Telemetry stores derived usage data in `~/.konvu/telemetry`; provider transcript files are never changed. During `konvu-telemetry setup`, it asks before sending a small amount of anonymous product telemetry to PostHog: successful setup, when the first dashboard-visible snapshot is ready, dashboard opens, one active-day event per day when data is visible, and collector failures, at most once per day. Press Enter to keep it off, or use `konvu-telemetry setup --telemetry on` for unattended setup.
+
+Events use a random per-install ID so we can measure activation and repeat use. Each event receives its capture time and a random deduplication ID. They do not include prompts, code, transcripts, file paths, command arguments, token usage, raw errors, environment variables, account IDs, or workspace IDs. Events do not create PostHog person profiles and request IP discard. The local queue is capped at 100 events, and failed delivery backs off for up to 24 hours. To disable product telemetry and delete any unsent events, run:
+
+```sh
+konvu-telemetry telemetry off
+```
+
+Use `konvu-telemetry telemetry on` to re-enable it or `konvu-telemetry telemetry status` to inspect the local preference.
 
 See [SECURITY.md](SECURITY.md) for security reporting, [CONTRIBUTING.md](CONTRIBUTING.md) for development, [ARCHITECTURE.md](ARCHITECTURE.md) for implementation details, and [PERFORMANCE.md](PERFORMANCE.md) for reproducible resource measurements.
 
