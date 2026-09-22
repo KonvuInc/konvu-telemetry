@@ -9,7 +9,9 @@ import json
 import logging
 import os
 from pathlib import Path
-from threading import Lock, Thread
+from socket import socket
+from socketserver import BaseServer
+from threading import Condition, Lock, Thread
 import time
 from urllib.parse import parse_qs, urlparse
 import webbrowser
@@ -39,6 +41,50 @@ from .tracking import (
 LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost"})
 LOGGER = logging.getLogger(__name__)
 _DASHBOARD_DATA_AVAILABLE = False
+REFRESH_TIMEOUT_SECONDS = 30
+
+
+class RefreshCoordinator:
+    """Coordinate scheduled and requested collections through one worker."""
+
+    def __init__(self) -> None:
+        self._condition = Condition()
+        self._collecting = False
+        self._completed = 0
+        self._requested = False
+        self._last_error: str | None = None
+
+    def start_collection(self) -> None:
+        with self._condition:
+            self._collecting = True
+            self._requested = False
+
+    def finish_collection(self, error: str | None) -> None:
+        with self._condition:
+            self._collecting = False
+            self._completed += 1
+            self._last_error = error
+            self._requested = False
+            self._condition.notify_all()
+
+    def wait_for_refresh(self, timeout: float) -> bool:
+        with self._condition:
+            requested = self._condition.wait_for(lambda: self._requested, timeout)
+            self._requested = False
+            return requested
+
+    def request_refresh(self, timeout: float = REFRESH_TIMEOUT_SECONDS) -> str | None:
+        with self._condition:
+            completed = self._completed
+            if not self._collecting:
+                self._requested = True
+                self._condition.notify_all()
+            refreshed = self._condition.wait_for(
+                lambda: self._completed > completed, timeout
+            )
+            if not refreshed:
+                raise TimeoutError("Collector refresh timed out")
+            return self._last_error
 
 
 def snapshot_has_dashboard_data(snapshot: object, now: float) -> bool:
@@ -145,12 +191,18 @@ def load_health(now: float | None = None) -> dict[str, object]:
 
 
 def collect_forever(
-    interval_seconds: int, live_state: IncrementalLiveState, snapshot_lock: Lock
+    interval_seconds: int,
+    live_state: IncrementalLiveState,
+    snapshot_lock: Lock,
+    refresh_coordinator: RefreshCoordinator | None = None,
 ) -> None:
     """Refresh local session files until the operating system stops the service."""
     global _DASHBOARD_DATA_AVAILABLE
+    coordinator = refresh_coordinator or RefreshCoordinator()
     while True:
+        coordinator.start_collection()
         started_at = time.time()
+        collection_error = None
         try:
             with snapshot_lock:
                 snapshot = build_snapshot(started_at, live_state)
@@ -162,22 +214,35 @@ def collect_forever(
                 record_first_snapshot_ready()
             write_health(time.time(), interval_seconds=interval_seconds)
         except Exception as error:
+            collection_error = f"{type(error).__name__}: {error}"
             record_collector_failure()
             try:
-                write_health(
-                    time.time(), f"{type(error).__name__}: {error}", interval_seconds
-                )
+                write_health(time.time(), collection_error, interval_seconds)
             except Exception as health_error:
                 LOGGER.error(
                     "Collector failed (%s); health write failed (%s)",
                     type(error).__name__,
                     type(health_error).__name__,
                 )
-        time.sleep(interval_seconds)
+        finally:
+            coordinator.finish_collection(collection_error)
+        coordinator.wait_for_refresh(interval_seconds)
 
 
 class DashboardRequestHandler(SimpleHTTPRequestHandler):
     """Serve the local dashboard and the latest local session snapshot."""
+
+    def __init__(
+        self,
+        request: socket | tuple[bytes, socket],
+        client_address: tuple[str, int],
+        server: BaseServer,
+        *,
+        directory: str | os.PathLike[str] | None = None,
+        refresh_coordinator: RefreshCoordinator | None = None,
+    ) -> None:
+        self.refresh_coordinator = refresh_coordinator
+        super().__init__(request, client_address, server, directory=directory)
 
     def _write_payload(self, payload: bytes) -> None:
         try:
@@ -234,6 +299,31 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
             return
         super().do_GET()
 
+    def do_POST(self) -> None:  # noqa: N802
+        host = self.headers.get("Host", "")
+        origin = self.headers.get("Origin")
+        if not local_request_allowed(host, origin):
+            self.send_error(403)
+            return
+        if (
+            urlparse(self.path).path != "/api/refresh"
+            or self.refresh_coordinator is None
+        ):
+            self.send_error(404)
+            return
+        try:
+            error = self.refresh_coordinator.request_refresh()
+        except TimeoutError as timeout_error:
+            self.send_error(503, str(timeout_error))
+            return
+        if error is not None:
+            self.send_error(503, "Collector refresh failed")
+            return
+        payload = json.dumps(load_health()).encode("utf-8")
+        self.send_response(200)
+        self._secure_headers("application/json; charset=utf-8", len(payload))
+        self._write_payload(payload)
+
     def _secure_headers(self, content_type: str, content_length: int) -> None:
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(content_length))
@@ -261,11 +351,16 @@ def run_local_service(interval_seconds: int, port: int) -> None:
         raise SystemExit(f"Dashboard files are missing from {directory}")
     live_state = IncrementalLiveState()
     snapshot_lock = Lock()
-    handler = partial(DashboardRequestHandler, directory=str(directory))
+    refresh_coordinator = RefreshCoordinator()
+    handler = partial(
+        DashboardRequestHandler,
+        directory=str(directory),
+        refresh_coordinator=refresh_coordinator,
+    )
     server = ThreadingHTTPServer(("127.0.0.1", port), handler)
     collector = Thread(
         target=collect_forever,
-        args=(interval_seconds, live_state, snapshot_lock),
+        args=(interval_seconds, live_state, snapshot_lock, refresh_coordinator),
         daemon=True,
     )
     initialize_dashboard_data_available()
