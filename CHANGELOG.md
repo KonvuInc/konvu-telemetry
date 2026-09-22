@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.3 - 2026-09-22
+
+- Improve dashboard refresh and alert controls.
+- Restore Codex compaction markers.
+- Correct dashboard median comparisons.
+
 ## 0.2.2 - 2026-09-21
 
 - Keep Codex quota usage visible alongside session context when quota data is available.
