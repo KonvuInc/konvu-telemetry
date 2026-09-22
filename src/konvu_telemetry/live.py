@@ -131,17 +131,37 @@ class IncrementalLiveState:
             if not valid_session_id(decoded_session_id):
                 return None
             source_match = re.search(rb'"source"\s*:\s*"([^"\\]+)"', header)
-            source: object = (
-                source_match.group(1).decode("utf-8", "replace")
-                if source_match is not None
-                else {"subagent": {}}
-                if re.search(rb'"source"\s*:\s*\{\s*"subagent"\s*:', header)
-                else None
-            )
+            subagent_match = re.search(rb'"source"\s*:\s*\{\s*"subagent"\s*:', header)
+            parent_match = re.search(rb'"parent_thread_id"\s*:\s*"([^"\\]+)"', header)
+            other_match = re.search(rb'"other"\s*:\s*"([^"\\]+)"', header)
+            source: object = None
+            if source_match is not None:
+                source = source_match.group(1).decode("utf-8", "replace")
+            elif subagent_match is not None:
+                source = {
+                    "subagent": {
+                        "other": other_match.group(1).decode("utf-8", "replace")
+                        if other_match is not None
+                        else None
+                    }
+                }
+            payload: dict[str, object] = {
+                "id": decoded_session_id,
+                "source": source,
+            }
+            if parent_match is not None:
+                payload["parent_thread_id"] = parent_match.group(1).decode(
+                    "utf-8", "replace"
+                )
+            originator_match = re.search(rb'"originator"\s*:\s*"([^"\\]+)"', header)
+            if originator_match is not None:
+                payload["originator"] = originator_match.group(1).decode(
+                    "utf-8", "replace"
+                )
             return {
                 "type": "session_meta",
                 "timestamp": decoded_timestamp,
-                "payload": {"id": decoded_session_id, "source": source},
+                "payload": payload,
             }
         if len(types) < 2:
             return None
