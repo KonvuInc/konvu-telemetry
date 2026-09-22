@@ -35,7 +35,8 @@ Konvu Telemetry is one Python package with a single resident process. The proces
 | `~/.konvu/telemetry/health.json` | Collector freshness and last error | `0600` |
 | `~/.konvu/telemetry/notification-state.json` | Alert suppression state | `0600` |
 | `~/.konvu/telemetry/tracking-state.json` | Anonymous install ID and local analytics preference | `0600` |
-| `~/.konvu/telemetry/tracking-queue.json` | Pending anonymous analytics events | `0600` |
+| `~/.konvu/telemetry/tracking-queue.json` | At most 100 pending anonymous analytics events | `0600` |
+| `~/.konvu/telemetry/tracking.lock` | Cross-process lock for analytics state and queue | `0600` |
 | `~/.konvu/telemetry/collector*.log` | LaunchAgent stdout and stderr | User-owned |
 | `~/Library/LaunchAgents/com.konvu.telemetry.plist` | Per-user service definition | User-owned |
 | `~/.claude/settings.json` | Optional Claude status line merge | `0600` after write |

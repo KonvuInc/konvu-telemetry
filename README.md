@@ -48,9 +48,9 @@ Costs are estimates, not provider invoices. See [ACCURACY.md](ACCURACY.md) for t
 
 ## Privacy
 
-Konvu Telemetry stores derived usage data in `~/.konvu/telemetry`; provider transcript files are never changed. It also sends a small amount of anonymous product telemetry to PostHog by default: successful setup, when the first local snapshot with session data is ready, dashboard opens, one active-day event per day, and collector failures.
+Konvu Telemetry stores derived usage data in `~/.konvu/telemetry`; provider transcript files are never changed. It also sends a small amount of anonymous product telemetry to PostHog by default: successful setup, when the first local snapshot with session data is ready, dashboard opens, one active-day event per day, and collector failures, at most once per day.
 
-Events use a random per-install ID so we can measure activation and repeat use. They do not include prompts, code, transcripts, file paths, command arguments, token usage, raw errors, environment variables, account IDs, or workspace IDs. Events do not create PostHog person profiles and request IP discard. To disable product telemetry and delete any unsent events, run:
+Events use a random per-install ID so we can measure activation and repeat use. They do not include prompts, code, transcripts, file paths, command arguments, token usage, raw errors, environment variables, account IDs, or workspace IDs. Events do not create PostHog person profiles and request IP discard. The local queue is capped at 100 events. To disable product telemetry and delete any unsent events, run:
 
 ```sh
 konvu-telemetry telemetry off

@@ -18,9 +18,9 @@ All events use one random UUID generated per install as `distinct_id`, plus `$pr
 | `first snapshot ready` | First snapshot containing session data is written | `cli_version`, `os_family` |
 | `dashboard opened` | The root local dashboard document is requested | `cli_version`, `os_family`, `data_available` |
 | `telemetry active day` | First dashboard open on a local calendar day | `cli_version`, `os_family` |
-| `collector failed` | A snapshot collection attempt fails | `cli_version`, `os_family`, `stage` |
+| `collector failed` | First snapshot collection failure on a local calendar day | `cli_version`, `os_family`, `stage` |
 
-The collector queues events locally under `~/.konvu/telemetry` with `0600` permissions. It submits batches in a background thread with a 500 ms timeout. Collection and dashboard requests never wait for the network. A successful submit removes only the events included in that batch. Failure leaves the batch queued for a later attempt.
+The collector queues at most 100 events locally under `~/.konvu/telemetry` with `0600` permissions. Background work owns all event state writes and batch submission, with a 500 ms network timeout. Collection and dashboard requests never wait for disk or network I/O. A private cross-process lock prevents telemetry state races between the CLI and resident collector. A successful submit removes only the events included in that batch. Failure leaves the batch queued for a later attempt.
 
 The client uses only Python's standard library to POST batches to PostHog US ingest with the supplied public project key. The project must discard IP addresses; its replay and autocapture features remain disabled. The client itself sends no URL, hostname, environment, error text, paths, raw duration, raw command, usage metrics, transcript content, or user-supplied values.
 

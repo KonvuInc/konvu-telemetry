@@ -53,6 +53,24 @@ class TrackingStoreTests(unittest.TestCase):
                 json.loads((directory / "tracking-queue.json").read_text()), []
             )
 
+    def test_failed_delivery_keeps_queued_events(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+
+            def fail_to_send(_payload: bytes) -> None:
+                raise OSError("offline")
+
+            store = TrackingStore(
+                directory / "tracking-state.json",
+                directory / "tracking-queue.json",
+                sender=fail_to_send,
+            )
+            store.record("first snapshot ready", {})
+            store.send_queued()
+
+            events = json.loads((directory / "tracking-queue.json").read_text())
+            self.assertEqual([event["event"] for event in events], ["first snapshot ready"])
+
     def test_active_day_is_recorded_once_per_calendar_day(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
@@ -82,6 +100,49 @@ class TrackingStoreTests(unittest.TestCase):
 
             events = json.loads((directory / "tracking-queue.json").read_text())
             self.assertEqual([event["event"] for event in events], ["first snapshot ready"])
+
+    def test_queue_retains_only_the_most_recent_hundred_events(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            store = TrackingStore(
+                directory / "tracking-state.json",
+                directory / "tracking-queue.json",
+                sender=lambda _payload: None,
+            )
+
+            for number in range(101):
+                store.record("dashboard opened", {"data_available": bool(number % 2)})
+
+            events = json.loads((directory / "tracking-queue.json").read_text())
+            self.assertEqual(len(events), 100)
+
+    def test_collector_failure_is_recorded_once_per_day(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            store = TrackingStore(
+                directory / "tracking-state.json",
+                directory / "tracking-queue.json",
+                sender=lambda _payload: None,
+            )
+
+            store.record_collector_failure("2026-09-22")
+            store.record_collector_failure("2026-09-22")
+
+            events = json.loads((directory / "tracking-queue.json").read_text())
+            self.assertEqual([event["event"] for event in events], ["collector failed"])
+
+    def test_invalid_allowlisted_property_value_is_not_queued(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            store = TrackingStore(
+                directory / "tracking-state.json",
+                directory / "tracking-queue.json",
+                sender=lambda _payload: None,
+            )
+
+            store.record("dashboard opened", {"data_available": "/private/path"})
+
+            self.assertFalse((directory / "tracking-queue.json").exists())
 
     def test_cli_opt_out_disables_tracking(self) -> None:
         with (
