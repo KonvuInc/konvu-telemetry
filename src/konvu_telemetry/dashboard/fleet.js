@@ -1467,7 +1467,7 @@ function sessionGraph(s) {
     const step = tickValues(0, v, 5)[1] || v;
     return Math.ceil(v / step) * step;
   };
-  const xmax = ceiling(Math.max(0.01, ...rows.map((q) => q.cumulative_cost_usd), ...marks.map((e) => e.cumulative_cost_usd)) * 1.05);
+  const xmax = Math.max(0.01, ...rows.map((q) => q.cumulative_cost_usd), ...marks.map((e) => e.cumulative_cost_usd)) * 1.05;
   const ymax = ceiling(Math.max(1, ...rows.map((q) => q.context_tokens / 1000)) * 1.04);
   const x = (v) => L + (v / xmax) * (W - L - R),
     y = (v) => H - B - (v / ymax) * (H - T - B);
