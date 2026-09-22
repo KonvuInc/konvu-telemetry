@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import Literal
 
 from .service import load_health
-from .tracking import record_setup_completed
 
 LABEL = "com.konvu.telemetry"
 PORT = 7824
@@ -28,6 +27,13 @@ CLAUDE_STATUSLINE_ORIGINAL_NAME = "konvu-claude-statusline-original"
 CLAUDE_STATUSLINE_STATE_NAME = "konvu-claude-statusline-state.json"
 CONSOLE_COMMAND = "konvu-telemetry"
 HOOK_TIMEOUT_SECONDS = 5
+
+
+def record_setup_completed(duration_seconds: float, *, default_enabled: bool) -> None:
+    """Load product tracking only for the setup command."""
+    from .tracking import record_setup_completed as record
+
+    record(duration_seconds, default_enabled=default_enabled)
 
 
 @dataclass(frozen=True)
@@ -471,6 +477,9 @@ def setup(interval: int, open_browser: bool) -> dict[str, str]:
     if sys.platform != "darwin":
         raise RuntimeError("Konvu setup currently supports macOS only")
     started_at = time.monotonic()
+    default_tracking_enabled = not (
+        launch_agent_path().is_file() or launcher_path().is_file()
+    )
     validate_integrations()
     claude_path, codex_path = integration_paths()
     states = [
@@ -501,7 +510,10 @@ def setup(interval: int, open_browser: bool) -> dict[str, str]:
         raise
     if open_browser:
         webbrowser.open(dashboard)
-    record_setup_completed(time.monotonic() - started_at)
+    record_setup_completed(
+        time.monotonic() - started_at,
+        default_enabled=default_tracking_enabled,
+    )
     return {
         "claude_statusline": claude,
         "claude_desktop_hook": claude_desktop,

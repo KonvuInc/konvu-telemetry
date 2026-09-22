@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add default-on, minimal PostHog telemetry with durable opt-out and no impact on collection or dashboard requests.
+**Goal:** Add minimal PostHog telemetry that is default-on for fresh installs, disabled for upgrades without a preference, and has a durable opt-out with no impact on collection or dashboard requests.
 
 **Architecture:** `tracking.py` is the only analytics boundary. It persists an anonymous install ID, enabled flag, and queue in the existing private local directory. It sends batches in a daemon thread using the standard library. `installer.py` and `service.py` only invoke named tracking functions.
 
@@ -24,7 +24,7 @@
 
 **Interfaces:** `record_setup_completed(duration_seconds)`, `record_dashboard_opened(data_available)`, `record_collector_failure()`, `set_tracking_enabled(enabled)`, `tracking_status()`, and `flush_in_background()`.
 
-- [ ] Write tests that prove new installs are enabled with a persisted random ID, `telemetry off` clears the queue, and an enabled event is queued privately.
+- [ ] Write tests that prove fresh installs are enabled only during setup, upgrades without a preference remain disabled, `telemetry off` clears the queue, and an enabled event is queued privately.
 - [ ] Run `PYTHONPATH=src python3 -m unittest tests.test_tracking -v` and verify failure because the module does not exist.
 - [ ] Add `tracking_state_path()` and `tracking_queue_path()` to `storage.py`, then implement the smallest atomic private state store.
 - [ ] Re-run the focused test and commit `feat: add private telemetry event queue`.

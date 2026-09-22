@@ -6,7 +6,7 @@ Konvu Telemetry is one Python package with a single resident process. The proces
 
 - The collector never modifies provider transcripts.
 - The dashboard server binds only to IPv4 loopback and rejects non-local `Host` and `Origin` values.
-- The package has no runtime Python dependencies. Its only outbound client sends a small allowlisted set of anonymous product events to PostHog in a background thread with a 500 ms timeout.
+- The package has no runtime Python dependencies. Its only outbound client sends a small allowlisted set of anonymous product events to PostHog with a 500 ms timeout. Setup durably queues its event before the setup process exits; network delivery and resident-process events run in a background thread.
 - Product analytics uses a random install ID. It does not create person profiles and sends no transcripts, prompts, code, paths, command arguments, usage data, raw errors, environment variables, account IDs, or workspace IDs.
 - Browser notifications require an open dashboard tab and browser permission.
 - A session alerts when it was active in the last twenty minutes, its cost is complete, and its next-ten-prompt forecast exceeds `ALERT_FORECAST_USD`. It alerts again only after `ALERT_FORECAST_RENOTIFY_SECONDS` and only if the forecast has not fallen since the last alert; falling to or below the threshold re-arms it.
@@ -53,7 +53,7 @@ Raw transcripts remain in `~/.claude/projects` and `~/.codex/sessions`. Normaliz
 | `KONVU_LIVE_USAGE_CODEX_DIR` | Codex transcript roots, separated by the platform path separator |
 | `KONVU_TELEMETRY_PRICING_PATH` | Local pricing JSON file |
 
-Run `konvu-telemetry telemetry off` to disable anonymous product analytics and delete pending events. `telemetry on` restores the default behavior, and `telemetry status` prints the local state.
+Fresh installations enable anonymous product analytics during successful setup. Upgrades without an existing tracking preference remain disabled. Run `konvu-telemetry telemetry off` to disable analytics and delete pending events. `telemetry on` enables it explicitly, and `telemetry status` prints the local state.
 
 ## Failure behavior
 
@@ -64,6 +64,7 @@ Run `konvu-telemetry telemetry off` to disable anonymous product analytics and d
 - Oversized transcript records are scanned with bounded prefix and suffix buffers; large payload text is not retained.
 - Dashboard responses use ETags, and the browser fetches detailed history only for the open session.
 - Hooks only read the collector's existing session output; they never force collection.
+- Failed analytics delivery retains stable event IDs and uses exponential backoff capped at 24 hours.
 - A second server cannot bind the same port and exits before starting another collector loop.
 
 JSON is sufficient for the first release because the process writes one bounded current snapshot, small state files, and one file per session. SQLite becomes useful when the product needs arbitrary historical queries, migrations, or concurrent writers.

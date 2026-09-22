@@ -12,22 +12,54 @@ from konvu_telemetry import installer
 
 class InstallerTests(unittest.TestCase):
     def test_successful_setup_records_a_duration_bucket(self) -> None:
-        with (
-            patch.object(installer.sys, "platform", "darwin"),
-            patch.object(installer, "validate_integrations"),
-            patch.object(installer, "install_launcher"),
-            patch.object(installer, "install_claude_statusline", return_value="installed"),
-            patch.object(
-                installer, "install_claude_desktop_hook", return_value="installed"
-            ),
-            patch.object(installer, "install_codex_hook", return_value="installed"),
-            patch.object(installer, "install_launch_agent"),
-            patch.object(installer, "record_setup_completed") as recorded,
-        ):
-            installer.setup(60, False)
+        with tempfile.TemporaryDirectory() as temporary:
+            with (
+                patch.object(installer.Path, "home", return_value=Path(temporary)),
+                patch.object(installer.sys, "platform", "darwin"),
+                patch.object(installer, "validate_integrations"),
+                patch.object(installer, "install_launcher"),
+                patch.object(
+                    installer, "install_claude_statusline", return_value="installed"
+                ),
+                patch.object(
+                    installer, "install_claude_desktop_hook", return_value="installed"
+                ),
+                patch.object(installer, "install_codex_hook", return_value="installed"),
+                patch.object(installer, "install_launch_agent"),
+                patch.object(installer, "record_setup_completed") as recorded,
+            ):
+                installer.setup(60, False)
 
         recorded.assert_called_once()
         self.assertIsInstance(recorded.call_args.args[0], float)
+        self.assertTrue(recorded.call_args.kwargs["default_enabled"])
+
+    def test_setup_keeps_an_existing_install_opted_out_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            launch_agent = (
+                home / "Library" / "LaunchAgents" / f"{installer.LABEL}.plist"
+            )
+            launch_agent.parent.mkdir(parents=True)
+            launch_agent.write_bytes(b"existing")
+            with (
+                patch.object(installer.Path, "home", return_value=home),
+                patch.object(installer.sys, "platform", "darwin"),
+                patch.object(installer, "validate_integrations"),
+                patch.object(installer, "install_launcher"),
+                patch.object(
+                    installer, "install_claude_statusline", return_value="installed"
+                ),
+                patch.object(
+                    installer, "install_claude_desktop_hook", return_value="installed"
+                ),
+                patch.object(installer, "install_codex_hook", return_value="installed"),
+                patch.object(installer, "install_launch_agent"),
+                patch.object(installer, "record_setup_completed") as recorded,
+            ):
+                installer.setup(60, False)
+
+        self.assertFalse(recorded.call_args.kwargs["default_enabled"])
 
     def test_setup_merges_konvu_hooks_without_removing_existing_hooks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -341,6 +373,7 @@ class InstallerTests(unittest.TestCase):
                 patch.object(installer.sys, "platform", "darwin"),
                 patch.object(installer, "stop_launch_agent"),
                 patch.object(installer, "start_launch_agent"),
+                patch.object(installer, "record_setup_completed"),
             ):
                 installer.setup(30, False)
                 installer.setup(60, False)

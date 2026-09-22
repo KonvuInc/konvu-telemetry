@@ -4,17 +4,17 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 import fcntl
-from importlib.metadata import PackageNotFoundError, version
 import json
 from pathlib import Path
 import platform
 from queue import Empty, SimpleQueue
 from threading import Lock, Thread
-from typing import Callable, Iterator, TypedDict
+import time
+from typing import Callable, Iterator, Literal, TypedDict
 from urllib.request import Request, urlopen
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from .storage import (
     ensure_private_directory,
@@ -24,19 +24,29 @@ from .storage import (
 )
 
 Sender = Callable[[bytes], None]
+Clock = Callable[[], float]
+StateKind = Literal["valid", "missing", "invalid"]
 
 
 class QueuedEvent(TypedDict):
     event: str
     properties: dict[str, object]
+    timestamp: str
+    uuid: str
+
 
 POSTHOG_PROJECT_KEY = "phc_AKTThCdGvkAkitNvu5cBfoWUbM5gfaBBF67UYNbvj8do"
 POSTHOG_BATCH_URL = "https://us.i.posthog.com/batch/"
 DELIVERY_TIMEOUT_SECONDS = 0.5
+INITIAL_RETRY_SECONDS = 60
+MAX_RETRY_SECONDS = 24 * 60 * 60
 MAX_QUEUED_EVENTS = 100
+PROTECTED_EVENTS = frozenset({"telemetry setup completed", "first snapshot ready"})
 DURATION_BUCKETS = frozenset(
     {"under_1_second", "under_5_seconds", "under_15_seconds", "15_seconds_or_more"}
 )
+
+
 def _send_to_posthog(payload: bytes) -> None:
     request = Request(
         POSTHOG_BATCH_URL,
@@ -45,11 +55,15 @@ def _send_to_posthog(payload: bytes) -> None:
         method="POST",
     )
     with urlopen(request, timeout=DELIVERY_TIMEOUT_SECONDS) as response:
+        if response.geturl() != POSTHOG_BATCH_URL:
+            raise OSError("PostHog redirected telemetry batch")
         if not 200 <= response.status < 300:
             raise OSError("PostHog rejected telemetry batch")
 
 
 def _cli_version() -> str:
+    from importlib.metadata import PackageNotFoundError, version
+
     try:
         return version("konvu-telemetry")
     except PackageNotFoundError:
@@ -73,11 +87,13 @@ class TrackingStore:
         state_path: Path,
         queue_path: Path,
         sender: Sender = _send_to_posthog,
+        clock: Clock = time.time,
     ) -> None:
         self._state_path = state_path
         self._queue_path = queue_path
         self._lock_path = state_path.with_name("tracking.lock")
         self._sender = sender
+        self._clock = clock
         self._thread_lock = Lock()
 
     @contextmanager
@@ -95,14 +111,36 @@ class TrackingStore:
                 finally:
                     fcntl.flock(handle, fcntl.LOCK_UN)
 
+    def initialize(self, default_enabled: bool) -> TrackingStatus:
+        """Create state only when none exists, preserving invalid state as disabled."""
+        with self._locked():
+            kind, state = self._read_state()
+            if kind == "valid":
+                return TrackingStatus(enabled=bool(state["enabled"]))
+            if kind == "invalid":
+                return TrackingStatus(enabled=False)
+            state = self._new_state(default_enabled)
+            write_private_json(self._state_path, state)
+            return TrackingStatus(enabled=default_enabled)
+
     def status(self) -> TrackingStatus:
         with self._locked():
-            return TrackingStatus(enabled=bool(self._state()["enabled"]))
+            kind, state = self._read_state()
+            return TrackingStatus(
+                enabled=kind == "valid" and bool(state.get("enabled"))
+            )
 
     def set_enabled(self, enabled: bool) -> None:
         with self._locked():
-            state = self._state()
-            state["enabled"] = enabled
+            kind, state = self._read_state()
+            if kind != "valid":
+                state = self._new_state(enabled)
+            else:
+                state = dict(state)
+                state["enabled"] = enabled
+            if not enabled:
+                state.pop("delivery_failures", None)
+                state.pop("next_send_at", None)
             write_private_json(self._state_path, state)
             if not enabled:
                 write_private_json(self._queue_path, [])
@@ -112,76 +150,172 @@ class TrackingStore:
         if normalized is None:
             return
         with self._locked():
-            if not bool(self._state()["enabled"]):
+            kind, state = self._read_state()
+            if kind != "valid" or not bool(state["enabled"]):
                 return
-            self._append({"event": event, "properties": normalized})
+            self._append(event, normalized)
+
+    def record_setup_completed(self, duration_bucket: str) -> None:
+        self._record_once(
+            "telemetry setup completed",
+            {"duration_bucket": duration_bucket},
+            "setup_delivered",
+        )
+
+    def record_first_snapshot_ready(self) -> None:
+        self._record_once("first snapshot ready", {}, "first_snapshot_delivered")
+
+    def _record_once(
+        self, event: str, properties: dict[str, object], delivered_key: str
+    ) -> None:
+        with self._locked():
+            kind, state = self._read_state()
+            if (
+                kind != "valid"
+                or not bool(state["enabled"])
+                or bool(state.get(delivered_key))
+            ):
+                return
+            queue = self._sanitized_queue()
+            if any(item["event"] == event for item in queue):
+                return
+            self._append(event, properties, queue)
 
     def record_active_day(self, day: str) -> None:
         with self._locked():
-            state = self._state()
-            if not bool(state["enabled"]) or state.get("active_day") == day:
+            kind, state = self._read_state()
+            if (
+                kind != "valid"
+                or not bool(state["enabled"])
+                or state.get("active_day") == day
+            ):
                 return
+            state = dict(state)
             state["active_day"] = day
             write_private_json(self._state_path, state)
-            self._append({"event": "telemetry active day", "properties": {}})
-
-    def record_first_snapshot_ready(self) -> None:
-        with self._locked():
-            state = self._state()
-            if not bool(state["enabled"]) or bool(state.get("first_snapshot_ready")):
-                return
-            state["first_snapshot_ready"] = True
-            write_private_json(self._state_path, state)
-            self._append({"event": "first snapshot ready", "properties": {}})
+            self._append("telemetry active day", {})
 
     def record_collector_failure(self, day: str) -> None:
         with self._locked():
-            state = self._state()
-            if not bool(state["enabled"]) or state.get("collector_failure_day") == day:
+            kind, state = self._read_state()
+            if (
+                kind != "valid"
+                or not bool(state["enabled"])
+                or state.get("collector_failure_day") == day
+            ):
                 return
+            state = dict(state)
             state["collector_failure_day"] = day
             write_private_json(self._state_path, state)
-            self._append(
-                {"event": "collector failed", "properties": {"stage": "snapshot"}}
-            )
+            self._append("collector failed", {"stage": "snapshot"})
 
     def send_queued(self) -> None:
         with self._locked():
-            state = self._state()
+            kind, state = self._read_state()
             queue = self._sanitized_queue()
-            if not bool(state["enabled"]) or not queue:
+            next_send_at = state.get("next_send_at")
+            if (
+                kind != "valid"
+                or not bool(state["enabled"])
+                or not queue
+                or (
+                    isinstance(next_send_at, (int, float))
+                    and not isinstance(next_send_at, bool)
+                    and self._clock() < next_send_at
+                )
+            ):
                 return
             payload = json.dumps(
                 {
                     "api_key": POSTHOG_PROJECT_KEY,
-                    "batch": [self._event_payload(event, state["install_id"]) for event in queue],
+                    "batch": [
+                        self._event_payload(event, state["install_id"])
+                        for event in queue
+                    ],
                 }
             ).encode()
         try:
             self._sender(payload)
         except Exception:
+            self._record_delivery_failure()
             return
         with self._locked():
-            if not bool(self._state()["enabled"]):
+            kind, state = self._read_state()
+            if kind != "valid" or not bool(state["enabled"]):
                 return
             current = self._sanitized_queue()
-            if current[: len(queue)] == queue:
-                write_private_json(self._queue_path, current[len(queue) :])
+            if current[: len(queue)] != queue:
+                return
+            state = dict(state)
+            if any(item["event"] == "telemetry setup completed" for item in queue):
+                state["setup_delivered"] = True
+            if any(item["event"] == "first snapshot ready" for item in queue):
+                state["first_snapshot_delivered"] = True
+            state.pop("delivery_failures", None)
+            state.pop("next_send_at", None)
+            write_private_json(self._state_path, state)
+            write_private_json(self._queue_path, current[len(queue) :])
 
-    def _append(self, event: QueuedEvent) -> None:
-        queue = self._sanitized_queue()
-        queue.append(event)
-        write_private_json(self._queue_path, queue[-MAX_QUEUED_EVENTS:])
+    def _record_delivery_failure(self) -> None:
+        with self._locked():
+            kind, state = self._read_state()
+            if kind != "valid" or not bool(state["enabled"]):
+                return
+            previous = state.get("delivery_failures")
+            failures = previous + 1 if isinstance(previous, int) else 1
+            delay = min(
+                INITIAL_RETRY_SECONDS * (2 ** min(failures - 1, 10)),
+                MAX_RETRY_SECONDS,
+            )
+            state = dict(state)
+            state["delivery_failures"] = failures
+            state["next_send_at"] = self._clock() + delay
+            try:
+                write_private_json(self._state_path, state)
+            except OSError:
+                pass
+
+    def _append(
+        self,
+        event: str,
+        properties: dict[str, object],
+        queue: list[QueuedEvent] | None = None,
+    ) -> None:
+        current = self._sanitized_queue() if queue is None else queue
+        current.append(
+            {
+                "event": event,
+                "properties": properties,
+                "timestamp": datetime.fromtimestamp(
+                    self._clock(), timezone.utc
+                ).isoformat(),
+                "uuid": str(uuid4()),
+            }
+        )
+        while len(current) > MAX_QUEUED_EVENTS:
+            removable = next(
+                (
+                    index
+                    for index, item in enumerate(current)
+                    if item["event"] not in PROTECTED_EVENTS
+                ),
+                0,
+            )
+            current.pop(removable)
+        write_private_json(self._queue_path, current)
 
     def _event_payload(
         self, queued_event: QueuedEvent, install_id: object
     ) -> dict[str, object]:
-        event = queued_event["event"]
         properties = queued_event["properties"]
+        event_id = queued_event["uuid"]
         return {
-            "event": event,
+            "event": queued_event["event"],
+            "timestamp": queued_event["timestamp"],
+            "uuid": event_id,
             "properties": {
                 "distinct_id": install_id,
+                "$insert_id": event_id,
                 "$process_person_profile": False,
                 "$ip": "0",
                 "cli_version": _cli_version(),
@@ -190,18 +324,25 @@ class TrackingStore:
             },
         }
 
-    def _state(self) -> dict[str, object]:
+    def _read_state(self) -> tuple[StateKind, dict[str, object]]:
         try:
             value = json.loads(self._state_path.read_text())
+        except FileNotFoundError:
+            return "missing", {}
         except (OSError, json.JSONDecodeError):
-            value = None
-        if not isinstance(value, dict) or not isinstance(value.get("enabled"), bool):
-            value = {"enabled": True, "install_id": str(uuid4())}
-            write_private_json(self._state_path, value)
-        elif not isinstance(value.get("install_id"), str):
-            value = {"enabled": value["enabled"], "install_id": str(uuid4())}
-            write_private_json(self._state_path, value)
-        return value
+            return "invalid", {}
+        if (
+            not isinstance(value, dict)
+            or not isinstance(value.get("enabled"), bool)
+            or not isinstance(value.get("install_id"), str)
+            or not value["install_id"]
+        ):
+            return "invalid", {}
+        return "valid", value
+
+    @staticmethod
+    def _new_state(enabled: bool) -> dict[str, object]:
+        return {"enabled": enabled, "install_id": str(uuid4())}
 
     def _sanitized_queue(self) -> list[QueuedEvent]:
         try:
@@ -216,12 +357,47 @@ class TrackingStore:
                 continue
             event = item.get("event")
             properties = item.get("properties")
-            if not isinstance(event, str) or not isinstance(properties, dict):
+            timestamp = item.get("timestamp")
+            event_id = item.get("uuid")
+            if (
+                not isinstance(event, str)
+                or not isinstance(properties, dict)
+                or not isinstance(timestamp, str)
+                or not isinstance(event_id, str)
+                or not self._valid_timestamp(timestamp)
+                or not self._valid_uuid(event_id)
+            ):
                 continue
             normalized = self._normalize_properties(event, properties)
             if normalized is not None:
-                sanitized.append({"event": event, "properties": normalized})
+                sanitized.append(
+                    {
+                        "event": event,
+                        "properties": normalized,
+                        "timestamp": timestamp,
+                        "uuid": event_id,
+                    }
+                )
         return sanitized[-MAX_QUEUED_EVENTS:]
+
+    @staticmethod
+    def _valid_timestamp(value: object) -> bool:
+        if not isinstance(value, str):
+            return False
+        try:
+            return datetime.fromisoformat(value).tzinfo is not None
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _valid_uuid(value: object) -> bool:
+        if not isinstance(value, str):
+            return False
+        try:
+            UUID(value)
+        except ValueError:
+            return False
+        return True
 
     @staticmethod
     def _normalize_properties(
@@ -232,7 +408,11 @@ class TrackingStore:
             return {"duration_bucket": bucket} if bucket in DURATION_BUCKETS else None
         if event == "dashboard opened":
             data_available = properties.get("data_available")
-            return {"data_available": data_available} if type(data_available) is bool else None
+            return (
+                {"data_available": data_available}
+                if type(data_available) is bool
+                else None
+            )
         if event in {"first snapshot ready", "telemetry active day"}:
             return {}
         if event == "collector failed" and properties.get("stage") == "snapshot":
@@ -240,9 +420,12 @@ class TrackingStore:
         return None
 
 
-_STORE = TrackingStore(tracking_state_path(), tracking_queue_path())
 _PENDING_EVENTS: SimpleQueue[tuple[str, dict[str, object]]] = SimpleQueue()
 _WORKER_LOCK = Lock()
+
+
+def _store() -> TrackingStore:
+    return TrackingStore(tracking_state_path(), tracking_queue_path())
 
 
 def _schedule(action: str, properties: dict[str, object]) -> None:
@@ -250,7 +433,7 @@ def _schedule(action: str, properties: dict[str, object]) -> None:
     flush_in_background()
 
 
-def record_setup_completed(duration_seconds: float) -> None:
+def record_setup_completed(duration_seconds: float, *, default_enabled: bool) -> None:
     if duration_seconds < 1:
         bucket = "under_1_second"
     elif duration_seconds < 5:
@@ -259,12 +442,19 @@ def record_setup_completed(duration_seconds: float) -> None:
         bucket = "under_15_seconds"
     else:
         bucket = "15_seconds_or_more"
-    _schedule("telemetry setup completed", {"duration_bucket": bucket})
+    try:
+        store = _store()
+        store.initialize(default_enabled=default_enabled)
+        store.record_setup_completed(bucket)
+    except Exception:
+        return
+    flush_in_background()
 
 
 def record_dashboard_opened(data_available: bool) -> None:
     _schedule("dashboard opened", {"data_available": data_available})
-    _schedule("active day", {"day": date.today().isoformat()})
+    if data_available:
+        _schedule("active day", {"day": date.today().isoformat()})
 
 
 def record_first_snapshot_ready() -> None:
@@ -276,17 +466,11 @@ def record_collector_failure() -> None:
 
 
 def set_tracking_enabled(enabled: bool) -> None:
-    try:
-        _STORE.set_enabled(enabled)
-    except Exception:
-        return
+    _store().set_enabled(enabled)
 
 
 def tracking_status() -> TrackingStatus:
-    try:
-        return _STORE.status()
-    except Exception:
-        return TrackingStatus(enabled=False)
+    return _store().status()
 
 
 def flush_in_background() -> None:
@@ -295,25 +479,29 @@ def flush_in_background() -> None:
 
     def flush() -> None:
         try:
+            store = _store()
             while True:
                 try:
                     action, properties = _PENDING_EVENTS.get_nowait()
                 except Empty:
                     break
                 if action == "active day":
-                    _STORE.record_active_day(str(properties["day"]))
+                    store.record_active_day(str(properties["day"]))
                 elif action == "first snapshot ready":
-                    _STORE.record_first_snapshot_ready()
+                    store.record_first_snapshot_ready()
                 elif action == "collector failure":
-                    _STORE.record_collector_failure(str(properties["day"]))
+                    store.record_collector_failure(str(properties["day"]))
                 else:
-                    _STORE.record(action, properties)
-            _STORE.send_queued()
+                    store.record(action, properties)
+            store.send_queued()
         except Exception:
-            return
+            pass
         finally:
             _WORKER_LOCK.release()
-            if not _PENDING_EVENTS.empty():
-                flush_in_background()
+        if not _PENDING_EVENTS.empty():
+            flush_in_background()
 
-    Thread(target=flush, daemon=True).start()
+    try:
+        Thread(target=flush, daemon=True).start()
+    except Exception:
+        _WORKER_LOCK.release()

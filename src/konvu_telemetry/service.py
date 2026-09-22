@@ -14,7 +14,11 @@ import time
 from urllib.parse import parse_qs, urlparse
 import webbrowser
 
-from .config import ALLOWED_PROVIDERS, DEFAULT_HEALTH_STALE_SECONDS
+from .config import (
+    ALLOWED_PROVIDERS,
+    DEFAULT_HEALTH_STALE_SECONDS,
+    LIVE_ACTIVITY_SECONDS,
+)
 from .live import IncrementalLiveState
 from .snapshot import build_snapshot, write_snapshot
 from .storage import (
@@ -25,14 +29,59 @@ from .storage import (
     valid_session_id,
     write_private_json,
 )
-from .tracking import (
-    record_collector_failure,
-    record_dashboard_opened,
-    record_first_snapshot_ready,
-)
 
 LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost"})
 LOGGER = logging.getLogger(__name__)
+
+
+def record_collector_failure() -> None:
+    from .tracking import record_collector_failure as record
+
+    record()
+
+
+def record_dashboard_opened(data_available: bool) -> None:
+    from .tracking import record_dashboard_opened as record
+
+    record(data_available)
+
+
+def record_first_snapshot_ready() -> None:
+    from .tracking import record_first_snapshot_ready as record
+
+    record()
+
+
+def snapshot_has_dashboard_data(snapshot: object, now: float) -> bool:
+    if not isinstance(snapshot, dict):
+        return False
+    sessions = snapshot.get("sessions")
+    configured_window = snapshot.get("live_activity_window_seconds")
+    window = (
+        float(configured_window)
+        if isinstance(configured_window, (int, float))
+        and not isinstance(configured_window, bool)
+        and configured_window > 0
+        else float(LIVE_ACTIVITY_SECONDS)
+    )
+    for session in sessions if isinstance(sessions, list) else []:
+        if not isinstance(session, dict):
+            continue
+        last_activity = parse_timestamp(session.get("last_activity_at"))
+        if last_activity is None:
+            continue
+        elapsed = now - last_activity
+        if -60 <= elapsed <= window:
+            return True
+    return False
+
+
+def stored_snapshot_has_dashboard_data(now: float) -> bool:
+    try:
+        snapshot = json.loads(snapshot_path().read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    return snapshot_has_dashboard_data(snapshot, now)
 
 
 def local_request_allowed(host: str, origin: str | None) -> bool:
@@ -112,7 +161,7 @@ def collect_forever(
             with snapshot_lock:
                 snapshot = build_snapshot(started_at, live_state)
                 write_snapshot(snapshot)
-            if isinstance(snapshot.get("sessions"), list) and snapshot["sessions"]:
+            if snapshot_has_dashboard_data(snapshot, time.time()):
                 record_first_snapshot_ready()
             write_health(time.time(), interval_seconds=interval_seconds)
         except Exception as error:
@@ -166,7 +215,9 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
             return
         path = urlparse(self.path).path
         if path == "/":
-            record_dashboard_opened(data_available=snapshot_path().is_file())
+            record_dashboard_opened(
+                data_available=stored_snapshot_has_dashboard_data(time.time())
+            )
         if path == "/healthz":
             health = load_health()
             payload = json.dumps(health).encode("utf-8")

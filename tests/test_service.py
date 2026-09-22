@@ -83,6 +83,7 @@ from konvu_telemetry.service import (
     collect_forever,
     load_health,
     local_request_allowed,
+    snapshot_has_dashboard_data,
     write_health,
 )
 from konvu_telemetry.snapshot import (
@@ -1315,20 +1316,31 @@ class ServiceTests(unittest.TestCase):
             handler.send_response.assert_called_once_with(304)
             handler._write_payload.assert_not_called()
 
-    def test_dashboard_open_records_whether_local_data_exists(self) -> None:
+    def test_dashboard_open_records_whether_visible_data_exists(self) -> None:
         handler = object.__new__(DashboardRequestHandler)
         handler.headers = {"Host": "127.0.0.1:7824"}
         handler.path = "/"
         with tempfile.TemporaryDirectory() as directory:
             snapshot = Path(directory) / "live-sessions.json"
-            snapshot.write_text("{}")
+            snapshot.write_text('{"generated_at":"2026-01-01T00:00:00Z","sessions":[]}')
             with (
                 patch("konvu_telemetry.service.snapshot_path", return_value=snapshot),
                 patch("konvu_telemetry.service.record_dashboard_opened") as recorded,
                 patch("http.server.SimpleHTTPRequestHandler.do_GET"),
             ):
                 DashboardRequestHandler.do_GET(handler)
-        recorded.assert_called_once_with(data_available=True)
+        recorded.assert_called_once_with(data_available=False)
+
+    def test_dashboard_data_matches_the_visible_activity_window(self) -> None:
+        snapshot = {
+            "live_activity_window_seconds": 1_200,
+            "sessions": [
+                {"last_activity_at": "2026-01-01T00:00:00+00:00"},
+            ],
+        }
+
+        self.assertTrue(snapshot_has_dashboard_data(snapshot, 1_767_225_630.0))
+        self.assertFalse(snapshot_has_dashboard_data(snapshot, 1_767_226_801.0))
 
     def test_refreshed_session_reads_existing_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1565,11 +1577,15 @@ class ServiceTests(unittest.TestCase):
         with (
             patch(
                 "konvu_telemetry.service.build_snapshot",
-                return_value={"sessions": [{"id": "session"}]},
+                return_value={
+                    "live_activity_window_seconds": 1_200,
+                    "sessions": [{"last_activity_at": "2026-01-01T00:00:00+00:00"}],
+                },
             ),
             patch("konvu_telemetry.service.write_snapshot"),
             patch("konvu_telemetry.service.write_health"),
             patch("konvu_telemetry.service.record_first_snapshot_ready") as recorded,
+            patch("konvu_telemetry.service.time.time", return_value=1_767_225_630.0),
             patch("konvu_telemetry.service.time.sleep", side_effect=StopIteration),
             self.assertRaises(StopIteration),
         ):
