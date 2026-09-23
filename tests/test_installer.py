@@ -279,13 +279,50 @@ class InstallerTests(unittest.TestCase):
                 command = installer.collector_command()
             self.assertEqual(command, [str(path)])
             self.assertEqual(path.stat().st_mode & 0o777, 0o700)
-            self.assertEqual(
-                path.read_text(),
+            script = path.read_text()
+            self.assertTrue(script.startswith("#!/bin/sh\nunset PYTHONPATH\n"))
+            self.assertIn(f"[ -x {console} ] || exit 0\n", script)
+            self.assertIn(f'exec {console} "$@"\n', script)
+            self.assertNotIn(" konvu ", script.replace(str(console), ""))
+
+    def test_launcher_never_fails_a_hook_invocation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            console = home / "bin" / "konvu"
+            console.parent.mkdir()
+            # An older build that does not know the subcommand: usage on stderr, exit 2.
+            console.write_text(
                 "#!/bin/sh\n"
-                "unset PYTHONPATH\n"
-                f"[ -x {console} ] || exit 0\n"
-                f'exec {console} "$@"\n',
+                'case "$1" in\n'
+                "*-prompt-hook)\n"
+                "  echo 'usage: konvu-telemetry: invalid choice' >&2\n"
+                "  exit 2\n"
+                "  ;;\n"
+                "esac\n"
+                "printf output\n"
             )
+            console.chmod(0o700)
+            with (
+                patch.object(installer.Path, "home", return_value=home),
+                patch.object(installer, "console_launcher", return_value=console),
+            ):
+                launcher = installer.install_launcher()
+            for command in ("claude-prompt-hook", "codex-prompt-hook"):
+                result = subprocess.run(
+                    [str(launcher), command], capture_output=True, text=True
+                )
+                self.assertEqual(result.returncode, 0, command)
+                self.assertEqual(result.stdout, "", command)
+                self.assertEqual(result.stderr, "", command)
+            working = subprocess.run(
+                [str(launcher), "codex-hook"], capture_output=True, text=True
+            )
+            self.assertEqual((working.returncode, working.stdout), (0, "output\n"))
+            # The status line is not a hook and keeps its own stdout untouched.
+            statusline = subprocess.run(
+                [str(launcher), "statusline"], capture_output=True, text=True
+            )
+            self.assertEqual((statusline.returncode, statusline.stdout), (0, "output"))
 
     def test_private_launcher_exits_cleanly_after_package_removal(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -120,10 +120,19 @@ def install_launcher() -> Path:
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
         target = shlex.quote(str(console_launcher()))
+        # A hook that fails blocks the user's prompt, so hook output is buffered and
+        # only emitted on success; every other subcommand keeps its own stdout and status.
         temporary.write_text(
             "#!/bin/sh\n"
             "unset PYTHONPATH\n"
             f"[ -x {target} ] || exit 0\n"
+            'case "$1" in\n'
+            "*-hook)\n"
+            f'  output=$({target} "$@" 2>/dev/null) || exit 0\n'
+            '  [ -n "$output" ] && printf \'%s\\n\' "$output"\n'
+            "  exit 0\n"
+            "  ;;\n"
+            "esac\n"
             f'exec {target} "$@"\n',
             encoding="utf-8",
         )

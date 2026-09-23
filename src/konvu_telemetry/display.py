@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import wraps
 import json
 import math
 import os
@@ -9,6 +10,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 from .config import (
     ACTIVITY_FRESHNESS_SECONDS,
     ALERT_QUOTA_5H_PERCENT,
@@ -395,6 +397,20 @@ def last_prompt_used_a_tool(session: dict[str, object]) -> bool:
     return tool_calls > 0
 
 
+def silent_hook(hook: Callable[[], None]) -> Callable[[], None]:
+    """Keep a failed usage display from blocking the prompt that triggered it."""
+
+    @wraps(hook)
+    def guarded() -> None:
+        try:
+            hook()
+        except Exception:
+            return
+
+    return guarded
+
+
+@silent_hook
 def codex_hook() -> None:
     """Return the boxed Codex CLI usage message from its local session file."""
     try:
@@ -432,12 +448,14 @@ def codex_hook() -> None:
     print(json.dumps({"systemMessage": "\n" + "\n".join(lines)}))
 
 
+@silent_hook
 def claude_hook() -> None:
     """Accept the Claude Stop hook without output; the status line reports CLI usage."""
     # Retained so settings written by older versions keep working instead of erroring.
     return
 
 
+@silent_hook
 def claude_prompt_hook() -> None:
     """Inject the usage box as visible context for a Claude desktop turn."""
     if not claude_is_desktop():
@@ -457,6 +475,7 @@ def claude_prompt_hook() -> None:
     print(prompt_context_payload(session, recorded_quota_usage_text("claude")))
 
 
+@silent_hook
 def codex_prompt_hook() -> None:
     """Inject the usage box as visible context for a Codex desktop turn."""
     try:

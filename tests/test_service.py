@@ -2,6 +2,7 @@ import json
 from datetime import datetime, timezone
 from io import StringIO
 import os
+import subprocess
 import sys
 import tempfile
 from threading import Lock
@@ -1581,6 +1582,73 @@ class ServiceTests(unittest.TestCase):
             ),
             {"suppressOutput": True},
         )
+
+    def run_hook_command(
+        self, command: str, stdin: str, home: Path
+    ) -> "subprocess.CompletedProcess[str]":
+        """Invoke one subcommand the way an installed hook does, in its own process."""
+        return subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from konvu_telemetry.collector import main; main()",
+                command,
+            ],
+            input=stdin,
+            capture_output=True,
+            text=True,
+            cwd=str(Path(__file__).resolve().parents[1]),
+            env={
+                **os.environ,
+                "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
+                "KONVU_LIVE_USAGE_HOME": str(home),
+                "CLAUDE_CODE_ENTRYPOINT": "claude-desktop",
+            },
+        )
+
+    def test_hooks_never_block_a_prompt(self) -> None:
+        commands = (
+            "claude-hook",
+            "claude-prompt-hook",
+            "codex-hook",
+            "codex-prompt-hook",
+            # A build that predates a subcommand must still exit 0 rather than exit 2.
+            "some-future-hook",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            empty = Path(directory) / "no-telemetry-here"
+            for command in commands:
+                for stdin in ("", "not json at all", "[]", '{"session_id":"../x"}'):
+                    result = self.run_hook_command(command, stdin, empty)
+                    self.assertEqual(result.returncode, 0, (command, stdin))
+                    self.assertEqual(result.stderr, "", (command, stdin))
+                    self.assertNotIn("Konvu live usage", result.stdout, command)
+
+    def test_hooks_stay_silent_when_rendering_raises(self) -> None:
+        session = self.usage_session(1)
+        boom = RuntimeError("render exploded")
+        with patch(
+            "konvu_telemetry.display.usage_box_lines", side_effect=boom
+        ) as render:
+            self.assertEqual(
+                self.run_claude_hook(claude_prompt_hook, "claude-desktop", session), ""
+            )
+            self.assertEqual(
+                self.run_codex_hook(codex_prompt_hook, "desktop", session), ""
+            )
+            self.assertEqual(self.run_codex_hook(codex_hook, "cli", session), "")
+        self.assertEqual(render.call_count, 3)
+        # The helper patches refreshed_session itself, so raise from the gate instead.
+        with patch(
+            "konvu_telemetry.display.last_prompt_used_a_tool", side_effect=boom
+        ) as lookup:
+            self.assertEqual(
+                self.run_claude_hook(claude_prompt_hook, "claude-desktop", session), ""
+            )
+            self.assertEqual(
+                self.run_codex_hook(codex_prompt_hook, "desktop", session), ""
+            )
+        self.assertEqual(lookup.call_count, 2)
 
     def test_codex_is_desktop_covers_every_recorded_client(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

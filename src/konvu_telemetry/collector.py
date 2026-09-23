@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 
 from .analytics import (
@@ -22,7 +23,23 @@ from .service import open_dashboard, run_local_service, write_health
 from .snapshot import build_snapshot, write_snapshot
 
 
+HOOKS = {
+    "claude-hook": claude_hook,
+    "claude-prompt-hook": claude_prompt_hook,
+    "codex-hook": codex_hook,
+    "codex-prompt-hook": codex_prompt_hook,
+}
+
+
 def main() -> None:
+    # Hooks are dispatched before argparse: a name this build does not know must exit 0
+    # in silence, because a non-zero hook blocks the user's prompt.
+    command = sys.argv[1] if len(sys.argv) > 1 else ""
+    if command.endswith("-hook"):
+        hook = HOOKS.get(command)
+        if hook is not None:
+            hook()
+        return
     parser = argparse.ArgumentParser(
         description="Local-first Claude Code and Codex usage monitoring"
     )
@@ -55,14 +72,6 @@ def main() -> None:
         run_local_service(max(1, args.interval), args.port)
     elif args.command == "normalize":
         write_normalized_events()
-    elif args.command == "codex-hook":
-        codex_hook()
-    elif args.command == "claude-hook":
-        claude_hook()
-    elif args.command == "codex-prompt-hook":
-        codex_prompt_hook()
-    elif args.command == "claude-prompt-hook":
-        claude_prompt_hook()
     elif args.command == "backtest-next-ten":
         backtest_next_ten()
     elif args.command == "dashboard":
