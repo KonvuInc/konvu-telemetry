@@ -32,7 +32,6 @@ from konvu_telemetry.analytics import (
 )
 from konvu_telemetry.config import (
     ALERT_FORECAST_USD,
-    ACTIVITY_FRESHNESS_SECONDS,
     BASELINE_MILESTONES,
     BASELINE_MIN_SESSIONS,
     BASELINE_SCHEMA_VERSION,
@@ -1440,18 +1439,18 @@ class ServiceTests(unittest.TestCase):
                 )
         self.assertEqual(payload, {"id": "session"})
 
-    def test_refreshed_session_ignores_stale_snapshot(self) -> None:
+    def test_refreshed_session_reads_stale_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             session = root / "session.json"
             session.write_text('{"id":"fallback"}')
-            stale_at = time.time() - ACTIVITY_FRESHNESS_SECONDS - 1
+            stale_at = time.time() - 24 * 60 * 60
             os.utime(session, (stale_at, stale_at))
             with patch("konvu_telemetry.display.session_path", return_value=session):
                 payload = refreshed_session(
                     "claude", "00000000-0000-0000-0000-000000000001"
                 )
-        self.assertIsNone(payload)
+        self.assertEqual(payload, {"id": "fallback"})
 
     def test_claude_desktop_hook_returns_a_usage_message(self) -> None:
         session_id = "00000000-0000-0000-0000-000000000001"
