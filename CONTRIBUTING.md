@@ -12,4 +12,4 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 PYTHONPATH=src python3 scripts/benchmark.py --sessions 50 --prompts 20 --max-cold-seconds 5 --max-incremental-seconds 4 --max-peak-mib 64
 ```
 
-Changes must preserve the local-only contract: no transcript, prompt, source-code, or usage upload.
+Changes must never upload transcripts, prompts, source code, usage data, account data, paths, environment variables, or raw errors. Anonymous product events must remain allowlisted in `tracking.py` and must not block collection or dashboard requests.

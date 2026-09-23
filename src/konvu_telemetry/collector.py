@@ -31,10 +31,11 @@ HOOKS = {
 }
 
 
-def main() -> None:
+def main(arguments: list[str] | None = None) -> None:
     # Hooks are dispatched before argparse: a name this build does not know must exit 0
     # in silence, because a non-zero hook blocks the user's prompt.
-    command = sys.argv[1] if len(sys.argv) > 1 else ""
+    argv = sys.argv[1:] if arguments is None else arguments
+    command = argv[0] if argv else ""
     if command.endswith("-hook"):
         hook = HOOKS.get(command)
         if hook is not None:
@@ -59,11 +60,12 @@ def main() -> None:
             "codex-prompt-hook",
             "backtest-next-ten",
             "dashboard",
+            "telemetry",
         ],
     )
     parser.add_argument("--interval", type=int, default=60)
     parser.add_argument("--port", type=int, default=DASHBOARD_PORT)
-    args = parser.parse_args()
+    args = parser.parse_args(arguments)
     if args.command == "once":
         now = time.time()
         write_snapshot(build_snapshot(now))

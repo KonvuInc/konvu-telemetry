@@ -13,11 +13,10 @@ const COLORS = {
   red: "#A60808",
 };
 const BURNING_FORECAST_USD = 4;
-const MANUAL_REFRESH_COOLDOWN_MS = 10000;
 const state = {
   payload: null,
   view: "ledger",
-  baselineMode: "matched",
+  baselineMode: "provider",
   provider: "all",
   sort: "forecast",
   selected: null,
@@ -26,7 +25,6 @@ const state = {
   refreshInFlight: false,
   nextRefreshAt: null,
   refreshIntervalMs: null,
-  manualRefreshAvailableAt: 0,
   snapshotEtag: null,
   detailRequest: 0,
   now: Date.now(),
@@ -1072,7 +1070,7 @@ function saveUrl() {
   if (state.view === "graph") q.set("view", "graph");
   if (state.provider !== "all") q.set("tool", state.provider);
   if (state.sort !== "forecast") q.set("sort", state.sort);
-  if (state.baselineMode !== "matched") q.set("compare", state.baselineMode);
+  if (state.baselineMode !== "provider") q.set("compare", state.baselineMode);
   if (state.selected) q.set("session", state.selected);
   history.replaceState(null, "", location.pathname + (q.size ? "?" + q : "") + location.hash);
 }
@@ -1081,7 +1079,7 @@ function initialUrl() {
   state.view = q.get("view") === "graph" ? "graph" : "ledger";
   state.provider = ["claude", "codex"].includes(q.get("tool")) ? q.get("tool") : "all";
   state.sort = ["activity", "spent", "forecast"].includes(q.get("sort")) ? q.get("sort") : "forecast";
-  state.baselineMode = q.get("compare") === "provider" ? "provider" : "matched";
+  state.baselineMode = q.get("compare") === "matched" ? "matched" : "provider";
   state.selected = q.get("session");
   $("#sort").value = state.sort;
   saveUrl();
@@ -1132,13 +1130,12 @@ function render() {
 function renderFreshness(stale) {
   state.now = Date.now();
   const remainingSeconds = state.nextRefreshAt === null ? null : Math.max(0, Math.ceil((state.nextRefreshAt - state.now) / 1000));
-  const progress = state.nextRefreshAt === null || state.refreshIntervalMs === null ? 0 : Math.max(0, Math.min(1, 1 - (state.nextRefreshAt - state.now) / state.refreshIntervalMs));
-  const coolingDown = state.now < state.manualRefreshAvailableAt;
+  const progress = state.refreshInFlight || state.nextRefreshAt === null || state.refreshIntervalMs === null ? 0 : Math.max(0, Math.min(1, 1 - (state.nextRefreshAt - state.now) / state.refreshIntervalMs));
   const button = $("#freshness");
   button.style.setProperty("--progress", String(progress));
-  button.disabled = state.refreshInFlight || coolingDown;
-  button.title = coolingDown
-    ? "Manual refresh available in " + Math.ceil((state.manualRefreshAvailableAt - state.now) / 1000) + "s"
+  button.disabled = state.refreshInFlight;
+  button.title = state.refreshInFlight
+    ? "Refreshing now"
     : (state.error ? "Collector unreachable. " : "") + (remainingSeconds === null ? "Waiting for collector schedule" : "Refresh now; next collector sync in " + remainingSeconds + "s");
   button.setAttribute("aria-label", button.title);
   button.classList.toggle("stale", Boolean(stale));
@@ -1222,27 +1219,31 @@ function bindEvents() {
     render();
   });
 }
-async function refresh() {
+async function refresh(triggerCollector = false) {
   if (axisDragging || state.refreshInFlight) return;
   state.refreshInFlight = true;
+  renderFreshness(state.error || !state.payload || elapsed(state.payload?.generated_at) > 120000);
   try {
+    if (triggerCollector) {
+      const refreshResponse = await fetch("/api/refresh", { method: "POST", cache: "no-store" });
+      if (!refreshResponse.ok) throw new Error("Collector refresh failed");
+    }
     const health = refreshHealth();
     const headers = state.snapshotEtag ? { "If-None-Match": state.snapshotEtag } : {};
     const response = await fetch("/api/live-sessions", { cache: "no-store", headers });
     await health;
     if (response.status === 304) {
       state.error = false;
-      render();
-      return;
+    } else {
+      if (!response.ok) throw new Error("Collector request failed");
+      const payload = await response.json();
+      if (!payload || !Array.isArray(payload.sessions) || !finite(Date.parse(payload.generated_at))) throw new Error("Invalid snapshot");
+      state.snapshotEtag = response.headers.get("ETag");
+      state.payload = payload;
+      if (state.selected) await loadSessionDetails(state.selected);
+      state.error = false;
+      browserAlerts(payload);
     }
-    if (!response.ok) throw new Error("Collector request failed");
-    const payload = await response.json();
-    if (!payload || !Array.isArray(payload.sessions) || !finite(Date.parse(payload.generated_at))) throw new Error("Invalid snapshot");
-    state.snapshotEtag = response.headers.get("ETag");
-    state.payload = payload;
-    if (state.selected) await loadSessionDetails(state.selected);
-    state.error = false;
-    browserAlerts(payload);
   } catch {
     state.error = true;
   } finally {
@@ -1287,9 +1288,7 @@ function scheduleHealthRefresh() {
   }, Math.max(1000, state.nextRefreshAt - Date.now() + 100));
 }
 async function refreshNow() {
-  if (state.refreshInFlight || Date.now() < state.manualRefreshAvailableAt) return;
-  state.manualRefreshAvailableAt = Date.now() + MANUAL_REFRESH_COOLDOWN_MS;
-  await refresh();
+  await refresh(true);
 }
 function contextCompactions(s) {
   return compacts(s).filter((event) => nonnegative(event.cumulative_cost_usd));

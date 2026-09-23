@@ -7,6 +7,17 @@
 - Stop reporting Claude usage from a Stop hook. Setup removes the Claude `Stop` entry earlier versions installed, leaving any hooks you added yourself untouched, and the `claude-hook` command stays accepted but silent for settings written by older versions.
 - Suppress the Codex Stop hook on Codex Desktop so a turn is not reported twice. Codex CLI output is unchanged.
 - Show a usage box when, and only when, the last prompt used a tool, on every surface. The previous rule — $10 of spend, five prompts, and a meaningful change since the last box — is gone, along with the rate-limit state it needed. `~/.konvu/telemetry/codex-display-state.json` is no longer written or read and can be deleted.
+## 0.2.4 - 2026-09-22
+
+- Synchronize manual and scheduled dashboard refreshes.
+- Keep Codex guardian reviews attached to their parent sessions.
+- Add opt-in anonymous product telemetry.
+
+## 0.2.3 - 2026-09-22
+
+- Improve dashboard refresh and alert controls.
+- Restore Codex compaction markers.
+- Correct dashboard median comparisons.
 
 ## 0.2.2 - 2026-09-21
 

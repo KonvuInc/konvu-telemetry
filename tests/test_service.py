@@ -1,21 +1,22 @@
 import json
+from collections.abc import Callable
 from datetime import datetime, timezone
 from io import StringIO
 import os
 import subprocess
 import sys
 import tempfile
-from threading import Lock
+from threading import Event, Lock, Thread
 import time
 import unittest
 from pathlib import Path
-from typing import Callable
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from scripts.update_pricing import validated_payload
 
+from konvu_telemetry import service
 from konvu_telemetry.analytics import (
     apply_notification_tracking,
     baseline_comparison,
@@ -86,9 +87,11 @@ from konvu_telemetry.pricing import (
 )
 from konvu_telemetry.service import (
     DashboardRequestHandler,
+    RefreshCoordinator,
     collect_forever,
     load_health,
     local_request_allowed,
+    snapshot_has_dashboard_data,
     write_health,
 )
 from konvu_telemetry.snapshot import (
@@ -1060,6 +1063,56 @@ class ServiceTests(unittest.TestCase):
             ],
         )
 
+    def test_incremental_reader_keeps_oversized_codex_guardian_parent(self) -> None:
+        session_id = "00000000-0000-0000-0000-000000000001"
+        parent_id = "00000000-0000-0000-0000-000000000002"
+        session_meta = {
+            "timestamp": "2026-01-01T00:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": session_id,
+                "parent_thread_id": parent_id,
+                "originator": "codex-tui",
+                "source": {"subagent": {"other": "guardian"}},
+                "base_instructions": "x" * 1_000_000,
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / f"rollout-{session_id}.jsonl"
+            transcript.write_text(json.dumps(session_meta) + "\n")
+            state = IncrementalLiveState()._refresh_codex(transcript)
+        self.assertEqual(state.parent, (parent_id, "guardian"))
+        self.assertEqual(state.client, "cli")
+
+    def test_incremental_reader_keeps_oversized_codex_spawn_metadata(self) -> None:
+        session_id = "00000000-0000-0000-0000-000000000001"
+        parent_id = "00000000-0000-0000-0000-000000000002"
+        session_meta = {
+            "timestamp": "2026-01-01T00:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": session_id,
+                "parent_thread_id": parent_id,
+                "originator": "Codex Desktop",
+                "source": {
+                    "subagent": {
+                        "thread_spawn": {
+                            "parent_thread_id": parent_id,
+                            "agent_path": "/root/reviewer",
+                            "agent_nickname": "Hubble",
+                        }
+                    }
+                },
+                "base_instructions": "x" * 1_000_000,
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / f"rollout-{session_id}.jsonl"
+            transcript.write_text(json.dumps(session_meta) + "\n")
+            state = IncrementalLiveState()._refresh_codex(transcript)
+        self.assertEqual(state.parent, (parent_id, "Hubble"))
+        self.assertEqual(state.client, "desktop")
+
     def test_fleet_telemetry_incrementally_reads_bounded_appends(self) -> None:
         session_id = "00000000-0000-0000-0000-000000000001"
         prompt = {
@@ -1320,6 +1373,66 @@ class ServiceTests(unittest.TestCase):
             DashboardRequestHandler._serve_json_file(handler, snapshot)
             handler.send_response.assert_called_once_with(304)
             handler._write_payload.assert_not_called()
+
+    def test_dashboard_open_records_whether_visible_data_exists(self) -> None:
+        handler = object.__new__(DashboardRequestHandler)
+        handler.headers = {"Host": "127.0.0.1:7824"}
+        handler.path = "/"
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory) / "live-sessions.json"
+            snapshot.write_text('{"generated_at":"2026-01-01T00:00:00Z","sessions":[]}')
+            with (
+                patch("konvu_telemetry.service.snapshot_path", return_value=snapshot),
+                patch("konvu_telemetry.service.record_dashboard_opened") as recorded,
+                patch("http.server.SimpleHTTPRequestHandler.do_GET"),
+            ):
+                DashboardRequestHandler.do_GET(handler)
+        recorded.assert_called_once_with(data_available=False)
+
+    def test_dashboard_open_does_not_read_snapshot_for_analytics(self) -> None:
+        handler = object.__new__(DashboardRequestHandler)
+        handler.headers = {"Host": "127.0.0.1:7824"}
+        handler.path = "/"
+        with (
+            patch.object(service, "_DASHBOARD_DATA_AVAILABLE", True, create=True),
+            patch(
+                "konvu_telemetry.service.snapshot_path",
+                side_effect=AssertionError("request read snapshot"),
+            ),
+            patch("konvu_telemetry.service.record_dashboard_opened") as recorded,
+            patch("http.server.SimpleHTTPRequestHandler.do_GET"),
+        ):
+            DashboardRequestHandler.do_GET(handler)
+
+        recorded.assert_called_once_with(data_available=True)
+
+    def test_dashboard_data_matches_the_visible_activity_window(self) -> None:
+        snapshot = {
+            "live_activity_window_seconds": 1_200,
+            "sessions": [
+                {"last_activity_at": "2026-01-01T00:00:00+00:00"},
+            ],
+        }
+
+        self.assertTrue(snapshot_has_dashboard_data(snapshot, 1_767_225_630.0))
+        self.assertFalse(snapshot_has_dashboard_data(snapshot, 1_767_226_801.0))
+
+    def test_service_initializes_dashboard_visibility_from_disk(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory) / "live-sessions.json"
+            snapshot.write_text(
+                json.dumps(
+                    {
+                        "live_activity_window_seconds": 1_200,
+                        "sessions": [{"last_activity_at": "2026-01-01T00:00:00+00:00"}],
+                    }
+                )
+            )
+            service._DASHBOARD_DATA_AVAILABLE = False
+            with patch("konvu_telemetry.service.snapshot_path", return_value=snapshot):
+                service.initialize_dashboard_data_available(1_767_225_630.0)
+
+        self.assertTrue(service._DASHBOARD_DATA_AVAILABLE)
 
     def test_refreshed_session_reads_existing_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1811,16 +1924,107 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(health["next_poll_at"], "1970-01-01T00:02:40+00:00")
 
     def test_collector_keeps_polling_when_health_state_cannot_be_written(self) -> None:
+        coordinator = Mock()
+        coordinator.wait_for_refresh.side_effect = StopIteration
         with (
             patch(
                 "konvu_telemetry.service.build_snapshot", side_effect=OSError("full")
             ),
             patch("konvu_telemetry.service.write_health", side_effect=OSError("full")),
-            patch("konvu_telemetry.service.time.sleep", side_effect=StopIteration),
+            patch("konvu_telemetry.service.record_collector_failure") as recorded,
             self.assertLogs("konvu_telemetry.service", level="ERROR"),
             self.assertRaises(StopIteration),
         ):
-            collect_forever(60, IncrementalLiveState(), Lock())
+            collect_forever(60, IncrementalLiveState(), Lock(), coordinator)
+        recorded.assert_called_once()
+        coordinator.start_collection.assert_called_once_with()
+        coordinator.finish_collection.assert_called_once_with("OSError: full")
+
+    def test_manual_refresh_wakes_collector_and_waits_for_completion(self) -> None:
+        coordinator = RefreshCoordinator()
+        results: list[str | None] = []
+        requester = Thread(
+            target=lambda: results.append(coordinator.request_refresh(1))
+        )
+
+        requester.start()
+        self.assertTrue(coordinator.wait_for_refresh(1))
+        coordinator.start_collection()
+        coordinator.finish_collection(None)
+        requester.join(1)
+
+        self.assertFalse(requester.is_alive())
+        self.assertEqual(results, [None])
+
+    def test_refresh_during_collection_reuses_in_flight_result(self) -> None:
+        coordinator = RefreshCoordinator()
+        coordinator.start_collection()
+        results: list[str | None] = []
+        waiting = Event()
+        original_wait_for = coordinator._condition.wait_for
+
+        def tracked_wait_for(
+            predicate: Callable[[], bool], timeout: float | None = None
+        ) -> bool:
+            waiting.set()
+            return original_wait_for(predicate, timeout)
+
+        requester = Thread(
+            target=lambda: results.append(coordinator.request_refresh(1))
+        )
+
+        with patch.object(
+            coordinator._condition, "wait_for", side_effect=tracked_wait_for
+        ):
+            requester.start()
+            self.assertTrue(waiting.wait(1))
+            coordinator.finish_collection(None)
+        requester.join(1)
+
+        self.assertFalse(requester.is_alive())
+        self.assertEqual(results, [None])
+        self.assertFalse(coordinator.wait_for_refresh(0))
+
+    def test_dashboard_refresh_endpoint_requests_collection(self) -> None:
+        handler = object.__new__(DashboardRequestHandler)
+        handler.headers = {"Host": "127.0.0.1:7824", "Origin": "http://localhost:7824"}
+        handler.path = "/api/refresh"
+        handler.refresh_coordinator = Mock()
+        handler.refresh_coordinator.request_refresh.return_value = None
+        handler.send_response = Mock()
+        handler._secure_headers = Mock()
+        handler._write_payload = Mock()
+
+        with patch(
+            "konvu_telemetry.service.load_health", return_value={"status": "healthy"}
+        ):
+            DashboardRequestHandler.do_POST(handler)
+
+        handler.refresh_coordinator.request_refresh.assert_called_once_with()
+        handler.send_response.assert_called_once_with(200)
+        handler._write_payload.assert_called_once_with(b'{"status": "healthy"}')
+
+    def test_first_snapshot_with_session_data_is_recorded(self) -> None:
+        service._DASHBOARD_DATA_AVAILABLE = False
+        coordinator = Mock()
+        coordinator.wait_for_refresh.side_effect = StopIteration
+        with (
+            patch(
+                "konvu_telemetry.service.build_snapshot",
+                return_value={
+                    "live_activity_window_seconds": 1_200,
+                    "sessions": [{"last_activity_at": "2026-01-01T00:00:00+00:00"}],
+                },
+            ),
+            patch("konvu_telemetry.service.write_snapshot"),
+            patch("konvu_telemetry.service.write_health"),
+            patch("konvu_telemetry.service.record_first_snapshot_ready") as recorded,
+            patch("konvu_telemetry.service.time.time", return_value=1_767_225_630.0),
+            self.assertRaises(StopIteration),
+        ):
+            collect_forever(60, IncrementalLiveState(), Lock(), coordinator)
+        recorded.assert_called_once()
+        self.assertTrue(service._DASHBOARD_DATA_AVAILABLE)
 
     def test_dashboard_rejects_non_local_or_malformed_origins(self) -> None:
         self.assertTrue(local_request_allowed("127.0.0.1:7824", None))
