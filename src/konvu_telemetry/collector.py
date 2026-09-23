@@ -4,19 +4,43 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 
 from .analytics import (
     backtest_next_ten,
 )
 from .config import DASHBOARD_PORT
-from .display import claude_hook, codex_hook, statusline
+from .display import (
+    claude_hook,
+    claude_prompt_hook,
+    codex_hook,
+    codex_prompt_hook,
+    statusline,
+)
 from .exporter import write_normalized_events
 from .service import open_dashboard, run_local_service, write_health
 from .snapshot import build_snapshot, write_snapshot
 
 
+HOOKS = {
+    "claude-hook": claude_hook,
+    "claude-prompt-hook": claude_prompt_hook,
+    "codex-hook": codex_hook,
+    "codex-prompt-hook": codex_prompt_hook,
+}
+
+
 def main(arguments: list[str] | None = None) -> None:
+    # Hooks are dispatched before argparse: a name this build does not know must exit 0
+    # in silence, because a non-zero hook blocks the user's prompt.
+    argv = sys.argv[1:] if arguments is None else arguments
+    command = argv[0] if argv else ""
+    if command.endswith("-hook"):
+        hook = HOOKS.get(command)
+        if hook is not None:
+            hook()
+        return
     parser = argparse.ArgumentParser(
         description="Local-first Claude Code and Codex usage monitoring"
     )
@@ -30,8 +54,10 @@ def main(arguments: list[str] | None = None) -> None:
             "serve",
             "statusline",
             "claude-hook",
+            "claude-prompt-hook",
             "normalize",
             "codex-hook",
+            "codex-prompt-hook",
             "backtest-next-ten",
             "dashboard",
             "telemetry",
@@ -48,10 +74,6 @@ def main(arguments: list[str] | None = None) -> None:
         run_local_service(max(1, args.interval), args.port)
     elif args.command == "normalize":
         write_normalized_events()
-    elif args.command == "codex-hook":
-        codex_hook()
-    elif args.command == "claude-hook":
-        claude_hook()
     elif args.command == "backtest-next-ten":
         backtest_next_ten()
     elif args.command == "dashboard":

@@ -14,7 +14,7 @@ brew install konvuinc/tap/konvu-telemetry
 konvu-telemetry setup
 ```
 
-Setup starts the local collector, opens the dashboard at `http://127.0.0.1:7824`, and adds the Claude Code status line plus Stop hooks shared by Claude Code Desktop, Codex CLI, and Codex Desktop. Restart both desktop apps after setup; in Codex, open `/hooks` and trust the Konvu hook.
+Setup starts the local collector, opens the dashboard at `http://127.0.0.1:7824`, and wires each client to exactly one place: the Claude Code CLI shows usage in its status line, Claude Desktop and Codex Desktop append a usage box to the reply, and the Codex CLI keeps its Stop hook summary. The box appears when the last prompt used a tool, so ordinary questions stay uncluttered. Restart both desktop apps after setup; in Codex, open `/hooks` and trust the Konvu hooks.
 
 ## Use it
 

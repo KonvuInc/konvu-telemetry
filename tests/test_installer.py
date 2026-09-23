@@ -11,6 +11,54 @@ from konvu_telemetry import installer
 
 
 class InstallerTests(unittest.TestCase):
+    def test_console_launcher_skips_a_stale_py_path_injected_script(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stale = root / "stale" / "konvu-telemetry"
+            current = root / "current" / "bin" / "konvu-telemetry"
+            stale.parent.mkdir()
+            current.parent.mkdir(parents=True)
+            stale.write_text(
+                "#!/bin/sh\n"
+                'if [ -n "$PYTHONPATH" ]; then\n'
+                "  echo claude-prompt-hook codex-prompt-hook\n"
+                "else\n"
+                "  echo claude-hook codex-hook\n"
+                "fi\n"
+            )
+            current.write_text("#!/bin/sh\necho claude-prompt-hook codex-prompt-hook\n")
+            stale.chmod(0o700)
+            current.chmod(0o700)
+            with (
+                patch.object(installer.sys, "argv", [str(stale), "setup"]),
+                patch.object(installer.site, "USER_BASE", str(root / "current")),
+                patch.object(
+                    installer.sysconfig,
+                    "get_path",
+                    return_value=str(root / "missing"),
+                ),
+                patch.dict(os.environ, {"PYTHONPATH": str(root / "source")}),
+            ):
+                self.assertEqual(installer.console_launcher(), current)
+
+    def test_console_launcher_rejects_only_stale_scripts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stale = root / "konvu-telemetry"
+            stale.write_text("#!/bin/sh\necho claude-hook codex-hook\n")
+            stale.chmod(0o700)
+            with (
+                patch.object(installer.sys, "argv", [str(stale), "setup"]),
+                patch.object(installer.site, "USER_BASE", None),
+                patch.object(
+                    installer.sysconfig,
+                    "get_path",
+                    return_value=str(root / "missing"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "current telemetry launcher"),
+            ):
+                installer.console_launcher()
+
     def test_successful_setup_records_a_duration_bucket(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             with (
@@ -22,9 +70,13 @@ class InstallerTests(unittest.TestCase):
                     installer, "install_claude_statusline", return_value="installed"
                 ),
                 patch.object(
-                    installer, "install_claude_desktop_hook", return_value="installed"
+                    installer, "install_claude_prompt_hook", return_value="installed"
                 ),
+                patch.object(installer, "remove_claude_stop_hook", return_value=False),
                 patch.object(installer, "install_codex_hook", return_value="installed"),
+                patch.object(
+                    installer, "install_codex_prompt_hook", return_value="installed"
+                ),
                 patch.object(installer, "install_launch_agent"),
                 patch.object(installer, "record_setup_completed") as recorded,
             ):
@@ -51,9 +103,13 @@ class InstallerTests(unittest.TestCase):
                     installer, "install_claude_statusline", return_value="installed"
                 ),
                 patch.object(
-                    installer, "install_claude_desktop_hook", return_value="installed"
+                    installer, "install_claude_prompt_hook", return_value="installed"
                 ),
+                patch.object(installer, "remove_claude_stop_hook", return_value=False),
                 patch.object(installer, "install_codex_hook", return_value="installed"),
+                patch.object(
+                    installer, "install_codex_prompt_hook", return_value="installed"
+                ),
                 patch.object(installer, "install_launch_agent"),
                 patch.object(installer, "record_setup_completed") as recorded,
             ):
@@ -91,17 +147,12 @@ class InstallerTests(unittest.TestCase):
                 patch.object(installer, "console_launcher", return_value=console),
             ):
                 self.assertEqual(installer.install_claude_statusline(), "installed")
-                self.assertEqual(installer.install_claude_desktop_hook(), "installed")
                 self.assertEqual(installer.install_codex_hook(), "installed")
             settings = json.loads((claude / "settings.json").read_text())
             hooks = json.loads((codex / "hooks.json").read_text())
             self.assertIn(installer.LAUNCHER_NAME, settings["statusLine"]["command"])
             self.assertNotIn("-I", settings["statusLine"]["command"])
-            self.assertEqual(settings["hooks"]["Stop"][0]["hooks"][0]["timeout"], 5)
-            self.assertIn(
-                installer.LAUNCHER_NAME,
-                settings["hooks"]["Stop"][0]["hooks"][0]["command"],
-            )
+            self.assertNotIn("Stop", settings["hooks"])
             self.assertEqual(
                 hooks["hooks"]["Stop"][0]["hooks"][0]["command"], "keep-me"
             )
@@ -160,39 +211,108 @@ class InstallerTests(unittest.TestCase):
             )
             self.assertFalse(wrapper.exists())
 
-    def test_claude_desktop_hook_update_and_removal_keep_other_hooks(self) -> None:
+    def test_setup_removes_a_legacy_claude_stop_hook_and_keeps_foreign_ones(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            claude_path = home / ".claude" / "settings.json"
+            codex_path = home / ".codex" / "hooks.json"
+            claude_path.parent.mkdir()
+            codex_path.parent.mkdir()
+            codex_path.write_text("{}")
+            console = home / "bin" / "konvu-telemetry"
+            console.parent.mkdir()
+            console.write_text("#!/bin/sh\nexit 0\n")
+            console.chmod(0o700)
+            foreign = {"hooks": [{"type": "command", "command": "keep-me"}]}
+            with (
+                patch.object(installer.Path, "home", return_value=home),
+                patch.object(installer, "console_launcher", return_value=console),
+                patch.object(installer.sys, "platform", "darwin"),
+                patch.object(installer, "stop_launch_agent"),
+                patch.object(installer, "start_launch_agent"),
+            ):
+                legacy = {
+                    "type": "command",
+                    "command": f"{installer.launcher_path()} claude-hook",
+                    "timeout": 5,
+                }
+                claude_path.write_text(
+                    json.dumps({"hooks": {"Stop": [foreign, {"hooks": [legacy]}]}})
+                )
+                self.assertEqual(
+                    installer.setup(60, False)["claude_stop_hook"], "removed"
+                )
+                self.assertEqual(
+                    json.loads(claude_path.read_text())["hooks"]["Stop"], [foreign]
+                )
+                # A second run has nothing left to clean up and must not report otherwise.
+                self.assertEqual(
+                    installer.setup(60, False)["claude_stop_hook"], "absent"
+                )
+                self.assertEqual(
+                    json.loads(claude_path.read_text())["hooks"]["Stop"], [foreign]
+                )
+                self.assertTrue(installer.uninstall()["claude_statusline"])
+            self.assertEqual(
+                json.loads(claude_path.read_text())["hooks"]["Stop"], [foreign]
+            )
+
+    def test_prompt_hooks_are_idempotent_and_leave_other_hooks_alone(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
             claude = home / ".claude"
+            codex = home / ".codex"
             claude.mkdir()
+            codex.mkdir()
             console = home / "bin" / "konvu"
             console.parent.mkdir()
             console.write_text("#!/bin/sh\nexit 0\n")
             console.chmod(0o700)
-            path = claude / "settings.json"
-            path.write_text(
-                json.dumps(
-                    {
-                        "hooks": {
-                            "Stop": [
-                                {"hooks": [{"type": "command", "command": "keep-me"}]}
-                            ]
-                        }
-                    }
-                )
-            )
+            kept = {"hooks": [{"type": "command", "command": "keep-me"}]}
+            for path in (claude / "settings.json", codex / "hooks.json"):
+                path.write_text(json.dumps({"hooks": {"UserPromptSubmit": [kept]}}))
             with (
                 patch.object(installer.Path, "home", return_value=home),
                 patch.object(installer, "console_launcher", return_value=console),
             ):
-                self.assertEqual(installer.install_claude_desktop_hook(), "installed")
-                self.assertEqual(installer.install_claude_desktop_hook(), "updated")
-                self.assertTrue(installer.remove_claude_desktop_hook())
-            groups = json.loads(path.read_text())["hooks"]["Stop"]
-            self.assertEqual(
-                groups,
-                [{"hooks": [{"type": "command", "command": "keep-me"}]}],
-            )
+                self.assertEqual(installer.install_claude_prompt_hook(), "installed")
+                self.assertEqual(installer.install_claude_prompt_hook(), "updated")
+                self.assertEqual(installer.install_codex_prompt_hook(), "installed")
+                self.assertEqual(installer.install_codex_prompt_hook(), "updated")
+                for path, command in (
+                    (claude / "settings.json", "claude-prompt-hook"),
+                    (codex / "hooks.json", "codex-prompt-hook"),
+                ):
+                    groups = json.loads(path.read_text())["hooks"]["UserPromptSubmit"]
+                    self.assertEqual(len(groups), 2)
+                    self.assertEqual(groups[0], kept)
+                    self.assertEqual(groups[1]["hooks"][0]["timeout"], 5)
+                    self.assertTrue(
+                        installer.is_konvu_hook(
+                            groups[1]["hooks"][0]["command"], command
+                        )
+                    )
+                self.assertTrue(installer.remove_claude_prompt_hook())
+                self.assertFalse(installer.remove_claude_prompt_hook())
+                self.assertTrue(installer.remove_codex_prompt_hook())
+                self.assertFalse(installer.remove_codex_prompt_hook())
+            for path in (claude / "settings.json", codex / "hooks.json"):
+                self.assertEqual(
+                    json.loads(path.read_text())["hooks"]["UserPromptSubmit"], [kept]
+                )
+
+    def test_setup_rejects_a_malformed_user_prompt_submit_hook_list(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            claude_path = home / ".claude" / "settings.json"
+            claude_path.parent.mkdir()
+            (home / ".codex").mkdir()
+            claude_path.write_text(json.dumps({"hooks": {"UserPromptSubmit": {}}}))
+            with patch.object(installer.Path, "home", return_value=home):
+                with self.assertRaisesRegex(ValueError, "hooks.UserPromptSubmit"):
+                    installer.validate_integrations()
 
     def test_similar_command_name_is_not_treated_as_konvu_owned(self) -> None:
         self.assertFalse(installer.is_konvu_command("/tmp/not-konvu-launcher-helper"))
@@ -217,13 +337,50 @@ class InstallerTests(unittest.TestCase):
                 command = installer.collector_command()
             self.assertEqual(command, [str(path)])
             self.assertEqual(path.stat().st_mode & 0o777, 0o700)
-            self.assertEqual(
-                path.read_text(),
+            script = path.read_text()
+            self.assertTrue(script.startswith("#!/bin/sh\nunset PYTHONPATH\n"))
+            self.assertIn(f"[ -x {console} ] || exit 0\n", script)
+            self.assertIn(f'exec {console} "$@"\n', script)
+            self.assertNotIn(" konvu ", script.replace(str(console), ""))
+
+    def test_launcher_never_fails_a_hook_invocation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            console = home / "bin" / "konvu"
+            console.parent.mkdir()
+            # An older build that does not know the subcommand: usage on stderr, exit 2.
+            console.write_text(
                 "#!/bin/sh\n"
-                "unset PYTHONPATH\n"
-                f"[ -x {console} ] || exit 0\n"
-                f'exec {console} "$@"\n',
+                'case "$1" in\n'
+                "*-prompt-hook)\n"
+                "  echo 'usage: konvu-telemetry: invalid choice' >&2\n"
+                "  exit 2\n"
+                "  ;;\n"
+                "esac\n"
+                "printf output\n"
             )
+            console.chmod(0o700)
+            with (
+                patch.object(installer.Path, "home", return_value=home),
+                patch.object(installer, "console_launcher", return_value=console),
+            ):
+                launcher = installer.install_launcher()
+            for command in ("claude-prompt-hook", "codex-prompt-hook"):
+                result = subprocess.run(
+                    [str(launcher), command], capture_output=True, text=True
+                )
+                self.assertEqual(result.returncode, 0, command)
+                self.assertEqual(result.stdout, "", command)
+                self.assertEqual(result.stderr, "", command)
+            working = subprocess.run(
+                [str(launcher), "codex-hook"], capture_output=True, text=True
+            )
+            self.assertEqual((working.returncode, working.stdout), (0, "output\n"))
+            # The status line is not a hook and keeps its own stdout untouched.
+            statusline = subprocess.run(
+                [str(launcher), "statusline"], capture_output=True, text=True
+            )
+            self.assertEqual((statusline.returncode, statusline.stdout), (0, "output"))
 
     def test_private_launcher_exits_cleanly_after_package_removal(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -379,6 +536,13 @@ class InstallerTests(unittest.TestCase):
                 installer.setup(60, False)
                 installed = json.loads(codex_path.read_text())
                 self.assertEqual(len(installed["hooks"]["Stop"]), 2)
+                self.assertEqual(len(installed["hooks"]["UserPromptSubmit"]), 1)
+                self.assertEqual(
+                    len(
+                        json.loads(claude_path.read_text())["hooks"]["UserPromptSubmit"]
+                    ),
+                    1,
+                )
                 self.assertEqual(
                     json.loads(installer.claude_statusline_state_path().read_text())[
                         "statusLine"
@@ -397,8 +561,10 @@ class InstallerTests(unittest.TestCase):
                 result,
                 {
                     "claude_statusline": True,
-                    "claude_desktop_hook": True,
+                    "claude_stop_hook": False,
+                    "claude_prompt_hook": True,
                     "codex_hook": True,
+                    "codex_prompt_hook": True,
                 },
             )
             self.assertEqual(
