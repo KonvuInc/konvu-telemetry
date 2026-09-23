@@ -50,6 +50,7 @@ from konvu_telemetry.fleet_telemetry import (
     _CACHE as TELEMETRY_CACHE,
     TranscriptTelemetry,
     _comparable_forecast,
+    _quota_status,
     _timestamp,
     _quota_windows,
     enrich_snapshot,
@@ -554,6 +555,72 @@ class ServiceTests(unittest.TestCase):
             {"primary": {"used_percent": 0.8, "window_minutes": 300}}, 0
         )
         self.assertEqual(windows[0]["used_percent"], 80.0)
+
+    def test_codex_quota_status_preserves_notification_routing_fields(self) -> None:
+        self.assertEqual(
+            _quota_status(
+                {
+                    "plan_type": "team",
+                    "rate_limit_reached_type": "rate_limit_reached",
+                    "spend_control_reached": False,
+                    "credits": {"has_credits": True, "unlimited": False},
+                }
+            ),
+            {
+                "plan_type": "team",
+                "rate_limit_reached_type": "rate_limit_reached",
+                "spend_control_reached": False,
+                "has_credits": True,
+                "credits_unlimited": False,
+            },
+        )
+
+    def test_newer_default_quota_replaces_stale_codex_alias(self) -> None:
+        stale = TranscriptTelemetry(
+            quotas={
+                "codex": (
+                    100.0,
+                    [
+                        {
+                            "limit_id": "codex",
+                            "window_minutes": 10080,
+                            "used_percent": 100.0,
+                        }
+                    ],
+                    {"rate_limit_reached_type": "rate_limit_reached"},
+                )
+            }
+        )
+        fresh = TranscriptTelemetry(
+            quotas={
+                "default": (
+                    1_000.0,
+                    [
+                        {
+                            "limit_id": "default",
+                            "window_minutes": 10080,
+                            "used_percent": 20.0,
+                        }
+                    ],
+                    {},
+                )
+            }
+        )
+        snapshot: dict[str, object] = {"sessions": []}
+        with patch(
+            "konvu_telemetry.fleet_telemetry.parse_telemetry",
+            side_effect=(stale, fresh),
+        ):
+            enrich_snapshot(snapshot, [], [Path("stale"), Path("fresh")], 1_000.0)
+        quotas = snapshot["account_quotas"]
+        self.assertIsInstance(quotas, dict)
+        assert isinstance(quotas, dict)
+        codex = quotas["codex"]
+        self.assertIsInstance(codex, dict)
+        assert isinstance(codex, dict)
+        self.assertEqual(codex["observed_at"], "1970-01-01T00:16:40+00:00")
+        self.assertNotIn("rate_limit_reached_type", codex)
+        self.assertEqual(codex["windows"], fresh.quotas["default"][1])
 
     def test_claude_sdk_client_is_explicitly_attributed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1474,6 +1541,35 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(
             json.loads(stdout.getvalue()),
             {"systemMessage": "Konvu usage\n💸 $1.2 total\n🧠 50% context"},
+        )
+
+    def test_claude_desktop_hook_records_quota_when_provider_supplies_it(self) -> None:
+        session_id = "00000000-0000-0000-0000-000000000001"
+        with tempfile.TemporaryDirectory() as directory:
+            quota_path = Path(directory) / "claude-quotas.json"
+            payload = {
+                "session_id": session_id,
+                "rate_limits": {
+                    "five_hour": {"utilization": 25},
+                    "seven_day": {"utilization": 50},
+                },
+            }
+            with (
+                patch.object(sys, "stdin", StringIO(json.dumps(payload))),
+                patch(
+                    "konvu_telemetry.display.claude_quota_path",
+                    return_value=quota_path,
+                ),
+                patch(
+                    "konvu_telemetry.display.refreshed_session",
+                    return_value=None,
+                ),
+            ):
+                claude_hook()
+            recorded = json.loads(quota_path.read_text())
+        self.assertEqual(
+            [window["used_percent"] for window in recorded["windows"]],
+            [25, 50],
         )
 
     def test_codex_hook_includes_quota_with_context_and_never_alone(self) -> None:
@@ -2478,6 +2574,7 @@ class ServiceTests(unittest.TestCase):
         sessions = [{"id": "session", "provider": "codex"}]
         account_quotas = {
             "codex": {
+                "observed_at": "1970-01-01T00:01:40+00:00",
                 "windows": [
                     {
                         "limit_id": "default",
@@ -2485,13 +2582,7 @@ class ServiceTests(unittest.TestCase):
                         "window_minutes": 300,
                         "used_percent": 80.0,
                     },
-                    {
-                        "limit_id": "default",
-                        "session_id": "session",
-                        "window_minutes": 10080,
-                        "used_percent": 90.0,
-                    },
-                ]
+                ],
             }
         }
         with tempfile.TemporaryDirectory() as directory:
@@ -2511,41 +2602,492 @@ class ServiceTests(unittest.TestCase):
                             "used_percent": 80,
                             "session_id": "session",
                         },
-                        {
-                            "sequence": 1,
-                            "hot": True,
-                            "window": "weekly",
-                            "used_percent": 90,
-                            "session_id": "session",
-                        },
                     ],
                 )
                 account_quotas["codex"]["windows"][0]["used_percent"] = 81.0
+                account_quotas["codex"]["observed_at"] = "1970-01-01T00:10:40+00:00"
                 apply_notification_tracking(sessions, 100.0 + 9 * 60, account_quotas)
                 self.assertEqual(
                     account_quotas["codex"]["notifications"][0]["sequence"], 1
                 )
+                account_quotas["codex"]["observed_at"] = "1970-01-01T00:11:40+00:00"
                 apply_notification_tracking(sessions, 100.0 + 10 * 60, account_quotas)
                 self.assertEqual(
                     account_quotas["codex"]["notifications"][0]["sequence"], 2
                 )
                 account_quotas["codex"]["windows"][0]["used_percent"] = 20.0
+                account_quotas["codex"]["observed_at"] = "1970-01-01T00:12:40+00:00"
                 apply_notification_tracking(sessions, 100.0 + 11 * 60, account_quotas)
-                self.assertEqual(
-                    account_quotas["codex"]["notifications"],
-                    [
-                        {
-                            "sequence": 1,
-                            "hot": True,
-                            "window": "weekly",
-                            "used_percent": 90,
-                            "session_id": "session",
-                        }
-                    ],
-                )
+                self.assertEqual(account_quotas["codex"]["notifications"], [])
                 account_quotas["codex"]["windows"][0]["used_percent"] = 80.0
+                account_quotas["codex"]["observed_at"] = "1970-01-01T00:13:40+00:00"
                 apply_notification_tracking(sessions, 100.0 + 12 * 60, account_quotas)
         self.assertEqual(account_quotas["codex"]["notifications"][0]["sequence"], 3)
+
+    def test_quota_alerts_emit_one_stream_per_provider(self) -> None:
+        account_quotas = {
+            "claude": {
+                "observed_at": "1970-01-01T00:01:40+00:00",
+                "windows": [
+                    {
+                        "limit_id": "default",
+                        "window_minutes": 300,
+                        "used_percent": 80.0,
+                    },
+                    {
+                        "limit_id": "default",
+                        "window_minutes": 10080,
+                        "used_percent": 90.0,
+                    },
+                ],
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            with patch(
+                "konvu_telemetry.analytics.notification_state_path",
+                return_value=Path(directory) / "notifications.json",
+            ):
+                apply_notification_tracking([], 100.0, account_quotas)
+        self.assertEqual(len(account_quotas["claude"]["notifications"]), 1)
+        self.assertEqual(
+            account_quotas["claude"]["notifications"][0]["window"], "weekly"
+        )
+
+    def test_included_quota_suppresses_money_alerts(self) -> None:
+        session = self.forecast_session(12.0)
+        account_quotas = {
+            "claude": {
+                "observed_at": "1970-01-01T00:01:40+00:00",
+                "windows": [
+                    {
+                        "limit_id": "default",
+                        "window_minutes": 300,
+                        "used_percent": 50.0,
+                        "resets_at": "1970-01-01T00:10:00+00:00",
+                    }
+                ],
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            with patch(
+                "konvu_telemetry.analytics.notification_state_path",
+                return_value=Path(directory) / "notifications.json",
+            ):
+                apply_notification_tracking([session], 100.0, account_quotas)
+        self.assertFalse(session["notification"]["hot"])
+
+    def test_stale_quota_does_not_hide_money_alerts_after_an_auth_change(self) -> None:
+        session = self.forecast_session(12.0, active_at=1_000.0)
+        account_quotas = {
+            "codex": {
+                "observed_at": "1970-01-01T00:01:40+00:00",
+                "windows": [
+                    {
+                        "limit_id": "codex",
+                        "window_minutes": 10080,
+                        "used_percent": 50.0,
+                        "resets_at": "1970-01-08T00:00:00+00:00",
+                    }
+                ],
+            }
+        }
+        session["provider"] = "codex"
+        with tempfile.TemporaryDirectory() as directory:
+            with patch(
+                "konvu_telemetry.analytics.notification_state_path",
+                return_value=Path(directory) / "notifications.json",
+            ):
+                apply_notification_tracking([session], 1_000.0, account_quotas)
+        self.assertTrue(session["notification"]["hot"])
+
+    def test_quota_without_freshness_does_not_hide_money_alerts(self) -> None:
+        session = self.forecast_session(12.0)
+        account_quotas = {
+            "claude": {
+                "windows": [
+                    {
+                        "limit_id": "default",
+                        "window_minutes": 300,
+                        "used_percent": 50.0,
+                    }
+                ]
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            with patch(
+                "konvu_telemetry.analytics.notification_state_path",
+                return_value=Path(directory) / "notifications.json",
+            ):
+                apply_notification_tracking([session], 100.0, account_quotas)
+        self.assertTrue(session["notification"]["hot"])
+
+    def test_invalid_quota_stops_suppressing_an_existing_money_alert(self) -> None:
+        session = self.forecast_session(12.0)
+        account_quotas = {
+            "claude": {
+                "observed_at": "1970-01-01T00:01:40+00:00",
+                "windows": [
+                    {
+                        "limit_id": "default",
+                        "window_minutes": 300,
+                        "used_percent": 50.0,
+                    }
+                ],
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            with patch(
+                "konvu_telemetry.analytics.notification_state_path",
+                return_value=Path(directory) / "notifications.json",
+            ):
+                apply_notification_tracking([session], 100.0, account_quotas)
+                self.assertFalse(session["notification"]["hot"])
+                account_quotas["claude"].pop("observed_at")
+                apply_notification_tracking([session], 101.0, account_quotas)
+        self.assertTrue(session["notification"]["hot"])
+
+    def test_malformed_quota_usage_does_not_suppress_money_alerts(self) -> None:
+        for used_percent in (None, "50", float("nan")):
+            with self.subTest(used_percent=used_percent):
+                session = self.forecast_session(12.0)
+                account_quotas = {
+                    "claude": {
+                        "observed_at": "1970-01-01T00:01:40+00:00",
+                        "windows": [
+                            {
+                                "limit_id": "default",
+                                "window_minutes": 300,
+                                "used_percent": used_percent,
+                            }
+                        ],
+                    }
+                }
+                with tempfile.TemporaryDirectory() as directory:
+                    with patch(
+                        "konvu_telemetry.analytics.notification_state_path",
+                        return_value=Path(directory) / "notifications.json",
+                    ):
+                        apply_notification_tracking([session], 100.0, account_quotas)
+                self.assertTrue(session["notification"]["hot"])
+
+    def test_fresh_empty_quota_does_not_inherit_quota_mode(self) -> None:
+        session = self.forecast_session(12.0)
+        account_quotas = {
+            "claude": {
+                "observed_at": "1970-01-01T00:01:40+00:00",
+                "windows": [
+                    {
+                        "limit_id": "default",
+                        "window_minutes": 300,
+                        "used_percent": 50.0,
+                    }
+                ],
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            with patch(
+                "konvu_telemetry.analytics.notification_state_path",
+                return_value=Path(directory) / "notifications.json",
+            ):
+                apply_notification_tracking([session], 100.0, account_quotas)
+                self.assertFalse(session["notification"]["hot"])
+                account_quotas["claude"] = {
+                    "observed_at": "1970-01-01T00:01:41+00:00",
+                    "windows": [],
+                }
+                apply_notification_tracking([session], 101.0, account_quotas)
+        self.assertTrue(session["notification"]["hot"])
+
+    def test_newer_malformed_quota_blocks_an_older_valid_rollback(self) -> None:
+        session = self.forecast_session(12.0, active_at=201.0)
+        window: dict[str, object] = {
+            "limit_id": "default",
+            "window_minutes": 300,
+            "used_percent": 50.0,
+        }
+        account_quotas = {
+            "claude": {
+                "observed_at": "1970-01-01T00:01:40+00:00",
+                "windows": [window],
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            with patch(
+                "konvu_telemetry.analytics.notification_state_path",
+                return_value=Path(directory) / "notifications.json",
+            ):
+                apply_notification_tracking([session], 200.0, account_quotas)
+                account_quotas["claude"]["observed_at"] = "1970-01-01T00:03:20+00:00"
+                window["used_percent"] = "invalid"
+                apply_notification_tracking([session], 200.0, account_quotas)
+                self.assertTrue(session["notification"]["hot"])
+                account_quotas["claude"]["observed_at"] = "1970-01-01T00:02:30+00:00"
+                window["used_percent"] = 50.0
+                apply_notification_tracking([session], 201.0, account_quotas)
+        self.assertTrue(session["notification"]["hot"])
+
+    def test_exhausted_quota_enables_money_and_suppresses_quota_alerts(self) -> None:
+        session = self.forecast_session(12.0)
+        account_quotas = {
+            "claude": {
+                "observed_at": "1970-01-01T00:01:40+00:00",
+                "windows": [
+                    {
+                        "limit_id": "default",
+                        "window_minutes": 300,
+                        "used_percent": 100.0,
+                        "resets_at": "1970-01-01T00:10:00+00:00",
+                    }
+                ],
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            with patch(
+                "konvu_telemetry.analytics.notification_state_path",
+                return_value=Path(directory) / "notifications.json",
+            ):
+                apply_notification_tracking([session], 100.0, account_quotas)
+        self.assertTrue(session["notification"]["hot"])
+        self.assertEqual(account_quotas["claude"]["notifications"], [])
+
+    def test_scheduled_reset_returns_to_quota_mode_without_a_fresh_sample(self) -> None:
+        session = self.forecast_session(12.0)
+        account_quotas = {
+            "claude": {
+                "observed_at": "1970-01-01T00:01:40+00:00",
+                "windows": [
+                    {
+                        "limit_id": "default",
+                        "window_minutes": 300,
+                        "used_percent": 100.0,
+                        "resets_at": "1970-01-01T00:05:00+00:00",
+                    }
+                ],
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "notifications.json"
+            with patch(
+                "konvu_telemetry.analytics.notification_state_path",
+                return_value=state_path,
+            ):
+                apply_notification_tracking([session], 100.0, account_quotas)
+                self.assertTrue(session["notification"]["hot"])
+                account_quotas["claude"]["observed_at"] = "1970-01-01T00:05:01+00:00"
+                apply_notification_tracking([session], 301.0, account_quotas)
+                self.assertFalse(session["notification"]["hot"])
+                apply_notification_tracking([session], 302.0)
+        self.assertFalse(session["notification"]["hot"])
+
+    def test_scheduled_reset_ignores_a_stale_codex_transcript_snapshot(self) -> None:
+        session = self.forecast_session(12.0)
+        session["provider"] = "codex"
+        account_quotas = {
+            "codex": {
+                "observed_at": "1970-01-01T00:01:40+00:00",
+                "windows": [
+                    {
+                        "limit_id": "codex",
+                        "window_minutes": 300,
+                        "used_percent": 100.0,
+                        "resets_at": "1970-01-01T00:05:00+00:00",
+                    }
+                ],
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            with patch(
+                "konvu_telemetry.analytics.notification_state_path",
+                return_value=Path(directory) / "notifications.json",
+            ):
+                apply_notification_tracking([session], 100.0, account_quotas)
+                self.assertTrue(session["notification"]["hot"])
+                session["last_activity_at"] = "1970-01-01T00:06:41+00:00"
+                apply_notification_tracking([session], 401.0, account_quotas)
+        self.assertFalse(session["notification"]["hot"])
+
+    def test_explicit_provider_exhaustion_enables_money_before_100_percent(
+        self,
+    ) -> None:
+        session = self.forecast_session(12.0)
+        session["provider"] = "codex"
+        account_quotas = {
+            "codex": {
+                "observed_at": "1970-01-01T00:01:40+00:00",
+                "rate_limit_reached_type": "rate_limit_reached",
+                "windows": [
+                    {
+                        "limit_id": "codex",
+                        "window_minutes": 300,
+                        "used_percent": 99.0,
+                        "resets_at": "1970-01-01T00:10:00+00:00",
+                    }
+                ],
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            with patch(
+                "konvu_telemetry.analytics.notification_state_path",
+                return_value=Path(directory) / "notifications.json",
+            ):
+                apply_notification_tracking([session], 100.0, account_quotas)
+        self.assertTrue(session["notification"]["hot"])
+
+    def test_explicit_exhaustion_clears_when_its_first_window_resets(self) -> None:
+        session = self.forecast_session(12.0)
+        session["provider"] = "codex"
+        account_quotas = {
+            "codex": {
+                "observed_at": "1970-01-01T00:01:40+00:00",
+                "rate_limit_reached_type": "rate_limit_reached",
+                "windows": [
+                    {
+                        "limit_id": "codex",
+                        "window_minutes": 300,
+                        "used_percent": 99.0,
+                        "resets_at": "1970-01-01T00:05:00+00:00",
+                    },
+                    {
+                        "limit_id": "codex",
+                        "window_minutes": 10080,
+                        "used_percent": 50.0,
+                        "resets_at": "1970-01-01T00:16:40+00:00",
+                    },
+                ],
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            with patch(
+                "konvu_telemetry.analytics.notification_state_path",
+                return_value=Path(directory) / "notifications.json",
+            ):
+                apply_notification_tracking([session], 100.0, account_quotas)
+                self.assertTrue(session["notification"]["hot"])
+                apply_notification_tracking([session], 301.0, account_quotas)
+        self.assertFalse(session["notification"]["hot"])
+
+    def test_explicit_exhaustion_waits_for_the_highest_used_window_reset(
+        self,
+    ) -> None:
+        session = self.forecast_session(12.0)
+        session["provider"] = "codex"
+        account_quotas = {
+            "codex": {
+                "observed_at": "1970-01-01T00:01:40+00:00",
+                "rate_limit_reached_type": "rate_limit_reached",
+                "windows": [
+                    {
+                        "limit_id": "codex",
+                        "window_minutes": 300,
+                        "used_percent": 20.0,
+                        "resets_at": "1970-01-01T00:05:00+00:00",
+                    },
+                    {
+                        "limit_id": "codex",
+                        "window_minutes": 10080,
+                        "used_percent": 99.0,
+                        "resets_at": "1970-01-01T00:16:40+00:00",
+                    },
+                ],
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            with patch(
+                "konvu_telemetry.analytics.notification_state_path",
+                return_value=Path(directory) / "notifications.json",
+            ):
+                apply_notification_tracking([session], 100.0, account_quotas)
+                apply_notification_tracking([session], 301.0, account_quotas)
+        self.assertTrue(session["notification"]["hot"])
+
+    def test_paid_credits_do_not_masquerade_as_an_included_quota_reset(self) -> None:
+        session = self.forecast_session(12.0)
+        session["provider"] = "codex"
+        account_quotas = {
+            "codex": {
+                "observed_at": "1970-01-01T00:01:40+00:00",
+                "plan_type": "team",
+                "has_credits": True,
+                "spend_control_reached": False,
+                "windows": [
+                    {
+                        "limit_id": "codex",
+                        "window_minutes": 10080,
+                        "used_percent": 100.0,
+                        "resets_at": "1970-01-08T00:00:00+00:00",
+                    }
+                ],
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "notifications.json"
+            with patch(
+                "konvu_telemetry.analytics.notification_state_path",
+                return_value=state_path,
+            ):
+                apply_notification_tracking([session], 100.0, account_quotas)
+            state = json.loads(state_path.read_text())
+        self.assertTrue(session["notification"]["hot"])
+        self.assertTrue(state["provider-mode:codex"]["has_credits"])
+
+    def test_manual_reset_returns_to_quota_mode_on_new_lower_usage(self) -> None:
+        session = self.forecast_session(12.0)
+        window = {
+            "limit_id": "codex",
+            "window_minutes": 10080,
+            "used_percent": 100.0,
+            "resets_at": "1970-01-08T00:00:00+00:00",
+        }
+        account_quotas = {
+            "codex": {
+                "observed_at": "1970-01-01T00:01:40+00:00",
+                "windows": [window],
+            }
+        }
+        session["provider"] = "codex"
+        with tempfile.TemporaryDirectory() as directory:
+            with patch(
+                "konvu_telemetry.analytics.notification_state_path",
+                return_value=Path(directory) / "notifications.json",
+            ):
+                apply_notification_tracking([session], 100.0, account_quotas)
+                self.assertTrue(session["notification"]["hot"])
+                window.update(
+                    {
+                        "used_percent": 2.0,
+                        "resets_at": "1970-01-09T00:00:00+00:00",
+                    }
+                )
+                account_quotas["codex"]["observed_at"] = "1970-01-01T00:01:41+00:00"
+                apply_notification_tracking([session], 101.0, account_quotas)
+        self.assertFalse(session["notification"]["hot"])
+
+    def test_older_quota_observation_cannot_roll_money_mode_back(self) -> None:
+        session = self.forecast_session(12.0, active_at=201.0)
+        session["provider"] = "codex"
+        window = {
+            "limit_id": "codex",
+            "window_minutes": 10080,
+            "used_percent": 100.0,
+            "resets_at": "1970-01-01T00:16:40+00:00",
+        }
+        account_quotas = {
+            "codex": {
+                "observed_at": "1970-01-01T00:03:20+00:00",
+                "windows": [window],
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            with patch(
+                "konvu_telemetry.analytics.notification_state_path",
+                return_value=Path(directory) / "notifications.json",
+            ):
+                apply_notification_tracking([session], 200.0, account_quotas)
+                self.assertTrue(session["notification"]["hot"])
+                account_quotas["codex"]["observed_at"] = "1970-01-01T00:02:30+00:00"
+                window["used_percent"] = 20.0
+                apply_notification_tracking([session], 201.0, account_quotas)
+        self.assertTrue(session["notification"]["hot"])
 
     def test_quota_usage_text_marks_windows_at_the_alert_threshold(self) -> None:
         self.assertEqual(
@@ -2564,6 +3106,7 @@ class ServiceTests(unittest.TestCase):
         sessions = [{"id": "session", "provider": "codex"}]
         account_quotas = {
             "codex": {
+                "observed_at": "1970-01-01T00:01:40+00:00",
                 "windows": [
                     {
                         "limit_id": "default",
@@ -2572,7 +3115,7 @@ class ServiceTests(unittest.TestCase):
                         "used_percent": 80.0,
                         "resets_at": "2026-01-01T05:00:00+00:00",
                     }
-                ]
+                ],
             }
         }
         with tempfile.TemporaryDirectory() as directory:
@@ -2588,6 +3131,7 @@ class ServiceTests(unittest.TestCase):
                         "resets_at": "2026-01-01T10:00:00+00:00",
                     }
                 )
+                account_quotas["codex"]["observed_at"] = "1970-01-01T00:01:41+00:00"
                 apply_notification_tracking(sessions, 101.0, account_quotas)
         self.assertEqual(account_quotas["codex"]["notifications"][0]["sequence"], 2)
 
@@ -2600,7 +3144,10 @@ class ServiceTests(unittest.TestCase):
                 record_claude_quotas(
                     {
                         "rate_limits": {
-                            "five_hour": {"utilization": 0.8},
+                            "five_hour": {
+                                "utilization": 0.8,
+                                "resets_at": 1_735_689_600,
+                            },
                             "seven_day": {"used_percentage": 90},
                         }
                     },
@@ -2623,7 +3170,7 @@ class ServiceTests(unittest.TestCase):
                     "window_minutes": 300,
                     "used_percent": 80.0,
                     "remaining_percent": 20.0,
-                    "resets_at": None,
+                    "resets_at": "2025-01-01T00:00:00+00:00",
                 },
                 {
                     "limit_id": "default",

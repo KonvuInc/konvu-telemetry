@@ -42,7 +42,7 @@ class TranscriptTelemetry:
     )
     completions: list[tuple[float, str | None]] = field(default_factory=list)
     compactions: list[dict[str, object]] = field(default_factory=list)
-    quotas: dict[str, tuple[float, list[dict[str, object]]]] = field(
+    quotas: dict[str, tuple[float, list[dict[str, object]], dict[str, object]]] = field(
         default_factory=dict
     )
     task_tools: dict[float, int] = field(default_factory=dict)
@@ -146,6 +146,28 @@ def _quota_windows(raw: dict[str, object], observed: float) -> list[dict[str, ob
             }
         )
     return windows
+
+
+def _quota_status(raw: dict[str, object]) -> dict[str, object]:
+    """Preserve provider state needed to distinguish included usage from paid usage."""
+    status: dict[str, object] = {}
+    for key in ("plan_type", "rate_limit_reached_type"):
+        value = raw.get(key)
+        if isinstance(value, str):
+            status[key] = value
+    spend_control_reached = raw.get("spend_control_reached")
+    if isinstance(spend_control_reached, bool):
+        status["spend_control_reached"] = spend_control_reached
+    credits = raw.get("credits")
+    if isinstance(credits, dict):
+        for source, target in (
+            ("has_credits", "has_credits"),
+            ("unlimited", "credits_unlimited"),
+        ):
+            value = credits.get(source)
+            if isinstance(value, bool):
+                status[target] = value
+    return status
 
 
 def _claude_quota_snapshot(now: float) -> dict[str, object] | None:
@@ -385,6 +407,7 @@ def _read_telemetry(
                             result.quotas[key] = (
                                 timestamp,
                                 windows,
+                                _quota_status(quotas),
                             )
     except (OSError, UnicodeError):
         pass
@@ -682,7 +705,7 @@ def enrich_snapshot(
 ) -> None:
     """Add explicit transcript telemetry without changing cost accounting."""
     grouped: dict[tuple[str, str], list[TranscriptTelemetry]] = {}
-    quotas: dict[str, tuple[float, list[dict[str, object]]]] = {}
+    quotas: dict[str, tuple[float, list[dict[str, object]], dict[str, object]]] = {}
     sources: tuple[tuple[Provider, list[Path]], ...] = (
         ("claude", claude_paths),
         ("codex", codex_paths),
@@ -745,17 +768,29 @@ def enrich_snapshot(
                     start = _timestamp(iteration.get("started_at"))
                     if start in task_tools:
                         iteration["tool_calls"] = task_tools[start]
-    named = {key: value for key, value in quotas.items() if key != "default"}
-    if (
-        named
-        and "default" in quotas
-        and max(value[0] for value in named.values()) >= quotas["default"][0]
-    ):
-        quotas.pop("default")
+    main_keys = [key for key in ("codex", "default") if key in quotas]
+    main_limit_key = (
+        max(
+            main_keys,
+            key=lambda limit_key: (
+                quotas[limit_key][0],
+                limit_key == "codex",
+            ),
+        )
+        if main_keys
+        else None
+    )
+    for alias in main_keys:
+        if alias != main_limit_key:
+            quotas.pop(alias)
     observed = max((row[0] for row in quotas.values()), default=None)
+    main_quota = quotas.get(main_limit_key) if main_limit_key is not None else None
+    main_status = main_quota[2] if main_quota is not None else {}
+    main_observed = main_quota[0] if main_quota is not None else observed
     account_quotas: dict[str, object] = {
         "codex": {
-            "observed_at": _iso(observed),
+            **main_status,
+            "observed_at": _iso(main_observed),
             "source": "local_transcript",
             "windows": [
                 window for limit_id in sorted(quotas) for window in quotas[limit_id][1]

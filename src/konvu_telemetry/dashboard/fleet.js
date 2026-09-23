@@ -1778,7 +1778,7 @@ function browserAlerts(payload) {
   for (const [provider, quotas] of Object.entries(payload.account_quotas || {})) {
     for (const alert of quotas?.notifications || []) {
       if (!alert?.hot || !Number.isInteger(alert.sequence) || alert.sequence < 1) continue;
-      const key = "konvu-quota-alert-" + provider + "-" + alert.window;
+      const key = "konvu-quota-alert-" + provider;
       if (Number(localStorage.getItem(key) || 0) >= alert.sequence) continue;
       localStorage.setItem(key, String(alert.sequence));
       const notification = new Notification(
