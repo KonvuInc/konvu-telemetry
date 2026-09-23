@@ -54,6 +54,15 @@ class TrackingStoreTests(unittest.TestCase):
 
             self.assertFalse(store.status().enabled)
 
+    def test_existing_telemetry_choice_is_preserved_during_setup(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = self.store(Path(temporary))
+
+            store.initialize(default_enabled=False)
+            store.initialize(default_enabled=True)
+
+            self.assertFalse(store.status().enabled)
+
     def test_corrupt_state_fails_closed_without_being_replaced(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
@@ -410,54 +419,15 @@ class TrackingStoreTests(unittest.TestCase):
             state = json.loads((directory / "tracking-state.json").read_text())
             self.assertFalse(state["enabled"])
 
-    def test_setup_uses_explicit_telemetry_flag_without_prompting(self) -> None:
+    def test_setup_enables_telemetry_by_default(self) -> None:
         with (
             patch("konvu_telemetry.cli.setup") as configured,
-            patch("konvu_telemetry.cli.telemetry_consent") as consent,
-            redirect_stdout(StringIO()),
-        ):
-            configured.return_value = {}
-            cli.main(["setup", "--telemetry", "on"])
-
-        configured.assert_called_once_with(60, True, True)
-        consent.assert_not_called()
-
-    def test_setup_prompts_for_telemetry_without_a_flag(self) -> None:
-        with (
-            patch("konvu_telemetry.cli.setup") as configured,
-            patch("konvu_telemetry.cli.telemetry_consent", return_value=False),
-            patch("konvu_telemetry.cli.has_tracking_preference", return_value=False),
             redirect_stdout(StringIO()),
         ):
             configured.return_value = {}
             cli.main(["setup"])
 
-        configured.assert_called_once_with(60, True, False)
-
-    def test_setup_keeps_a_saved_telemetry_choice_without_prompting(self) -> None:
-        with (
-            patch("konvu_telemetry.cli.setup") as configured,
-            patch("konvu_telemetry.cli.telemetry_consent") as consent,
-            patch("konvu_telemetry.cli.has_tracking_preference", return_value=True),
-            redirect_stdout(StringIO()),
-        ):
-            configured.return_value = {}
-            cli.main(["setup"])
-
-        configured.assert_called_once_with(60, True, False)
-        consent.assert_not_called()
-
-    def test_telemetry_consent_prompt_explains_what_stays_local(self) -> None:
-        with (
-            patch.object(cli.sys.stdin, "isatty", return_value=True),
-            patch("builtins.input", return_value="yes") as asked,
-        ):
-            self.assertTrue(cli.telemetry_consent())
-
-        asked.assert_called_once_with(
-            "Help improve Konvu with anonymous product insights? Your prompts, code, "
-            "files, and Claude/Codex usage stay on your computer. [y/N] "
-        )
+        configured.assert_called_once_with(60, True)
 
     def test_cli_opt_out_does_not_report_success_when_write_fails(self) -> None:
         with patch(
@@ -552,14 +522,6 @@ class TrackingStoreTests(unittest.TestCase):
 
         self.assertEqual(stopped.exception.code, 0)
         self.assertIn("telemetry", output.getvalue())
-
-    def test_setup_help_explains_the_telemetry_flag(self) -> None:
-        output = StringIO()
-        with redirect_stdout(output), self.assertRaises(SystemExit) as stopped:
-            cli.main(["setup", "--help"])
-
-        self.assertEqual(stopped.exception.code, 0)
-        self.assertIn("without an interactive prompt", output.getvalue())
 
 
 if __name__ == "__main__":

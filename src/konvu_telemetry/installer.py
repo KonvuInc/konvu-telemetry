@@ -487,7 +487,7 @@ def restore_installation(states: list[FileState], restart_service: bool) -> None
 
 
 def setup(
-    interval: int, open_browser: bool, tracking_enabled: bool = False
+    interval: int, open_browser: bool, tracking_enabled: bool = True
 ) -> dict[str, str]:
     if sys.platform != "darwin":
         raise RuntimeError("Konvu setup currently supports macOS only")
