@@ -377,10 +377,7 @@ def usage_box_lines(session: dict[str, object], quota_text: str) -> list[str]:
 
 def prompt_context_payload(session: dict[str, object], quota_text: str) -> str:
     """Serialize the usage summary as UserPromptSubmit context the model must echo back."""
-    # Prose surfaces render proportionally, so only the corners survive; the bars would not align.
-    body = "\n".join(
-        line.removeprefix("│ ") for line in usage_box_lines(session, quota_text)
-    )
+    body = "\n".join(usage_box_lines(session, quota_text))
     return json.dumps(
         {
             "hookSpecificOutput": {
