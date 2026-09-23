@@ -58,7 +58,7 @@ Raw transcripts remain in `~/.claude/projects` and `~/.codex/sessions`. Normaliz
 | `KONVU_LIVE_USAGE_CODEX_DIR` | Codex transcript roots, separated by the platform path separator |
 | `KONVU_TELEMETRY_PRICING_PATH` | Local pricing JSON file |
 
-Setup asks before enabling anonymous product analytics; pressing Enter leaves it disabled. Use `konvu-telemetry setup --telemetry on` for unattended setup, `konvu-telemetry telemetry off` to disable it and delete pending events, or `konvu-telemetry telemetry status` to inspect the local preference.
+Setup enables anonymous product analytics by default and preserves an existing choice. Run `konvu-telemetry telemetry off` to disable it and delete pending events, `konvu-telemetry telemetry on` to re-enable it, or `konvu-telemetry telemetry status` to inspect the local preference.
 
 ## Failure behavior
 
