@@ -12,7 +12,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 from .config import (
-    ACTIVITY_FRESHNESS_SECONDS,
     ALERT_QUOTA_5H_PERCENT,
     ALERT_QUOTA_WEEKLY_PERCENT,
     ALLOWED_PROVIDERS,
@@ -505,13 +504,11 @@ def codex_prompt_hook() -> None:
 
 
 def refreshed_session(provider: str, session_id: str) -> dict[str, object] | None:
-    """Read one recent rendered session from the collector snapshot."""
+    """Read one rendered session from the collector snapshot."""
     if provider not in ALLOWED_PROVIDERS or not valid_session_id(session_id):
         return None
     path = session_path(provider, session_id)
     try:
-        if time.time() - path.stat().st_mtime > ACTIVITY_FRESHNESS_SECONDS:
-            return None
         payload = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError, ValueError):
         return None

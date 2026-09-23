@@ -426,12 +426,26 @@ class TrackingStoreTests(unittest.TestCase):
         with (
             patch("konvu_telemetry.cli.setup") as configured,
             patch("konvu_telemetry.cli.telemetry_consent", return_value=False),
+            patch("konvu_telemetry.cli.has_tracking_preference", return_value=False),
             redirect_stdout(StringIO()),
         ):
             configured.return_value = {}
             cli.main(["setup"])
 
         configured.assert_called_once_with(60, True, False)
+
+    def test_setup_keeps_a_saved_telemetry_choice_without_prompting(self) -> None:
+        with (
+            patch("konvu_telemetry.cli.setup") as configured,
+            patch("konvu_telemetry.cli.telemetry_consent") as consent,
+            patch("konvu_telemetry.cli.has_tracking_preference", return_value=True),
+            redirect_stdout(StringIO()),
+        ):
+            configured.return_value = {}
+            cli.main(["setup"])
+
+        configured.assert_called_once_with(60, True, False)
+        consent.assert_not_called()
 
     def test_telemetry_consent_prompt_explains_what_stays_local(self) -> None:
         with (
