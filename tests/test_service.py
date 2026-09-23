@@ -1514,9 +1514,10 @@ class ServiceTests(unittest.TestCase):
         )
         context = payload["hookSpecificOutput"]["additionalContext"]
         self.assertIn("verbatim as the very last thing in your reply", context)
-        self.assertIn("╭─ Konvu usage", context)
-        self.assertIn("│ 💸 $25.0 total · $5.0 for the next 10 prompts", context)
-        self.assertTrue(context.endswith("╰─\n```"))
+        self.assertNotIn("╭─", context)
+        self.assertNotIn("```", context)
+        self.assertIn("💸 $25.0 total · $5.0 for the next 10 prompts", context)
+        self.assertTrue(context.endswith("% context"))
         self.assertEqual(self.run_claude_hook(claude_prompt_hook, "cli", session), "")
         self.assertEqual(self.run_claude_hook(claude_prompt_hook, None, session), "")
 
@@ -1609,7 +1610,7 @@ class ServiceTests(unittest.TestCase):
         self.assertNotIn("systemMessage", payload)
         context = payload["hookSpecificOutput"]["additionalContext"]
         self.assertIn("verbatim as the very last thing in your reply", context)
-        self.assertIn("│ 🧠 65% context · 3% weekly limit", context)
+        self.assertIn("🧠 65% context · 3% weekly limit", context)
         for client in ("cli", "unknown"):
             self.assertEqual(
                 json.loads(self.run_codex_hook(codex_prompt_hook, client, session)),
@@ -1653,7 +1654,7 @@ class ServiceTests(unittest.TestCase):
 
     def test_desktop_boxes_show_only_when_the_last_prompt_used_a_tool(self) -> None:
         self.assertIn(
-            "╭─ Konvu usage",
+            "💸 ",
             self.injected_context(
                 self.run_claude_hook(
                     claude_prompt_hook, "claude-desktop", self.usage_session(1)
@@ -1661,7 +1662,7 @@ class ServiceTests(unittest.TestCase):
             ),
         )
         self.assertIn(
-            "╭─ Konvu usage",
+            "💸 ",
             self.injected_context(
                 self.run_codex_hook(codex_prompt_hook, "desktop", self.usage_session(1))
             ),

@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Show usage in Claude Desktop and Codex Desktop, which collapse hook system messages into a hidden notice. Setup registers a `UserPromptSubmit` hook per provider that injects the usage box as context, and the reply ends with it.
+- Show usage in Claude Desktop and Codex Desktop, which collapse hook system messages into a hidden notice. Setup registers a `UserPromptSubmit` hook per provider that injects the usage lines as context, and the reply ends with them as plain italic text.
 - Each client now reports usage in exactly one place: the Claude Code CLI in its status line, Claude Desktop in the appended box, the Codex CLI in its Stop hook box, and Codex Desktop in the appended box.
 - Stop reporting Claude usage from a Stop hook. Setup removes the Claude `Stop` entry earlier versions installed, leaving any hooks you added yourself untouched, and the `claude-hook` command stays accepted but silent for settings written by older versions.
 - Suppress the Codex Stop hook on Codex Desktop so a turn is not reported twice. Codex CLI output is unchanged.

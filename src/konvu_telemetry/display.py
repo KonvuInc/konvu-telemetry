@@ -33,11 +33,10 @@ from .storage import (
 )
 
 # Desktop clients hide hook system messages, so the box has to ride in as model context instead.
-# The fence is what keeps the box characters aligned; chat surfaces render prose proportionally.
 PROMPT_BOX_INSTRUCTION = (
-    "Append the block below verbatim as the very last thing in your reply, "
+    "Append the lines below verbatim as the very last thing in your reply, "
     "after all other text including any closing line, with no commentary. "
-    "Keep it inside the fenced code block so the box stays aligned."
+    "Write them as ordinary italic text, not as a code block or a quote."
 )
 
 
@@ -377,13 +376,18 @@ def usage_box_lines(session: dict[str, object], quota_text: str) -> list[str]:
 
 
 def prompt_context_payload(session: dict[str, object], quota_text: str) -> str:
-    """Serialize the usage box as UserPromptSubmit context the model must echo back."""
-    box = "\n".join(usage_box_lines(session, quota_text))
+    """Serialize the usage summary as UserPromptSubmit context the model must echo back."""
+    # Prose surfaces render proportionally, so the borders are dropped rather than misaligned.
+    body = "\n".join(
+        line.removeprefix("│ ")
+        for line in usage_box_lines(session, quota_text)
+        if line not in {"╭─ Konvu usage", "╰─"}
+    )
     return json.dumps(
         {
             "hookSpecificOutput": {
                 "hookEventName": "UserPromptSubmit",
-                "additionalContext": f"{PROMPT_BOX_INSTRUCTION}\n\n```\n{box}\n```",
+                "additionalContext": f"{PROMPT_BOX_INSTRUCTION}\n\n{body}",
             }
         }
     )
