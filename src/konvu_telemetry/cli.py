@@ -8,21 +8,7 @@ import sys
 
 from .collector import main as collector_main
 from .installer import service_status, setup, uninstall
-from .tracking import has_tracking_preference, set_tracking_enabled, tracking_status
-
-
-def telemetry_consent() -> bool:
-    """Ask interactive setup users before enabling product analytics."""
-    if not sys.stdin.isatty():
-        return False
-    try:
-        response = input(
-            "Help improve Konvu with anonymous product insights? Your prompts, code, "
-            "files, and Claude/Codex usage stay on your computer. [y/N] "
-        )
-    except EOFError:
-        return False
-    return response.strip().lower() in {"y", "yes"}
+from .tracking import set_tracking_enabled, tracking_status
 
 
 def installer_main(arguments: list[str]) -> None:
@@ -30,23 +16,11 @@ def installer_main(arguments: list[str]) -> None:
     parser.add_argument("command", choices=["setup", "status", "uninstall"])
     parser.add_argument("--interval", type=int, default=60)
     parser.add_argument("--no-browser", action="store_true")
-    parser.add_argument(
-        "--telemetry",
-        choices=["on", "off"],
-        help="Set anonymous telemetry without an interactive prompt.",
-    )
     args = parser.parse_args(arguments)
     if args.command == "setup":
-        tracking_enabled = (
-            args.telemetry == "on"
-            if args.telemetry is not None
-            else False
-            if has_tracking_preference()
-            else telemetry_consent()
-        )
         print(
             json.dumps(
-                setup(max(1, args.interval), not args.no_browser, tracking_enabled),
+                setup(max(1, args.interval), not args.no_browser),
                 indent=2,
             )
         )

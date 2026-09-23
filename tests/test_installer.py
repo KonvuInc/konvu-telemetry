@@ -84,9 +84,9 @@ class InstallerTests(unittest.TestCase):
 
         recorded.assert_called_once()
         self.assertIsInstance(recorded.call_args.args[0], float)
-        self.assertFalse(recorded.call_args.kwargs["default_enabled"])
+        self.assertTrue(recorded.call_args.kwargs["default_enabled"])
 
-    def test_setup_respects_explicit_telemetry_consent(self) -> None:
+    def test_setup_can_explicitly_enable_telemetry(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
             launch_agent = (
