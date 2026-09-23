@@ -8,7 +8,7 @@ import sys
 
 from .collector import main as collector_main
 from .installer import service_status, setup, uninstall
-from .tracking import set_tracking_enabled, tracking_status
+from .tracking import has_tracking_preference, set_tracking_enabled, tracking_status
 
 
 def telemetry_consent() -> bool:
@@ -40,6 +40,8 @@ def installer_main(arguments: list[str]) -> None:
         tracking_enabled = (
             args.telemetry == "on"
             if args.telemetry is not None
+            else False
+            if has_tracking_preference()
             else telemetry_consent()
         )
         print(
