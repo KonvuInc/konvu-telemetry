@@ -524,6 +524,5 @@ class TrackingStoreTests(unittest.TestCase):
         self.assertIn("telemetry", output.getvalue())
 
 
-
 if __name__ == "__main__":
     unittest.main()
