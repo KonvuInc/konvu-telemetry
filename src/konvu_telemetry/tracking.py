@@ -476,6 +476,11 @@ def set_tracking_enabled(enabled: bool) -> None:
     _store().set_enabled(enabled)
 
 
+def has_tracking_preference() -> bool:
+    """Report whether setup has already recorded a local telemetry choice."""
+    return tracking_state_path().exists()
+
+
 def tracking_status() -> TrackingStatus:
     return _store().status()
 
