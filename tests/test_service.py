@@ -1574,6 +1574,8 @@ class ServiceTests(unittest.TestCase):
             "context_tokens": 650,
             "context_window_tokens": 1000,
         }
+        # Byte-for-byte: the CLI box is unchanged, and quota rides the context line rather
+        # than appearing on one of its own.
         self.assertEqual(
             json.loads(self.run_codex_hook(codex_hook, "cli", session)),
             {
@@ -1802,22 +1804,6 @@ class ServiceTests(unittest.TestCase):
             for path in (tui, exec_run, broken, root / "missing.jsonl"):
                 self.assertFalse(codex_is_desktop(path), path.name)
             self.assertFalse(codex_is_desktop(None))
-
-    def test_codex_hook_includes_quota_with_context_and_never_alone(self) -> None:
-        session = {
-            "id": "00000000-0000-0000-0000-000000000001",
-            "total_cost_usd": 25.4,
-            "cost_status": "complete",
-            "projected_next_10_tasks_usd": 4.9,
-            "context_tokens": 650,
-            "context_window_tokens": 1000,
-        }
-        self.assertIn(
-            "🧠 65% context · 3% weekly limit",
-            json.loads(self.run_codex_hook(codex_hook, "cli", session))[
-                "systemMessage"
-            ],
-        )
 
     def test_task_series_preserves_empty_prompts(self) -> None:
         event = UsageEvent(

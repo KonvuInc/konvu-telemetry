@@ -37,6 +37,7 @@ PROMPT_BOX_INSTRUCTION = (
     "after all other text including any closing line, with no commentary. "
     "Write them as ordinary italic text, not as a code block or a quote."
 )
+SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
 
 def record_claude_quotas(payload: dict[str, object], session_id: str) -> None:
@@ -268,30 +269,9 @@ def statusline() -> None:
         print("Konvu live usage: collector starting")
         return
     record_claude_quotas(payload, session_id)
-    snapshot = refreshed_session("claude", session_id)
-    if snapshot is None:
-        print("Konvu live usage: collector starting")
-        return
-    try:
-        session = snapshot
-    except (OSError, json.JSONDecodeError):
-        session = None
-    if not isinstance(session, dict):
-        sessions = snapshot.get("sessions")
-        session = (
-            next(
-                (
-                    item
-                    for item in sessions
-                    if isinstance(item, dict) and item.get("id") == session_id
-                ),
-                None,
-            )
-            if isinstance(sessions, list)
-            else None
-        )
+    session = refreshed_session("claude", session_id)
     if session is None:
-        print("Konvu live usage: waiting for this session's local file")
+        print("Konvu live usage: collector starting")
         return
     context = payload.get("context_window")
     used_percentage = (
@@ -342,7 +322,7 @@ def codex_is_desktop(transcript: Path | None) -> bool:
 
 
 def usage_box_lines(session: dict[str, object], quota_text: str) -> list[str]:
-    """Build the boxed usage summary shared by every rich display surface."""
+    """Build the boxed usage summary shared by the Codex Stop hook and both prompt hooks."""
     total_cost = session.get("total_cost_usd")
     complete = session.get("cost_status") == "complete"
     forecast = session.get("projected_next_10_tasks_usd")
@@ -374,9 +354,12 @@ def usage_box_lines(session: dict[str, object], quota_text: str) -> list[str]:
     return lines
 
 
-def prompt_context_payload(session: dict[str, object], quota_text: str) -> str:
-    """Serialize the usage summary as UserPromptSubmit context the model must echo back."""
-    body = "\n".join(usage_box_lines(session, quota_text))
+def prompt_box_context(provider: str, session_id: str) -> str | None:
+    """Serialize the usage box as UserPromptSubmit context, or None when it stays hidden."""
+    session = refreshed_session(provider, session_id)
+    if not isinstance(session, dict) or not last_prompt_used_a_tool(session):
+        return None
+    body = "\n".join(usage_box_lines(session, recorded_quota_usage_text(provider)))
     return json.dumps(
         {
             "hookSpecificOutput": {
@@ -385,6 +368,21 @@ def prompt_context_payload(session: dict[str, object], quota_text: str) -> str:
             }
         }
     )
+
+
+def codex_hook_request() -> tuple[dict[str, object], str] | None:
+    """Read a Codex hook's stdin payload and the valid session identity it names."""
+    try:
+        payload = json.load(sys.stdin)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    for key in ("session_id", "thread_id", "id"):
+        value = payload.get(key)
+        if isinstance(value, str):
+            return (payload, value) if valid_session_id(value) else None
+    return None
 
 
 def last_prompt_used_a_tool(session: dict[str, object]) -> bool:
@@ -411,23 +409,11 @@ def silent_hook(hook: Callable[[], None]) -> Callable[[], None]:
 @silent_hook
 def codex_hook() -> None:
     """Return the boxed Codex CLI usage message from its local session file."""
-    try:
-        payload = json.load(sys.stdin)
-    except json.JSONDecodeError:
-        print(json.dumps({"suppressOutput": True}))
+    request = codex_hook_request()
+    if request is None:
+        print(SUPPRESS_OUTPUT)
         return
-    if not isinstance(payload, dict):
-        print(json.dumps({"suppressOutput": True}))
-        return
-    session_id: str | None = None
-    for key in ("session_id", "thread_id", "id"):
-        value = payload.get(key)
-        if isinstance(value, str):
-            session_id = value
-            break
-    if session_id is None or not valid_session_id(session_id):
-        print(json.dumps({"suppressOutput": True}))
-        return
+    payload, session_id = request
     turn_id = payload.get("turn_id")
     transcript = codex_hook_transcript(payload, session_id)
     if (
@@ -436,11 +422,11 @@ def codex_hook() -> None:
         or codex_turn_tool_calls(transcript, turn_id) <= 0
         or codex_is_desktop(transcript)
     ):
-        print(json.dumps({"suppressOutput": True}))
+        print(SUPPRESS_OUTPUT)
         return
     session = refreshed_session("codex", session_id)
     if not isinstance(session, dict):
-        print(json.dumps({"suppressOutput": True}))
+        print(SUPPRESS_OUTPUT)
         return
     lines = usage_box_lines(session, recorded_quota_usage_text("codex"))
     print(json.dumps({"systemMessage": "\n" + "\n".join(lines)}))
@@ -467,44 +453,28 @@ def claude_prompt_hook() -> None:
     session_id = payload.get("session_id")
     if not isinstance(session_id, str) or not valid_session_id(session_id):
         return
-    session = refreshed_session("claude", session_id)
-    if not isinstance(session, dict) or not last_prompt_used_a_tool(session):
-        return
-    print(prompt_context_payload(session, recorded_quota_usage_text("claude")))
+    context = prompt_box_context("claude", session_id)
+    if context is not None:
+        print(context)
 
 
 @silent_hook
 def codex_prompt_hook() -> None:
     """Inject the usage box as visible context for a Codex desktop turn."""
-    try:
-        payload = json.load(sys.stdin)
-    except json.JSONDecodeError:
-        print(json.dumps({"suppressOutput": True}))
+    request = codex_hook_request()
+    if request is None:
+        print(SUPPRESS_OUTPUT)
         return
-    if not isinstance(payload, dict):
-        print(json.dumps({"suppressOutput": True}))
-        return
-    session_id: str | None = None
-    for key in ("session_id", "thread_id", "id"):
-        value = payload.get(key)
-        if isinstance(value, str):
-            session_id = value
-            break
-    if session_id is None or not valid_session_id(session_id):
-        print(json.dumps({"suppressOutput": True}))
-        return
+    payload, session_id = request
     if not codex_is_desktop(codex_hook_transcript(payload, session_id)):
-        print(json.dumps({"suppressOutput": True}))
+        print(SUPPRESS_OUTPUT)
         return
-    session = refreshed_session("codex", session_id)
-    if not isinstance(session, dict) or not last_prompt_used_a_tool(session):
-        print(json.dumps({"suppressOutput": True}))
-        return
-    print(prompt_context_payload(session, recorded_quota_usage_text("codex")))
+    context = prompt_box_context("codex", session_id)
+    print(SUPPRESS_OUTPUT if context is None else context)
 
 
 def refreshed_session(provider: str, session_id: str) -> dict[str, object] | None:
-    """Read one rendered session from the collector snapshot."""
+    """Read one session document the collector rendered, whatever its age."""
     if provider not in ALLOWED_PROVIDERS or not valid_session_id(session_id):
         return None
     path = session_path(provider, session_id)
