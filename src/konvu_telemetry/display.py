@@ -40,6 +40,33 @@ PROMPT_BOX_INSTRUCTION = (
 SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
 
+def _quota_reset_at(value: object) -> str | None:
+    """Normalize provider reset timestamps to an ISO-8601 instant."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        epoch = float(value)
+    elif isinstance(value, str):
+        try:
+            epoch = float(value)
+        except ValueError:
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc).isoformat()
+    else:
+        return None
+    if not math.isfinite(epoch) or epoch < 0:
+        return None
+    try:
+        return datetime.fromtimestamp(epoch, timezone.utc).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 def record_claude_quotas(payload: dict[str, object], session_id: str) -> None:
     """Persist fresh Claude quota windows reported to the status-line hook."""
     if not valid_session_id(session_id):
@@ -68,9 +95,9 @@ def record_claude_quotas(payload: dict[str, object], session_id: str) -> None:
         used_percent = min(100.0, used_percent)
         resets_at = next(
             (
-                raw_window.get(key)
+                normalized
                 for key in ("resets_at", "reset_at")
-                if isinstance(raw_window.get(key), str)
+                if (normalized := _quota_reset_at(raw_window.get(key))) is not None
             ),
             None,
         )
@@ -453,6 +480,7 @@ def claude_prompt_hook() -> None:
     session_id = payload.get("session_id")
     if not isinstance(session_id, str) or not valid_session_id(session_id):
         return
+    record_claude_quotas(payload, session_id)
     context = prompt_box_context("claude", session_id)
     if context is not None:
         print(context)

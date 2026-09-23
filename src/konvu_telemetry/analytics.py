@@ -7,12 +7,14 @@ from bisect import bisect_right
 from collections import defaultdict
 from datetime import datetime, timezone
 import logging
+import math
 from pathlib import Path
 from statistics import median
 from threading import Lock, Thread
 from typing import Iterator, Literal, cast
 
 from .config import (
+    ACTIVITY_FRESHNESS_SECONDS,
     ACTIVITY_CLOCK_SKEW_SECONDS,
     ALERT_FORECAST_RENOTIFY_SECONDS,
     ALERT_FORECAST_USD,
@@ -205,7 +207,135 @@ def alert_number(value: object) -> float | None:
     """Return a real number, rejecting booleans and everything non-numeric."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return float(value)
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def _provider_quota_windows(
+    provider: str, quotas: dict[str, object], now: float
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Return the provider's included-usage windows and those not yet reset."""
+    raw_windows = quotas.get("windows")
+    windows = (
+        [window for window in raw_windows if isinstance(window, dict)]
+        if isinstance(raw_windows, list)
+        else []
+    )
+    supported = [
+        window
+        for window in windows
+        if quota_alert_window(window) is not None
+        and window.get("limit_id") in (None, "default", provider)
+    ]
+    active = []
+    for window in supported:
+        reset_at = parse_timestamp(window.get("resets_at"))
+        if reset_at is None or reset_at > now:
+            active.append(window)
+    return supported, active
+
+
+def _provider_notification_mode(
+    provider: str,
+    quotas: dict[str, object] | None,
+    previous: dict[str, object],
+    now: float,
+) -> tuple[str, dict[str, object]]:
+    """Choose quota or money alerts from current provider state and prior reset timing."""
+    observed_at = None
+    malformed_quotas = False
+    if quotas is not None:
+        observed_at = parse_timestamp(quotas.get("observed_at"))
+        previous_observed_at = parse_timestamp(previous.get("observed_at"))
+        if observed_at is None or observed_at - now > ACTIVITY_CLOCK_SKEW_SECONDS:
+            quotas = None
+            malformed_quotas = True
+        elif now - observed_at > ACTIVITY_FRESHNESS_SECONDS or (
+            previous_observed_at is not None and observed_at < previous_observed_at
+        ):
+            quotas = None
+    if quotas is not None and observed_at is not None:
+        supported, active = _provider_quota_windows(provider, quotas, now)
+        reached = quotas.get("rate_limit_reached_type") == "rate_limit_reached"
+        if any(
+            alert_number(window.get("used_percent")) is None for window in supported
+        ):
+            return "money", {
+                "mode": "money",
+                "observed_at": quotas["observed_at"],
+            }
+        reached_candidates = [
+            window
+            for window in supported
+            if (reset := parse_timestamp(window.get("resets_at"))) is None
+            or reset >= observed_at
+        ]
+        reached_window = (
+            max(
+                reached_candidates,
+                key=lambda window: alert_number(window.get("used_percent")) or 0,
+            )
+            if reached_candidates
+            else None
+        )
+        reached_reset = (
+            parse_timestamp(reached_window.get("resets_at"))
+            if reached_window is not None
+            else None
+        )
+        if reached_reset is not None and reached_reset <= now:
+            reached = False
+        if supported or reached:
+            exhausted = [
+                window
+                for window in active
+                if (alert_number(window.get("used_percent")) or 0) >= 100
+            ]
+            mode = "money" if reached or exhausted else "quota"
+            record: dict[str, object] = {
+                "mode": mode,
+                "last_quota_seen_at": now,
+            }
+            reset_times = [
+                reset
+                for window in exhausted
+                if (reset := parse_timestamp(window.get("resets_at"))) is not None
+            ]
+            if reached and not reset_times and reached_reset is not None:
+                reset_times = [reached_reset]
+            if reset_times:
+                record["money_until"] = max(reset_times)
+            record["observed_at"] = quotas["observed_at"]
+            for key in (
+                "plan_type",
+                "rate_limit_reached_type",
+                "spend_control_reached",
+                "has_credits",
+                "credits_unlimited",
+            ):
+                if key in quotas:
+                    record[key] = quotas[key]
+            return mode, record
+        return "money", {
+            "mode": "money",
+            "observed_at": quotas["observed_at"],
+        }
+    if malformed_quotas:
+        return "money", {"mode": "money"}
+    previous_mode = previous.get("mode")
+    money_until = alert_number(previous.get("money_until"))
+    if previous_mode == "money" and money_until is not None and now >= money_until:
+        return "quota", {"mode": "quota", "last_quota_seen_at": now}
+    last_quota_seen_at = alert_number(previous.get("last_quota_seen_at"))
+    if (
+        previous_mode == "quota"
+        and last_quota_seen_at is not None
+        and now - last_quota_seen_at > ACTIVITY_FRESHNESS_SECONDS
+    ):
+        return "money", {"mode": "money"}
+    if previous_mode in ("quota", "money"):
+        return str(previous_mode), dict(previous)
+    return "money", {"mode": "money"}
 
 
 def apply_notification_tracking(
@@ -219,6 +349,24 @@ def apply_notification_tracking(
     except (OSError, json.JSONDecodeError):
         raw_state = {}
     state = raw_state if isinstance(raw_state, dict) else {}
+    quota_map = account_quotas or {}
+    providers = {provider for provider in quota_map if isinstance(provider, str)}
+    for session in sessions:
+        provider = session.get("provider")
+        if isinstance(provider, str):
+            providers.add(provider)
+    provider_modes: dict[str, str] = {}
+    for provider in providers:
+        key = f"provider-mode:{provider}"
+        previous = state.get(key)
+        previous_record = previous if isinstance(previous, dict) else {}
+        raw_quotas = quota_map.get(provider)
+        provider_quotas = raw_quotas if isinstance(raw_quotas, dict) else None
+        mode, record = _provider_notification_mode(
+            provider, provider_quotas, previous_record, now
+        )
+        provider_modes[provider] = mode
+        state[key] = record
     for session in sessions:
         session_id = session.get("id")
         provider = session.get("provider")
@@ -241,7 +389,8 @@ def apply_notification_tracking(
         coverage = basis.get("coverage") if isinstance(basis, dict) else None
         last_activity = parse_timestamp(session.get("last_activity_at"))
         if (
-            forecast is None
+            provider_modes.get(provider) == "quota"
+            or forecast is None
             # A forecast borrowed from a median is display-only; the session has not earned it.
             or coverage not in (None, "fully_priced")
             or session.get("cost_status") != "complete"
@@ -254,13 +403,16 @@ def apply_notification_tracking(
         ):
             # Forget the alerted peak, but keep the clock: the repeat floor spans cooldowns.
             cooled = alert_number(record.get("last_notified_at"))
-            record = {"sequence": int(record.get("sequence", 0)), "hot": False}
+            record = {
+                "sequence": int(alert_number(record.get("sequence")) or 0),
+                "hot": False,
+            }
             if cooled is not None:
                 record["last_notified_at"] = cooled
             state[key] = record
             session["notification"] = dict(record)
             continue
-        sequence = int(record.get("sequence", 0))
+        sequence = int(alert_number(record.get("sequence")) or 0)
         last_notified_at = alert_number(record.get("last_notified_at"))
         last_forecast = alert_number(record.get("last_forecast_usd"))
         if last_notified_at is None:
@@ -283,79 +435,69 @@ def apply_notification_tracking(
         state[key] = record
         # Display-only: the median no longer gates the alert.
         session["notification"] = {**record, "overhead_percent": overhead}
-    for provider, quotas in (account_quotas or {}).items():
-        if not isinstance(provider, str) or not isinstance(quotas, dict):
+    for provider, raw_provider_quotas in quota_map.items():
+        if not isinstance(provider, str) or not isinstance(raw_provider_quotas, dict):
             continue
-        raw_windows = quotas.get("windows")
-        windows = (
-            [window for window in raw_windows if isinstance(window, dict)]
-            if isinstance(raw_windows, list)
-            else []
-        )
+        provider_quotas = raw_provider_quotas
         notifications: list[dict[str, object]] = []
+        quota_key = f"quota:{provider}"
+        previous = state.get(quota_key)
+        record = previous if isinstance(previous, dict) else {}
+        if provider_modes.get(provider) != "quota":
+            state[quota_key] = {**record, "hot": False}
+            provider_quotas["notifications"] = notifications
+            continue
+        _, windows = _provider_quota_windows(provider, provider_quotas, now)
+        candidates: list[tuple[float, dict[str, object], str]] = []
         for window in windows:
             alert_window = quota_alert_window(window)
-            used_percent = window.get("used_percent")
-            if alert_window is None or not isinstance(used_percent, (int, float)):
-                continue
-            source_session_id = window.get("session_id")
-            target_session = next(
-                (
-                    session
-                    for session in sessions
-                    if session.get("provider") == provider
-                    and session.get("id") == source_session_id
-                ),
-                None,
-            )
-            if target_session is None or not isinstance(source_session_id, str):
+            used_percent = alert_number(window.get("used_percent"))
+            if alert_window is None or used_percent is None:
                 continue
             window_name, threshold = alert_window
-            limit_id = window.get("limit_id")
-            key = f"quota:{provider}:{limit_id if isinstance(limit_id, str) else 'default'}:{window_name}"
-            previous = state.get(key)
-            record = previous if isinstance(previous, dict) else {}
-            reset_at = window.get("resets_at")
-            reset_changed = (
-                isinstance(reset_at, str)
-                and isinstance(record.get("reset_at"), str)
-                and reset_at != record["reset_at"]
-            )
-            if used_percent < threshold:
-                record["hot"] = False
-                if isinstance(reset_at, str):
-                    record["reset_at"] = reset_at
-                state[key] = record
-                continue
-            last_notified_at = record.get("last_notified_at")
-            last_used_percent = record.get("last_used_percent")
-            first_alert = record.get("hot") is not True or reset_changed
-            rising = (
-                isinstance(last_used_percent, (int, float))
-                and used_percent > last_used_percent
-            )
-            may_renotify = (
-                isinstance(last_notified_at, (int, float))
-                and now - last_notified_at >= ALERT_QUOTA_RENOTIFY_SECONDS
-            )
-            if first_alert or (may_renotify and rising):
-                record["sequence"] = int(record.get("sequence", 0)) + 1
-                record["last_notified_at"] = now
-                record["last_used_percent"] = used_percent
-            record["hot"] = True
-            if isinstance(reset_at, str):
-                record["reset_at"] = reset_at
-            state[key] = record
-            notifications.append(
-                {
-                    "sequence": int(record.get("sequence", 0)),
-                    "hot": True,
-                    "window": window_name,
-                    "used_percent": round(used_percent),
-                    "session_id": source_session_id,
-                }
-            )
-        quotas["notifications"] = notifications
+            if used_percent >= threshold:
+                candidates.append((used_percent, window, window_name))
+        if not candidates:
+            state[quota_key] = {**record, "hot": False}
+            provider_quotas["notifications"] = notifications
+            continue
+        used_percent, window, window_name = max(
+            candidates,
+            key=lambda item: (
+                item[0],
+                -(alert_number(item[1].get("window_minutes")) or 0),
+            ),
+        )
+        reset_at = window.get("resets_at")
+        reset_changed = isinstance(reset_at, str) and reset_at != record.get("reset_at")
+        last_notified_at = alert_number(record.get("last_notified_at"))
+        last_used_percent = alert_number(record.get("last_used_percent"))
+        first_alert = record.get("hot") is not True or reset_changed
+        rising = last_used_percent is not None and used_percent > last_used_percent
+        may_renotify = (
+            last_notified_at is not None
+            and now - last_notified_at >= ALERT_QUOTA_RENOTIFY_SECONDS
+        )
+        if first_alert or (may_renotify and rising):
+            record["sequence"] = int(alert_number(record.get("sequence")) or 0) + 1
+            record["last_notified_at"] = now
+            record["last_used_percent"] = used_percent
+        record["hot"] = True
+        record["window"] = window_name
+        if isinstance(reset_at, str):
+            record["reset_at"] = reset_at
+        state[quota_key] = record
+        source_session_id = window.get("session_id")
+        notification: dict[str, object] = {
+            "sequence": int(alert_number(record.get("sequence")) or 0),
+            "hot": True,
+            "window": window_name,
+            "used_percent": round(used_percent),
+        }
+        if isinstance(source_session_id, str):
+            notification["session_id"] = source_session_id
+        notifications.append(notification)
+        provider_quotas["notifications"] = notifications
     write_private_json(notification_state_path(), state)
 
 
