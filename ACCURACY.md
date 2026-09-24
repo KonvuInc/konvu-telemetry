@@ -8,6 +8,8 @@ Each recorded model call is priced from the bundled LiteLLM snapshot using new i
 
 The snapshot source and SHA-256 are recorded in `NOTICE`. The scheduled pricing workflow validates required models, updates the snapshot and checksum together, and opens a reviewable pull request.
 
+For ChatGPT-authenticated Codex sessions, Konvu also calculates subscription-credit equivalents from OpenAI's published per-million-token rates. It detects the current local authentication mode and plan, and the resident collector reads Codex quota windows and credit balance with the existing local OAuth token. These values are credit equivalents, not proof that credits were charged; Konvu does not convert credits to dollars because purchase prices can differ by account.
+
 ## Prompts, subagents, and context
 
 Prompt boundaries come from explicit provider records. Subagent calls are deduplicated by message identity and included in the parent session total. Their spend is attributed to the parent prompt that spawned them when the provider records that relationship; otherwise timestamps are used and the per-prompt attribution is approximate.
@@ -28,5 +30,7 @@ Run `konvu-telemetry backtest-next-ten` against local Claude history to inspect 
 
 - Provider transcript formats can change before Konvu ships a parser update.
 - API-equivalent prices can differ from subscriptions, credits, negotiated rates, taxes, and provider invoices.
+- The current Codex login applies to live usage; historical transcripts do not record which subscription paid for them.
+- If the authenticated Codex usage request fails, quota display falls back to the latest transcript observation.
 - Per-prompt Codex subagent attribution is timestamp-based when no spawn timestamp is recorded.
 - Forecasts describe recent local behavior; they are not guarantees and are hidden when evidence is insufficient.

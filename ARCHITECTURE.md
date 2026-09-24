@@ -6,7 +6,7 @@ Konvu Telemetry is one Python package with a single resident process. The proces
 
 - The collector never modifies provider transcripts.
 - The dashboard server binds only to IPv4 loopback and rejects non-local `Host` and `Origin` values.
-- The package has no runtime Python dependencies. Its only outbound client sends a small allowlisted set of anonymous product events to PostHog with a 500 ms timeout. Setup durably queues its event before the setup process exits; network delivery and resident-process events run in a background thread.
+- The package has no runtime Python dependencies. Its outbound clients send a small allowlisted set of anonymous product events to PostHog and, for a ChatGPT-authenticated Codex login, read the account's current usage state from Codex with the existing local OAuth token. Both use short timeouts; neither sends transcripts or credentials to Konvu.
 - Product analytics uses a random install ID. It does not create person profiles and sends no transcripts, prompts, code, paths, command arguments, usage data, raw errors, environment variables, account IDs, or workspace IDs.
 - Browser notifications require an open dashboard tab and browser permission.
 - A session alerts when it was active in the last twenty minutes, its cost is complete, and its next-ten-prompt forecast exceeds `ALERT_FORECAST_USD`. It alerts again only after `ALERT_FORECAST_RENOTIFY_SECONDS` and only if the forecast has not fallen since the last alert; falling to or below the threshold re-arms it.
@@ -25,7 +25,7 @@ Konvu Telemetry is one Python package with a single resident process. The proces
 2. `service.py` owns the collector loop, health record, and localhost HTTP server.
 3. `live.py` and `fleet_telemetry.py` incrementally read appended transcript bytes and retain bounded metadata for active files.
 4. `parsers.py` converts provider records into the provider-neutral types in `models.py`.
-5. `pricing.py` applies the bundled local price table and marks missing prices explicitly.
+5. `pricing.py` applies the bundled local API price table; `codex_billing.py` applies the published Codex subscription-credit table and reads current local account metadata and usage state.
 6. `analytics.py` derives prompt series, personal baselines, forecasts, compaction state, and alert decisions. Expired valid baselines remain usable while one background refresh rebuilds them.
 7. `snapshot.py` writes a bounded dashboard summary plus detailed per-session documents. Unchanged detail documents are not rewritten.
 8. `display.py` builds one set of usage rows from a per-session document and reads `service.load_health()` for the closing dashboard line, then frames them for the Codex `Stop` hook and both providers' desktop `UserPromptSubmit` context, or prints them flat for the Claude status line.

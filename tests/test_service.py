@@ -1532,7 +1532,10 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("verbatim as the very last thing in your reply", context)
         self.assertNotIn("```", context)
         self.assertIn("╭─ Konvu usage", context)
-        self.assertIn("│ 💸 $25.0 total · $5.0 for the next 10 prompts", context)
+        self.assertIn(
+            "│ 💸 $25.0 API-equivalent total · $5.0 API-equivalent for the next 10 prompts",
+            context,
+        )
         self.assertTrue(context.endswith("╰─"))
         self.assertEqual(self.run_claude_hook(claude_prompt_hook, "cli", session), "")
         self.assertEqual(self.run_claude_hook(claude_prompt_hook, None, session), "")
@@ -1599,7 +1602,7 @@ class ServiceTests(unittest.TestCase):
             json.loads(self.run_codex_hook(codex_hook, "cli", session)),
             {
                 "systemMessage": "\n╭─ Konvu usage\n"
-                "│ 💸 $25.4 total · $4.9 for the next 10 prompts\n"
+                "│ 💸 $25.4 API-equivalent total · $4.9 API-equivalent for the next 10 prompts\n"
                 "│ 🧠 65% context · 3% weekly limit\n"
                 "│ 🔗 run konvu-telemetry setup to start the dashboard\n"
                 "╰─"
@@ -1844,11 +1847,32 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(
             rows,
             [
-                "💸 $25.4 total · $4.9 for the next 10 prompts",
-                "🤖 1 live / 2 total · 90% context shared · $0.4 spent",
+                "💸 $25.4 API-equivalent total · $4.9 API-equivalent for the next 10 prompts",
+                "🤖 1 live / 2 total · 90% context shared · $0.4 API-equivalent",
                 "🧠 50% context · 3% weekly limit",
                 "🟢 12% below your median",
                 DASHBOARD_HINT,
+            ],
+        )
+
+    def test_chatgpt_codex_usage_rows_show_credit_equivalents(self) -> None:
+        session = {
+            **self.shared_row_session(),
+            "provider": "codex",
+            "billing_mode": "chatgpt_subscription",
+            "credit_status": "complete",
+            "total_credits": 12.25,
+            "projected_next_10_tasks_credits": 5.5,
+            "subagent_credits": 1.25,
+        }
+        with health_patch({"status": "stale"}):
+            rows = usage_rows(session, "25% weekly limit")
+        self.assertEqual(
+            rows[:3],
+            [
+                "💸 12.2 credits equivalent total · 5.5 credits for the next 10 prompts",
+                "🤖 1 live / 2 total · 90% context shared · 1.2 credits equivalent",
+                "🧠 50% context · 25% weekly limit",
             ],
         )
 
@@ -3120,6 +3144,48 @@ class ServiceTests(unittest.TestCase):
                     "resets_at": None,
                 },
             ],
+        )
+
+    def test_live_codex_quota_is_attached_to_the_latest_codex_session(self) -> None:
+        account = {
+            "billing_mode": "chatgpt_subscription",
+            "plan_type": "plus",
+            "plan_label": "Plus",
+        }
+        quota = {
+            "source": "codex_usage_endpoint",
+            "windows": [{"window_minutes": 10080, "used_percent": 25}],
+            **account,
+        }
+        snapshot = {
+            "sessions": [
+                {
+                    "id": "older",
+                    "provider": "codex",
+                    "last_activity_at": "2026-01-01T00:00:00+00:00",
+                },
+                {
+                    "id": "latest",
+                    "provider": "codex",
+                    "last_activity_at": "2026-01-02T00:00:00+00:00",
+                },
+            ]
+        }
+        with (
+            patch(
+                "konvu_telemetry.fleet_telemetry.codex_account", return_value=account
+            ),
+            patch(
+                "konvu_telemetry.fleet_telemetry.fetch_codex_usage", return_value=quota
+            ),
+        ):
+            enrich_snapshot(snapshot, [], [], time.time(), fetch_provider_usage=True)
+        self.assertEqual(
+            snapshot["sessions"][0]["billing_mode"], "chatgpt_subscription"
+        )
+        self.assertEqual(
+            snapshot["account_quotas"]["codex"]["windows"][0]["session_id"],
+            "latest",
         )
 
 
