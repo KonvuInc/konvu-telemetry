@@ -15,16 +15,29 @@ import stat
 import subprocess
 import sys
 import time
-from typing import Callable, Protocol, cast
+from typing import Callable, Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+from .storage import snapshot_path
 
 
 CLAUDE_USAGE_ENDPOINT = "https://api.anthropic.com/api/oauth/usage"
 CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 POLL_INTERVAL_SECONDS = 120.0
+RESULT_GRACE_SECONDS = 10 * 60.0
 REQUEST_TIMEOUT_SECONDS = 10.0
 MAX_RESPONSE_BYTES = 256 * 1024
+
+FailureReason = Literal[
+    "authentication_failed",
+    "credentials_unavailable",
+    "invalid_response",
+    "network_error",
+    "provider_error",
+    "rate_limited",
+    "service_unavailable",
+]
 
 
 class HTTPResponse(Protocol):
@@ -45,11 +58,29 @@ class FetchResult:
     snapshot: dict[str, object] | None
     retry_after_seconds: float | None = None
     unavailable: bool = False
+    failure: FailureReason | None = None
 
 
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, *args: object, **kwargs: object) -> None:
         return None
+
+
+def stored_provider_quotas() -> dict[str, object]:
+    """Read only authoritative provider quotas from the canonical snapshot."""
+    try:
+        snapshot = json.loads(snapshot_path().read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    accounts = snapshot.get("account_quotas") if isinstance(snapshot, dict) else None
+    if not isinstance(accounts, dict):
+        return {}
+    return {
+        provider: account
+        for provider in ("claude", "codex")
+        if isinstance((account := accounts.get(provider)), dict)
+        and account.get("source") == "provider_api"
+    }
 
 
 def _iso_now(now: float) -> str:
@@ -350,7 +381,7 @@ def fetch_claude_limits(
     """Fetch Claude quota once; credentials remain in memory for this request only."""
     token = token_reader()
     if token is None:
-        return FetchResult(None, unavailable=True)
+        return FetchResult(None, unavailable=True, failure="credentials_unavailable")
     request = Request(
         CLAUDE_USAGE_ENDPOINT,
         headers={
@@ -364,23 +395,31 @@ def fetch_claude_limits(
         with opener(request, REQUEST_TIMEOUT_SECONDS) as response:
             raw = response.read(MAX_RESPONSE_BYTES + 1)
             if len(raw) > MAX_RESPONSE_BYTES:
-                return FetchResult(None)
+                return FetchResult(None, failure="invalid_response")
             body = json.loads(raw)
     except HTTPError as error:
         return FetchResult(
-            None, _retry_after(error.headers) if error.code == 429 else None
+            None,
+            _retry_after(error.headers) if error.code == 429 else None,
+            unavailable=error.code in {401, 403},
+            failure=(
+                "rate_limited"
+                if error.code == 429
+                else "authentication_failed"
+                if error.code in {401, 403}
+                else "provider_error"
+            ),
         )
-    except (
-        URLError,
-        OSError,
-        TimeoutError,
-        UnicodeError,
-        json.JSONDecodeError,
-        ValueError,
-    ):
-        return FetchResult(None)
+    except (URLError, OSError, TimeoutError):
+        return FetchResult(None, failure="network_error")
+    except (UnicodeError, json.JSONDecodeError, ValueError):
+        return FetchResult(None, failure="invalid_response")
     captured = time.time() if now is None else now
-    return FetchResult(decode_claude_usage(body, _iso_now(captured)))
+    snapshot = decode_claude_usage(body, _iso_now(captured))
+    return FetchResult(
+        snapshot,
+        failure=None if snapshot is not None else "invalid_response",
+    )
 
 
 def _codex_executable() -> str | None:
@@ -434,7 +473,7 @@ def fetch_codex_limits(now: float | None = None) -> FetchResult:
     """Ask Codex's local app-server for account limits without reading its token."""
     executable = _codex_executable()
     if executable is None:
-        return FetchResult(None, unavailable=True)
+        return FetchResult(None, unavailable=True, failure="service_unavailable")
     process: subprocess.Popen[str] | None = None
     try:
         process = subprocess.Popen(
@@ -458,7 +497,7 @@ def fetch_codex_limits(now: float | None = None) -> FetchResult:
             },
         )
         if _response(process, 1, deadline) is None:
-            return FetchResult(None)
+            return FetchResult(None, failure="service_unavailable")
         _send(process, {"method": "initialized"})
         _send(
             process,
@@ -470,9 +509,13 @@ def fetch_codex_limits(now: float | None = None) -> FetchResult:
         )
         result = _response(process, 2, deadline)
         captured = time.time() if now is None else now
-        return FetchResult(decode_codex_usage(result, _iso_now(captured)))
+        snapshot = decode_codex_usage(result, _iso_now(captured))
+        return FetchResult(
+            snapshot,
+            failure=None if snapshot is not None else "invalid_response",
+        )
     except (OSError, ValueError):
-        return FetchResult(None)
+        return FetchResult(None, failure="service_unavailable")
     finally:
         if process is not None and process.poll() is None:
             try:
@@ -487,17 +530,81 @@ def fetch_codex_limits(now: float | None = None) -> FetchResult:
 
 
 class ProviderLimitPoller:
-    """Poll independently per provider and expose only the latest fresh result."""
+    """Poll each provider while safely retaining the latest authoritative result."""
 
     def __init__(
         self,
         claude_fetcher: Callable[[float | None], FetchResult] = fetch_claude_limits,
         codex_fetcher: Callable[[float | None], FetchResult] = fetch_codex_limits,
+        initial_snapshots: dict[str, object] | None = None,
     ) -> None:
         self._fetchers = {"claude": claude_fetcher, "codex": codex_fetcher}
         self._next_at = {"claude": 0.0, "codex": 0.0}
         self._failures = {"claude": 0, "codex": 0}
         self._snapshots: dict[str, dict[str, object] | None] = {}
+        self._last_success_at: dict[str, float] = {}
+        self._failure_reasons: dict[str, FailureReason | None] = {}
+        for provider in self._fetchers:
+            initial = (
+                initial_snapshots.get(provider)
+                if isinstance(initial_snapshots, dict)
+                else None
+            )
+            if not isinstance(initial, dict) or initial.get("source") != "provider_api":
+                continue
+            observed = _iso_reset(initial.get("observed_at"))
+            if observed is None:
+                continue
+            self._snapshots[provider] = initial
+            self._last_success_at[provider] = datetime.fromisoformat(
+                observed
+            ).timestamp()
+
+    def _visible_snapshot(self, provider: str, now: float) -> dict[str, object]:
+        snapshot = self._snapshots.get(provider)
+        last_success = self._last_success_at.get(provider)
+        failure = self._failure_reasons.get(provider)
+        if (
+            snapshot is not None
+            and last_success is not None
+            and now - last_success <= RESULT_GRACE_SECONDS
+        ):
+            if failure is None:
+                return snapshot
+            visible = dict(snapshot)
+            windows = snapshot.get("windows")
+            if isinstance(windows, list):
+                visible_windows: list[dict[str, object]] = []
+                expired_window = False
+                for window in windows:
+                    if not isinstance(window, dict):
+                        continue
+                    reset = _iso_reset(window.get("resets_at"))
+                    if (
+                        reset is not None
+                        and datetime.fromisoformat(reset).timestamp() <= now
+                    ):
+                        expired_window = True
+                        continue
+                    visible_windows.append(window)
+                visible["windows"] = visible_windows
+                if expired_window:
+                    for key in (
+                        "ordinary_usage_allowed",
+                        "spend_control_reached",
+                        "limit_states",
+                        "rate_limit_reached_type",
+                    ):
+                        visible.pop(key, None)
+            visible["status"] = "stale"
+            visible["failure"] = failure
+            return visible
+        return {
+            "source": "provider_api",
+            "status": "unavailable",
+            "failure": failure or "service_unavailable",
+            "windows": [],
+        }
 
     def refresh(self, now: float) -> dict[str, object]:
         due = [
@@ -513,8 +620,20 @@ class ProviderLimitPoller:
                     try:
                         result = future.result()
                     except Exception:
-                        result = FetchResult(None)
-                    self._snapshots[provider] = result.snapshot
+                        result = FetchResult(None, failure="service_unavailable")
+                    failure = result.failure or (
+                        "service_unavailable" if result.snapshot is None else None
+                    )
+                    if result.snapshot is not None:
+                        self._snapshots[provider] = result.snapshot
+                        self._last_success_at[provider] = now
+                        self._failure_reasons[provider] = None
+                    elif result.unavailable:
+                        self._snapshots[provider] = None
+                        self._last_success_at.pop(provider, None)
+                        self._failure_reasons[provider] = failure
+                    else:
+                        self._failure_reasons[provider] = failure
                     if result.snapshot is not None or result.unavailable:
                         self._failures[provider] = 0
                     else:
@@ -530,4 +649,7 @@ class ProviderLimitPoller:
                         result.retry_after_seconds or 0.0,
                     )
                     self._next_at[provider] = now + delay
-        return dict(self._snapshots)
+        return {
+            provider: self._visible_snapshot(provider, now)
+            for provider in self._fetchers
+        }

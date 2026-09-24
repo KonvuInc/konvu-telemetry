@@ -17,7 +17,6 @@ const previewMode = new URLSearchParams(location.search).get("preview") === "sub
 const state = {
   payload: null,
   view: "ledger",
-  baselineMode: "provider",
   provider: "all",
   sort: "forecast",
   selected: null,
@@ -75,7 +74,7 @@ const showsMoney = (s) => s.usage_mode === "exhausted" || s.usage_mode === "api_
 const cost = (s) => {
   if (!showsMoney(s) || s.cost_status === "unavailable") return null;
   if (s.usage_mode === "api_billed") return nonnegative(s.total_cost_usd) ? s.total_cost_usd : null;
-  if (s.out_of_plan_spend_status === undefined) return nonnegative(s.total_cost_usd) ? s.total_cost_usd : null;
+  if (s.out_of_plan_spend_status === undefined) return null;
   return nonnegative(s.out_of_plan_spend_usd) ? s.out_of_plan_spend_usd : null;
 };
 const forecast = (s) => (cost(s) !== null && nonnegative(s.projected_next_10_tasks_usd) ? s.projected_next_10_tasks_usd : null);
@@ -83,22 +82,6 @@ const quotaShare = (s, period = "five_hour") => {
   const windows = s.quota_attribution?.windows;
   const row = Array.isArray(windows) ? windows.find((w) => w?.period === period && finite(w.estimated_percent)) : null;
   return row ? row.estimated_percent : null;
-};
-const quotaShareText = (s) => {
-  const period = s.provider === "codex" ? "weekly" : "five_hour";
-  const share = quotaShare(s, period);
-  if (!finite(share)) return "";
-  const hot = (s.provider === "claude" && period === "five_hour" && share > 20) || (s.provider === "codex" && period === "weekly" && share > 10);
-  return "Responsible for ~" + share.toFixed(share >= 10 ? 0 : 1) + "% of " + (period === "five_hour" ? "5-hour" : "weekly") + " limit" + (hot ? " 🔥" : "");
-};
-const quotaForecastText = (s) => {
-  const windows = s.quota_attribution?.windows;
-  if (!Array.isArray(windows)) return "";
-  for (const period of ["five_hour", "weekly"]) {
-    const row = windows.find((window) => window?.period === period && finite(window.projected_next_10_percent));
-    if (row) return "Next 10: ~" + row.projected_next_10_percent.toFixed(row.projected_next_10_percent >= 10 ? 0 : 1) + "% of " + (period === "five_hour" ? "5-hour" : "weekly") + " limit";
-  }
-  return "";
 };
 const context = (s) =>
   nonnegative(s.context_tokens) && finite(s.context_window_tokens) && s.context_window_tokens > 0
@@ -197,23 +180,23 @@ function sortedRows() {
   return liveRows()
     .slice()
     .sort((a, b) => {
-      const av =
-        state.sort === "forecast"
-          ? forecast(a)
-          : state.sort === "spent"
-            ? cost(a)
-            : state.sort === "activity"
-              ? Date.parse(a.last_activity_at)
-              : assess(a).severity * 1000 + assess(a).score;
-      const bv =
-        state.sort === "forecast"
-          ? forecast(b)
-          : state.sort === "spent"
-            ? cost(b)
-            : state.sort === "activity"
-              ? Date.parse(b.last_activity_at)
-              : assess(b).severity * 1000 + assess(b).score;
-      return (bv ?? -1) - (av ?? -1) || keyOf(a).localeCompare(keyOf(b));
+      const value = (s) => {
+        switch (state.sort) {
+          case "forecast":
+            return showsMoney(s) ? forecast(s) : shareAhead(s);
+          case "spent":
+            return cost(s);
+          case "share":
+            return showsMoney(s) ? cost(s) : shareOf(s);
+          case "context":
+            return context(s);
+          case "activity":
+            return Date.parse(s.last_activity_at);
+          default:
+            return assess(s).severity * 1000 + assess(s).score;
+        }
+      };
+      return (value(b) ?? -1) - (value(a) ?? -1) || keyOf(a).localeCompare(keyOf(b));
     });
 }
 const effort = (s) => s.reasoning_effort || s.effort || null;
@@ -367,40 +350,6 @@ function donut(s) {
     "</span></div>"
   );
 }
-function recordedBaselineComparison(s) {
-  const scope = state.baselineMode === "matched" ? "model_effort" : "provider";
-  const baseline = s.baselines?.[scope] || (s.baseline?.scope === scope ? s.baseline : null);
-  const overhead = baseline?.cost_overhead_percent;
-  if (!finite(overhead)) return null;
-  const ratio = 1 + overhead / 100;
-  if (ratio < 0) return null;
-  return {
-    ratio,
-    matched: baseline.scope === "model_effort",
-    recorded: true,
-    median: baseline.median_cost_usd,
-    samples: baseline.sample_sessions,
-  };
-}
-function spendComparison(s) {
-  const c = recordedBaselineComparison(s);
-  if (!c) {
-    return {
-      ratio: null,
-      label: "Collector has no comparable baseline",
-      detail:
-        "The collector recalculates this from your stored local median every six hours. Medians are a comparison only; alerts follow the next-ten-prompt forecast.",
-    };
-  }
-  const label = c.matched ? "model + effort median" : providerName(s.provider) + " general median";
-  return {
-    ratio: c.ratio,
-    label: c.ratio.toFixed(2) + "× " + label,
-    detail: c.matched
-      ? "Current recorded spend against the matched local median. Medians are a comparison only; alerts follow the next-ten-prompt forecast."
-      : "Current recorded spend against the general provider median. Medians are a comparison only; alerts follow the next-ten-prompt forecast.",
-  };
-}
 function roundedDollarCeiling(value) {
   const total = Math.max(0.01, value),
     unit = 10 ** Math.floor(Math.log10(total));
@@ -408,6 +357,85 @@ function roundedDollarCeiling(value) {
 }
 function ledgerDollarScale(rows) {
   return roundedDollarCeiling(Math.max(1, ...rows.map((s) => (cost(s) ?? 0) + (forecast(s) ?? 0))));
+}
+/* Same three-stage idea as the burning cash, but measured in share of a window:
+   10% of a limit in ten prompts is where it stops being noise. */
+function quotaFireStage(percent) {
+  return !nonnegative(percent) || percent < 10 ? 0 : percent < 15 ? 1 : percent < 25 ? 2 : 3;
+}
+/* The one fire in this codebase. burningCashIcon adds bills under it; the quota
+   fire uses it bare. Classes match the existing bonfire animations. */
+function bonfireFlames(stage, scale) {
+  return (
+    '<g transform="' + scale + '"><g class="bonfire-tongue flame-back"><path fill="#E34D1C" d="M14 43C1 31 15 23 8 13c11 3 9 12 15 15C16 13 33 12 29 1c17 9 9 19 15 24 6-5 3-12 7-16 0 12 17 17 7 31-8 11-33 12-44 3z"/></g>' +
+    '<g class="bonfire-tongue flame-left"><path fill="#FF8D22" d="M16 43C5 35 15 28 12 20c9 4 4 9 11 12-4-11 6-15 5-23 12 13-1 20 6 29l-3 9z"/></g>' +
+    '<g class="bonfire-tongue flame-right"><path fill="#FFAB27" d="M29 44c-8-10 10-15 8-26 9 6 4 13 8 16 6-5 4-10 6-13 9 13 4 23-10 27z"/></g>' +
+    '<g class="bonfire-tongue flame-core"><path fill="#FFE58F" d="M23 42c-4-8 10-13 8-22 11 9-2 13 5 18 1-4 4-6 6-7 3 13-10 16-19 11z"/></g></g>'
+  );
+}
+function bonfireFront(scale) {
+  return (
+    '<g transform="' + scale + '"><g class="bonfire-tongue flame-front">' +
+    '<path fill="#F47720" d="M25 48c-5-5 0-9-3-15 9 4 3 9 8 10 1-5 7-7 6-13 9 9 0 19-11 18z"/>' +
+    '<path fill="#FFD268" d="M28 47c-2-4 4-6 3-10 6 6 2 10-3 10z"/></g></g>'
+  );
+}
+function bonfireEmbers(stage) {
+  if (stage === 1) return "";
+  return (
+    '<g fill="#F88822"><circle class="bonfire-ember" cx="13" cy="18" r="1.2"/><circle class="bonfire-ember ember-mid" cx="35" cy="10" r="1"/>' +
+    (stage === 3 ? '<circle class="bonfire-ember ember-late" cx="52" cy="18" r="1.1"/>' : "") + "</g>"
+  );
+}
+/* One flame shape with two tongues rising off a single base, which is what
+   actually reads as fire at 20px. Extra flames overlap the main one heavily
+   rather than standing beside it, so a stage merges into a single silhouette
+   with several peaks instead of reading as detached blobs. */
+const QF_BODY =
+  '<path fill="$1" d="M20 54c-10 0-16-6-16-14 0-7 5-11 8-17 2-4 3-9 2-14 6 3 10 8 12 13 1-3 1-6 0-9 6 6 9 13 9 19 0 5-1 8-2 11-1 3 1 5 3 3 1-1 2-4 2-6 2 4 3 8 3 11 0 8-11 3-21 3Z"/>' +
+  '<path fill="$2" d="M20 54c-5 0-9-4-9-8 0-4 3-7 5-11 1-3 2-6 1-9 4 2 7 6 8 10 1-2 1-4 1-6 3 4 4 8 4 11 0 3-1 5-1 7 0 2 1 2 2 1 1-1 1-3 1-4 1 3 2 5 2 7 0 3-9 2-14 2Z"/>';
+const QF_HOT = ["#F47720", "#FFD268"];
+const QF_DIM = ["#E34D1C", "#FFAB27"];
+const QF_DEEP = ["#C9380F", "#FF8D22"];
+/* Placement sits on the outer group; the flicker owns the inner one, because
+   .bonfire-tongue animates transform and would otherwise erase the placement. */
+function qfFlame(colors, place) {
+  return (
+    '<g transform="' + place + '"><g class="bonfire-tongue">' +
+    QF_BODY.replace("$1", colors[0]).replace("$2", colors[1]) +
+    "</g></g>"
+  );
+}
+const QF_STAGES = [
+  null,
+  { box: "0 0 40 56", body: () => qfFlame(QF_HOT, "translate(0 0)") },
+  {
+    box: "-10 -6 60 62",
+    body: () =>
+      qfFlame(QF_DEEP, "translate(-8 -6) scale(.92)") +
+      qfFlame(QF_DIM, "translate(16 6) scale(.74)") +
+      qfFlame(QF_HOT, "translate(0 2) scale(.96)"),
+  },
+  {
+    box: "-14 -12 68 68",
+    body: () =>
+      qfFlame(QF_DEEP, "translate(-12 -4) scale(.8)") +
+      qfFlame(QF_DEEP, "translate(18 -12) scale(.98)") +
+      qfFlame(QF_DIM, "translate(20 10) scale(.66)") +
+      qfFlame(QF_HOT, "translate(0 2) scale(.96)"),
+  },
+];
+function quotaFireIcon(percent) {
+  const stage = quotaFireStage(percent);
+  if (!stage) return "";
+  const art = QF_STAGES[stage];
+  const label =
+    ["", "Warming up", "Burning through your limit", "Tearing through your limit"][stage] +
+    ": +" + percent.toFixed(percent >= 10 ? 0 : 1) + "% of the limit over the next 10 prompts";
+  return (
+    '<span class="quota-fire fire-' + stage + '" role="img" aria-label="' + esc(label) + '" title="' + esc(label) + '">' +
+    '<svg viewBox="' + art.box + '" aria-hidden="true">' + art.body() + "</svg></span>"
+  );
 }
 function burningCashStage(next) {
   return !nonnegative(next) || next < BURNING_FORECAST_USD ? 0 : next < 10 ? 1 : next < 20 ? 2 : 3;
@@ -425,6 +453,9 @@ function bonfireBill([x, y, angle, scale = 1]) {
     ')"><rect width="28" height="15" rx="1" fill="#A8D68D" stroke="#286746" stroke-width="1.1"/><rect x="2.5" y="2.5" width="23" height="10" rx="1" fill="none" stroke="#3C8050" stroke-width=".7"/><ellipse cx="14" cy="7.5" rx="5.5" ry="6" fill="#E7F3CA"/><text x="14" y="11.7" text-anchor="middle" fill="#225E3B" font-family="Arial,sans-serif" font-weight="700" font-size="12">$</text><path d="M4 6h3m-3 3h3m14-3h3m-3 3h3" stroke="#327446" stroke-width=".8"/></g>'
   );
 }
+/* A forecast far above what a session has already spent is the drift signal.
+   One chevron per stage reads faster than an illustration and never becomes
+   decoration. */
 function burningCashIcon(next) {
   const stage = burningCashStage(next);
   if (!stage) return "";
@@ -450,26 +481,13 @@ function burningCashIcon(next) {
   const label =
     ["", "One burning bill", "Three burning bills", "A burning mountain of bills"][stage] + ": " + money(next) + " forecast for the next 10 prompts";
   return (
-    '<span class="cash-alert burn-stage-' +
-    stage +
-    '" role="img" aria-label="' +
-    esc(label) +
-    '" title="' +
-    esc(label) +
-    '"><svg class="bills-bonfire" viewBox="0 0 64 64" aria-hidden="true"><ellipse class="bonfire-glow" cx="32" cy="50" rx="' +
-    (stage === 1 ? 18 : 28) +
-    '" ry="7" fill="#FF8A24" opacity=".15"/><g transform="' +
-    flameScale +
-    '"><g class="bonfire-tongue flame-back"><path fill="#E34D1C" d="M14 43C1 31 15 23 8 13c11 3 9 12 15 15C16 13 33 12 29 1c17 9 9 19 15 24 6-5 3-12 7-16 0 12 17 17 7 31-8 11-33 12-44 3z"/></g><g class="bonfire-tongue flame-left"><path fill="#FF8D22" d="M16 43C5 35 15 28 12 20c9 4 4 9 11 12-4-11 6-15 5-23 12 13-1 20 6 29l-3 9z"/></g><g class="bonfire-tongue flame-right"><path fill="#FFAB27" d="M29 44c-8-10 10-15 8-26 9 6 4 13 8 16 6-5 4-10 6-13 9 13 4 23-10 27z"/></g><g class="bonfire-tongue flame-core"><path fill="#FFE58F" d="M23 42c-4-8 10-13 8-22 11 9-2 13 5 18 1-4 4-6 6-7 3 13-10 16-19 11z"/></g></g>' +
+    '<span class="cash-alert burn-stage-' + stage + '" role="img" aria-label="' + esc(label) + '" title="' + esc(label) + '">' +
+    '<svg class="bills-bonfire" viewBox="0 0 64 64" aria-hidden="true">' +
+    '<ellipse class="bonfire-glow" cx="32" cy="50" rx="' + (stage === 1 ? 18 : 28) + '" ry="7" fill="#FF8A24" opacity=".15"/>' +
+    bonfireFlames(stage, flameScale) +
     pile.map(bonfireBill).join("") +
-    '<g transform="' +
-    (stage === 1 ? "translate(7 12) scale(.8)" : "") +
-    '"><g class="bonfire-tongue flame-front"><path fill="#F47720" d="M25 48c-5-5 0-9-3-15 9 4 3 9 8 10 1-5 7-7 6-13 9 9 0 19-11 18z"/><path fill="#FFD268" d="M28 47c-2-4 4-6 3-10 6 6 2 10-3 10z"/></g></g>' +
-    (stage === 1
-      ? ""
-      : '<g fill="#F88822"><circle class="bonfire-ember" cx="13" cy="18" r="1.2"/><circle class="bonfire-ember ember-mid" cx="35" cy="10" r="1"/>' +
-        (stage === 3 ? '<circle class="bonfire-ember ember-late" cx="52" cy="18" r="1.1"/>' : "") +
-        "</g>") +
+    bonfireFront(stage === 1 ? "translate(7 12) scale(.8)" : "") +
+    bonfireEmbers(stage) +
     "</svg></span>"
   );
 }
@@ -478,12 +496,22 @@ function spendVisual(s, scale) {
     next = forecast(s);
   if (s.usage_mode === "included" || s.usage_mode === "unknown") {
     const included = s.usage_mode === "included";
-    const forecast = quotaForecastText(s);
-    return '<div class="spending included-copy"><strong>' + (included ? "Included in your plan" : "Subscription status unavailable") + '</strong>' + (forecast ? "<small>" + esc(forecast) + "</small>" : "") + "</div>";
+    const ahead = shareAhead(s);
+    const window = quotaWindowName(s);
+    const line = finite(ahead)
+      ? "Next 10 prompts: +" + ahead.toFixed(ahead >= 10 ? 0 : 1) + "% of " + window + " limit"
+      : "";
+    return (
+      '<div class="spending included-copy"><div class="included-copy-text"><strong>' +
+      (s.quota_status === "stale" ? "Last known: included in your plan" : included ? "Included in your plan" : "Subscription status unavailable") + "</strong>" +
+      (line ? "<small>" + esc(line) + "</small>" : "") + "</div>" +
+      (finite(ahead) ? quotaFireIcon(ahead) : "") + "</div>"
+    );
   }
   const values =
       '<div class="spend-values"><strong>' +
       money(spent) +
+      (s.quota_status === "stale" ? '<small>Plan status last known</small>' : "") +
       '</strong><span class="forecast-label">' +
       burningCashIcon(next) +
       '<b class="forecast-amount">' +
@@ -501,9 +529,33 @@ function spendVisual(s, scale) {
         "</div>";
   return '<div class="spending">' + values + visual + "</div>";
 }
+/* Share is drawn, not written, and it stays meaningful for both provider
+   states: a quota session owns part of a limit, a paying session owns part of
+   the money. Same arc, same reading, two different denominators. */
+/* Deliberately not a donut: context already owns that shape. A share is a slice
+   of one whole, so it is drawn as a slice of a full-width track. */
+function shareBar(value, sentence, title) {
+  return (
+    '<div class="share-bar" title="' + esc(title) + '">' +
+    '<div class="share-line"><b>' + value.toFixed(value >= 10 ? 0 : 1) + "%</b>" +
+    "<span>" + esc(sentence) + "</span></div>" +
+    '<i><em style="width:' + Math.max(1, Math.min(100, value)) + '%"></em></i></div>'
+  );
+}
 function responsibilityCell(s) {
-  const text = quotaShareText(s);
-  return text ? '<div class="responsibility-cell">' + esc(text) + "</div>" : '<span class="tiny">—</span>';
+  if (showsMoney(s)) {
+    const total = allRows().filter(showsMoney).reduce((sum, row) => sum + (cost(row) ?? 0), 0);
+    const mine = cost(s);
+    if (!nonnegative(mine)) return '<span class="tiny" title="No spend recorded for this session yet.">Not recorded</span>';
+    // Nothing has been billed yet, so no session owns a share of zero.
+    if (total <= 0) return '<span class="tiny" title="Nothing has been billed beyond the plan yet.">Nothing spent yet</span>';
+    const share = (mine / total) * 100;
+    return shareBar(share, "of all money spent", money(mine) + " of " + money(total) + " spent beyond plan");
+  }
+  const share = shareOf(s);
+  if (!finite(share)) return '<span class="tiny">—</span>';
+  const window = quotaWindowName(s);
+  return shareBar(share, "of your " + window + " limit", "This session is responsible for " + share.toFixed(1) + "% of the " + window + " limit");
 }
 function subagentCell(s) {
   const total = Number.isInteger(s.subagent_total) && s.subagent_total >= 0 ? s.subagent_total : "—";
@@ -520,39 +572,193 @@ function subagentCell(s) {
     "</div>"
   );
 }
+/* Being inside the plan or paying for it is a property of the PROVIDER: when
+   Codex runs out of quota every Codex session is paying at once. Sessions are
+   therefore split by that state, not by provider, so a table only ever holds
+   one currency — percent of a limit, or dollars — and sorting inside it stays
+   provider-agnostic. When every provider agrees, there is nothing to split and
+   one table is shown. */
+/* A provider counts as paying once money has actually been recorded against
+   it. Quota hitting 100% is not enough on its own: the five-hour window
+   refills constantly, so keying off it alone made rows jump between the two
+   tables on every refresh and put "$0.00" under a "Spending real money"
+   heading. The exhausted state still shows — as a note on the plan table —
+   until the first cent lands. */
+function providerHasSpend(provider, rows) {
+  return rows.some((s) => s.provider === provider && (cost(s) ?? 0) > 0);
+}
+function providerExhausted(provider, rows) {
+  if (state.payload?.account_quotas?.[provider]?.ordinary_usage_allowed === false) return true;
+  return rows.some((s) => s.provider === provider && showsMoney(s));
+}
+function providerState(provider, rows) {
+  return providerExhausted(provider, rows) && providerHasSpend(provider, rows);
+}
+function planGroups(rows) {
+  const providers = [...new Set(rows.map((s) => s.provider))];
+  const paying = new Set(providers.filter((p) => providerState(p, rows)));
+  const groups = [
+    { paying: false, rows: rows.filter((s) => !paying.has(s.provider)), providers: providers.filter((p) => !paying.has(p)) },
+    { paying: true, rows: rows.filter((s) => paying.has(s.provider)), providers: providers.filter((p) => paying.has(p)) },
+  ]
+    .filter((g) => g.rows.length)
+    .sort((a, b) => (b.paying ? 1 : 0) - (a.paying ? 1 : 0));
+  for (const g of groups) {
+    g.spend = g.rows.reduce((sum, s) => sum + (cost(s) ?? 0), 0);
+    g.next = g.rows.reduce((sum, s) => sum + (forecast(s) ?? 0), 0);
+  }
+  return groups;
+}
+function groupHeading(group) {
+  const n = group.rows.length;
+  const waiting = !group.paying && group.providers.some((p) => providerExhausted(p, group.rows));
+  return (
+    '<div class="group-heading ' + (group.paying ? "paying" : "included") + '">' +
+    "<h2>" + (group.paying ? "Spending real money" : "Within your plan") + "</h2>" +
+    '<span class="head-count">' + n + " session" + (n === 1 ? "" : "s") + "</span>" +
+    (waiting ? '<span class="head-warn" title="Quota is spent, so the next prompts will be charged. Nothing has been billed yet.">Quota spent — billing starts on the next prompt</span>' : "") +
+    ('<div class="heading-controls"><div class="quota-inline">' + quotaInline(group.providers) + "</div>" +
+        '<label class="sort-control">Sort<select class="sort-select" aria-label="Sort sessions">' +
+        (group.paying
+          ? [["spent", "Most spent"], ["forecast", "Highest forecast"], ["share", "Share of spend"], ["context", "Context used"], ["activity", "Last activity"]]
+          : [["share", "Share of limit"], ["forecast", "Highest forecast"], ["context", "Context used"], ["activity", "Last activity"]])
+          .map(([v, t]) => '<option value="' + v + '"' + (state.sort === v ? " selected" : "") + ">" + t + "</option>")
+          .join("") +
+        "</select></label></div>") +
+    "</div>"
+  );
+}
+/* ============ fleet summary ============
+   One banner only. Real money outranks quota, so the moment a single session
+   bills, every number in the banner is computed from paying sessions alone —
+   a subscription session must never contribute to a dollar figure. */
+const avg = (values) => (values.length ? values.reduce((a, b) => a + b, 0) / values.length : null);
+const shareOf = (s) => quotaShare(s, s.provider === "codex" ? "weekly" : "five_hour");
+const quotaWindowName = (s) => (s.provider === "codex" ? "weekly" : "5-hour");
+function shareAhead(s) {
+  const period = s.provider === "codex" ? "weekly" : "five_hour";
+  const row = s.quota_attribution?.windows?.find((w) => w?.period === period && finite(w.projected_next_10_percent));
+  return row ? row.projected_next_10_percent : null;
+}
+function subagentsOf(rows) {
+  return rows.flatMap((s) => (Array.isArray(s.subagents) ? s.subagents.map((a) => ({ agent: a, session: s })) : []));
+}
+/* Four bands, worst last, so one scale covers every percentage on the page. */
+function band(value, warn, high, bad) {
+  if (!finite(value)) return "none";
+  return value >= bad ? "bad" : value >= high ? "high" : value >= warn ? "warning" : "good";
+}
+function kpiTile(label, value, tone, note, wide) {
+  return (
+    '<div class="kpi-tile' + (wide ? " kpi-lead" : "") + '"><span class="kpi-label">' + esc(label) + "</span>" +
+    '<b class="metric-' + tone + (wide ? " metric-primary" : " metric-secondary") + '">' + value + "</b>" +
+    (note || "") + "</div>"
+  );
+}
+/* The culprit is a session, so it is shown as one — provider mark and title,
+   not a bare string that reads like a stray caption. */
+function kpiSession(s, extra) {
+  return (
+    '<button class="kpi-session" type="button" data-session="' + esc(keyOf(s)) + '" title="' + esc(displayTitle(s)) + '">' +
+    '<img src="/' + (s.provider === "claude" ? "claude" : "codex") + '.png" alt="" width="12" height="12">' +
+    "<em>" + esc(displayTitle(s)) + "</em>" + (extra ? "<i>" + esc(extra) + "</i>" : "") + "</button>"
+  );
+}
+const kpiFootnote = (text) => '<small class="kpi-note">' + esc(text) + "</small>";
+function planTiles(rows) {
+  const heaviest = rows.filter((s) => finite(shareOf(s))).sort((a, b) => shareOf(b) - shareOf(a))[0];
+  const drifting = rows.filter((s) => finite(shareAhead(s))).sort((a, b) => shareAhead(b) - shareAhead(a))[0];
+  const avgContext = avg(rows.map(context).filter(finite));
+  const agents = subagentsOf(rows);
+  const agentContext = avg(
+    agents
+      .map(({ agent, session }) =>
+        nonnegative(agent.entry_context_tokens) && session.context_window_tokens > 0 ? (agent.entry_context_tokens / session.context_window_tokens) * 100 : null
+      )
+      .filter(finite)
+  );
+  const windowOf = (s) => (s.provider === "codex" ? "weekly" : "5-hour");
+  return [
+    kpiTile("Spent beyond plan", money(0), "good", kpiFootnote("nothing is billing"), true),
+    heaviest ? kpiTile("Using most of your " + windowOf(heaviest) + " limit", shareOf(heaviest).toFixed(1) + "%", band(shareOf(heaviest), 10, 20, 35), kpiSession(heaviest)) : "",
+    drifting ? kpiTile("Growing fastest", "+" + shareAhead(drifting).toFixed(1) + "%", band(shareAhead(drifting), 4, 8, 12), kpiSession(drifting)) : "",
+    finite(avgContext) ? kpiTile("Average context used", avgContext.toFixed(0) + "%", band(avgContext, 50, 70, 88), kpiFootnote("across " + rows.length + " sessions")) : "",
+    agents.length ? kpiTile("Average subagent context", finite(agentContext) ? agentContext.toFixed(0) + "%" : "\u2014", band(agentContext, 30, 45, 60), kpiFootnote((agents.length / rows.length).toFixed(1) + " subagents per session")) : "",
+  ].filter(Boolean);
+}
+function moneyTiles(rows) {
+  const spend = rows.reduce((sum, s) => sum + (cost(s) ?? 0), 0);
+  const priciest = rows.filter((s) => finite(cost(s))).sort((a, b) => cost(b) - cost(a))[0];
+  const hottest = rows.filter((s) => finite(forecast(s))).sort((a, b) => forecast(b) - forecast(a))[0];
+  const avgContext = avg(rows.map(context).filter(finite));
+  const topAgent = subagentsOf(rows)
+    .filter(({ agent }) => nonnegative(agent.cost_usd))
+    .sort((a, b) => b.agent.cost_usd - a.agent.cost_usd)[0];
+  return [
+    kpiTile("Spent beyond plan", money(spend), spend > 0 ? "bad" : "good", kpiFootnote("across " + rows.length + " billing sessions"), true),
+    priciest ? kpiTile("Most expensive session", money(cost(priciest)), band((cost(priciest) / (spend || 1)) * 100, 25, 45, 65), kpiSession(priciest)) : "",
+    hottest ? kpiTile("Biggest forecast", additional(forecast(hottest)), band(forecast(hottest), 5, 12, 20), kpiSession(hottest)) : "",
+    finite(avgContext) ? kpiTile("Average context used", avgContext.toFixed(0) + "%", band(avgContext, 50, 70, 88), kpiFootnote("across " + rows.length + " billing sessions")) : "",
+    topAgent ? kpiTile("Costliest subagent", money(topAgent.agent.cost_usd), band((topAgent.agent.cost_usd / (spend || 1)) * 100, 15, 30, 45), kpiSession(topAgent.session, subagentLabel(topAgent.agent))) : "",
+  ].filter(Boolean);
+}
+/* Reuses planGroups so the banner and the tables can never disagree about
+   which sessions are paying. */
+function kpiBanner(rows) {
+  const paying = planGroups(rows).find((g) => g.paying);
+  const tiles = paying ? moneyTiles(paying.rows) : planTiles(rows);
+  return tiles.length ? '<div class="kpi-grid">' + tiles.join("") + "</div>" : "";
+}
+/* Light meters, one bordered pill per provider, logo as the only label. */
+function quotaInline(providers) {
+  const quotas = state.payload?.account_quotas || {};
+  return (providers && providers.length ? providers : ["claude", "codex"])
+    .filter((id) => Array.isArray(quotas[id]?.windows) && quotas[id].windows.length)
+    .map((id) => {
+      const wanted = id === "codex" ? ["weekly", "monthly"] : ["five_hour", "weekly"];
+      const meters = quotas[id].windows
+        .filter((w) => w && finite(w.used_percent) && wanted.includes(w.period))
+        .sort((a, b) => wanted.indexOf(a.period) - wanted.indexOf(b.period))
+        .map((w) => {
+          const used = Math.max(0, Math.min(100, w.used_percent));
+          const label = w.period === "five_hour" ? "5h" : w.period === "weekly" ? "week" : "month";
+          return '<span class="qm"><i>' + label + '</i><u><em style="width:' + used + '%"></em></u><b>' + used.toFixed(0) + "%</b></span>";
+        })
+        .join("");
+      return (
+        '<div class="quota-pill' + (quotas[id].ordinary_usage_allowed === false ? " exhausted" : "") + '">' +
+        '<span class="quota-legend"><img src="/' + esc(id) + '.png" alt="' + providerName(id) + '" width="12" height="12">' +
+        (quotas[id].status === "stale" ? "Last known usage" : "Usage limit") + "</span>" +
+        meters + "</div>"
+      );
+    })
+    .join("");
+}
+function ledgerRow(s, scale) {
+  const next = forecast(s),
+    burning = s.notification?.hot === true;
+  return (
+    '<tr class="' + (burning ? "burning-row" : "") + '" data-session="' + esc(keyOf(s)) +
+    '"><td><div class="indexed-title">' + titleCell(s) + "</div></td><td>" + spendVisual(s, scale) +
+    "</td><td>" + responsibilityCell(s) + "</td><td>" + donut(s) + "</td><td>" + subagentCell(s) +
+    '</td><td class="time-cell"><span>' + age(s.last_activity_at) + " ago</span><small>" +
+    age(startTime(s)) + " old</small></td></tr>"
+  );
+}
+function ledgerTable(group, scale) {
+  const spendHead = group.paying ? "Spend <span>/ next 10 prompts</span>" : "Plan <span>/ next 10 prompts</span>";
+  const shareHead = group.paying ? "Responsible for" : "Responsible for";
+  return (
+    '<section class="ledger-block ' + (group.paying ? "paying" : "included") + '">' + groupHeading(group) +
+    '<div class="table-shell"><table class="session-ledger compact-ledger layout-1"><thead><tr><th>Session</th><th>' +
+    spendHead + "</th><th>" + shareHead + "</th><th>Context</th><th>Subagents</th><th>Activity <span>/ age</span></th></tr></thead><tbody>" +
+    group.rows.map((s) => ledgerRow(s, scale)).join("") +
+    "</tbody></table></div></section>"
+  );
+}
 function ledger(rows) {
   const scale = ledgerDollarScale(rows);
-  return (
-    '<div class="table-shell"><table class="session-ledger compact-ledger layout-1"><thead><tr><th>Session</th><th>Plan or spend <span>/ next 10 prompts</span></th><th>Share of limit</th><th>Context</th><th>Subagents</th><th>Activity <span>/ age</span></th></tr></thead><tbody>' +
-    rows
-      .map((s) => {
-        const next = forecast(s),
-          burning = s.notification?.hot === true;
-        return (
-          '<tr class="' +
-          (burning ? "burning-row" : "") +
-          '" data-session="' +
-          esc(keyOf(s)) +
-          '"><td><div class="indexed-title">' +
-          titleCell(s) +
-          "</div></td><td>" +
-          spendVisual(s, scale) +
-          "</td><td>" +
-          responsibilityCell(s) +
-          "</td><td>" +
-          donut(s) +
-          "</td><td>" +
-          subagentCell(s) +
-          '</td><td class="time-cell"><span>' +
-          age(s.last_activity_at) +
-          " ago</span><small>" +
-          age(startTime(s)) +
-          " old</small></td></tr>"
-        );
-      })
-      .join("") +
-    "</tbody></table></div>"
-  );
+  return planGroups(rows).map((group) => ledgerTable(group, scale)).join("");
 }
 
 function curvePoints(b) {
@@ -1101,40 +1307,9 @@ function saveUrl() {
 function initialUrl() {
   const q = new URLSearchParams(location.search);
   state.provider = ["claude", "codex"].includes(q.get("tool")) ? q.get("tool") : "all";
-  state.sort = ["activity", "spent", "forecast"].includes(q.get("sort")) ? q.get("sort") : "forecast";
+  state.sort = ["activity", "spent", "forecast", "share", "context"].includes(q.get("sort")) ? q.get("sort") : "forecast";
   state.selected = q.get("session");
-  $("#sort").value = state.sort;
   saveUrl();
-}
-function renderAccounts() {
-  const quotas = state.payload?.account_quotas;
-  const wanted = { claude: ["five_hour", "weekly"], codex: ["weekly", "monthly"] };
-  const cards = [];
-  for (const provider of ["codex", "claude"]) {
-    const q = quotas?.[provider];
-    const windows = Array.isArray(q?.windows) ? q.windows : [];
-    const meters = wanted[provider]
-      .map((period) => windows.find((window) => window?.period === period))
-      .filter((window) => window && finite(window.used_percent))
-      .map((window) => {
-        const label = window.period === "five_hour" ? "5-hour" : window.period;
-        const used = Math.max(0, Math.min(100, window.used_percent));
-        return '<div class="quota-meter"><div><span>' + label + ' limit</span><b>' + used.toFixed(0) + '% used</b></div><i><em style="width:' + used + '%"></em></i></div>';
-      })
-      .join("");
-    if (meters) cards.push('<article class="account-card"><h2><img src="/' + provider + '.png" alt="">' + providerName(provider) + '</h2>' + meters + '</article>');
-  }
-  $("#account-strip").innerHTML = cards.join("");
-  $("#account-strip").hidden = !cards.length;
-}
-function renderOutsidePlan(rows) {
-  const paid = rows.filter(showsMoney);
-  const total = paid.reduce((sum, session) => sum + (cost(session) ?? 0), 0);
-  const next = paid.reduce((sum, session) => sum + (forecast(session) ?? 0), 0);
-  $("#outside-plan").hidden = !paid.length;
-  $("#outside-plan").innerHTML = paid.length
-    ? '<div class="outside-plan-copy"><span>Outside your plan</span><b>' + paid.length + ' live session' + (paid.length === 1 ? '' : 's') + '</b><strong>' + money(total) + ' spent</strong>' + (next ? '<em>' + additional(next) + ' over the next 10 prompts</em>' : '') + '</div>'
-    : "";
 }
 function render() {
   if (axisDragging) return;
@@ -1146,13 +1321,12 @@ function render() {
   $("#live-count").textContent = rows.length;
   renderFreshness(stale);
   document.querySelectorAll("[data-provider]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.provider === state.provider)));
+  $("#kpi-banner").innerHTML = rows.length ? kpiBanner(rows) : "";
   $("#fleet").innerHTML = rows.length
     ? ledger(rows)
     : '<div class="empty"><h3>No live sessions</h3><p>No activity in the last ' + liveWindowLabel() +
       (state.provider !== "all" ? " for " + providerName(state.provider) : "") +
       ". New sessions appear automatically.</p></div>";
-  renderAccounts();
-  renderOutsidePlan(rows);
   renderInspector();
 }
 function renderFreshness(stale) {
@@ -1201,7 +1375,8 @@ function bindEvents() {
   });
   $("#close").addEventListener("click", closeSession);
   $("#backdrop").addEventListener("click", closeSession);
-  $("#sort").addEventListener("change", (event) => {
+  document.addEventListener("change", (event) => {
+    if (!(event.target instanceof HTMLSelectElement) || !event.target.classList.contains("sort-select")) return;
     state.sort = event.target.value;
     saveUrl();
     render();
@@ -1233,7 +1408,7 @@ function bindEvents() {
     render();
   });
 }
-async function refresh(triggerCollector = false) {
+async function refresh(triggerCollector = false, healthAlreadyRefreshed = false) {
   if (axisDragging || state.refreshInFlight) return;
   state.refreshInFlight = true;
   renderFreshness(state.error || !state.payload || elapsed(state.payload?.generated_at) > 120000);
@@ -1242,7 +1417,7 @@ async function refresh(triggerCollector = false) {
       const refreshResponse = await fetch("/api/refresh", { method: "POST", cache: "no-store" });
       if (!refreshResponse.ok) throw new Error("Collector refresh failed");
     }
-    const health = previewMode ? Promise.resolve(false) : refreshHealth();
+    const health = previewMode || healthAlreadyRefreshed ? Promise.resolve(false) : refreshHealth();
     const headers = state.snapshotEtag ? { "If-None-Match": state.snapshotEtag } : {};
     const response = await fetch(previewMode ? "/subscription-preview.json" : "/api/live-sessions", { cache: "no-store", headers });
     await health;
@@ -1303,7 +1478,7 @@ function scheduleHealthRefresh() {
   if (state.nextRefreshAt === null) return;
   healthTimer = window.setTimeout(async () => {
     const advanced = await refreshHealth();
-    if (advanced) await refresh();
+    if (advanced) await refresh(false, true);
   }, Math.max(1000, state.nextRefreshAt - Date.now() + 100));
 }
 async function refreshNow() {
@@ -1568,6 +1743,64 @@ function sessionGraph(s) {
     '</div><p class="context-chart-note">Context follows recorded usage. Compaction markers show spend recorded by the event; the next context reading can arrive later.</p>'
   );
 }
+/* Included sessions have no cost to plot, so they get the question that does
+   matter for them: how context fills up prompt after prompt, and whether a
+   compaction bought any headroom back. Paid sessions keep their spend chart. */
+function contextRows(s) {
+  return Array.isArray(s.iterations)
+    ? s.iterations
+        .filter((q) => q && finite(q.iteration) && nonnegative(q.context_tokens))
+        .sort((a, b) => a.iteration - b.iteration)
+    : [];
+}
+function contextGraph(s) {
+  const rows = contextRows(s);
+  if (rows.length < 2) return '<p class="graph-empty">Not enough prompts recorded yet to draw a trend.</p>';
+  const W = 620, H = 210, L = 46, R = 16, T = 16, B = 30;
+  const lastIter = rows[rows.length - 1].iteration;
+  const firstIter = rows[0].iteration;
+  const span = Math.max(1, lastIter - firstIter);
+  const windowTokens =
+    finite(s.context_window_tokens) && s.context_window_tokens > 0
+      ? s.context_window_tokens
+      : Math.max(...rows.map((r) => r.context_tokens)) * 1.15;
+  const x = (it) => L + ((it - firstIter) / span) * (W - L - R);
+  const y = (v) => T + (1 - Math.min(1, v / windowTokens)) * (H - T - B);
+  const points = rows.map((r) => [x(r.iteration), y(r.context_tokens)]);
+  const line = points.map(([px, py], i) => (i ? "L" : "M") + px.toFixed(1) + " " + py.toFixed(1)).join(" ");
+  const area = line + " L" + points[points.length - 1][0].toFixed(1) + " " + (H - B) + " L" + points[0][0].toFixed(1) + " " + (H - B) + " Z";
+  const grid = [0, 0.25, 0.5, 0.75, 1]
+    .map((f) => {
+      const py = T + (1 - f) * (H - T - B);
+      return (
+        '<line class="cg-grid" x1="' + L + '" x2="' + (W - R) + '" y1="' + py.toFixed(1) + '" y2="' + py.toFixed(1) + '"/>' +
+        '<text class="cg-ylab" x="' + (L - 8) + '" y="' + (py + 3).toFixed(1) + '">' + Math.round(f * 100) + "%</text>"
+      );
+    })
+    .join("");
+  const ticks = [firstIter, Math.round(firstIter + span / 2), lastIter]
+    .filter((v, i, a) => a.indexOf(v) === i)
+    .map((it) => '<text class="cg-xlab" x="' + x(it).toFixed(1) + '" y="' + (H - B + 18) + '">' + it + "</text>")
+    .join("");
+  // A compaction is the one moment context legitimately falls; mark it.
+  const drops = rows
+    .map((r, i) => (i && rows[i - 1].context_tokens - r.context_tokens > windowTokens * 0.08 ? r : null))
+    .filter(Boolean)
+    .map((r) => '<line class="cg-compact" x1="' + x(r.iteration).toFixed(1) + '" x2="' + x(r.iteration).toFixed(1) + '" y1="' + T + '" y2="' + (H - B) + '"><title>Context compacted</title></line>')
+    .join("");
+  const end = points[points.length - 1];
+  const nowPct = Math.round((rows[rows.length - 1].context_tokens / windowTokens) * 100);
+  return (
+    '<figure class="context-graph"><svg viewBox="0 0 ' + W + " " + H + '" role="img" aria-label="Context used against prompt number">' +
+    grid + drops +
+    '<path class="cg-area" d="' + area + '"/><path class="cg-line" d="' + line + '"/>' +
+    '<circle class="cg-end" cx="' + end[0].toFixed(1) + '" cy="' + end[1].toFixed(1) + '" r="3.5"/>' +
+    '<text class="cg-end-label" x="' + Math.min(end[0] + 8, W - R - 30) + '" y="' + Math.max(end[1] - 8, T + 10) + '">' + nowPct + "%</text>" +
+    ticks +
+    '<text class="cg-axis" x="' + ((L + W - R) / 2) + '" y="' + (H - 2) + '">Prompt</text>' +
+    "</svg></figure>"
+  );
+}
 function tokenBreakdown(s) {
   const u = s.token_usage || {},
     parts = [
@@ -1592,7 +1825,7 @@ function renderInspector() {
   const wasOpen = !panel.hidden;
   panel.hidden = !s;
   $("#backdrop").hidden = !s;
-  for (const node of [document.querySelector("main"), document.querySelector("header"), $("#account-strip")]) node.inert = !!s;
+  for (const node of [document.querySelector("main"), document.querySelector("header")]) node.inert = !!s;
   document.body.style.overflow = s ? "hidden" : "";
   if (!s) {
     if (state.selected && state.payload) {
@@ -1608,7 +1841,7 @@ function renderInspector() {
     scroll = $("#inspector-body").scrollTop;
   const included = !showsMoney(s);
   const stats = included
-    ? '<div class="inspector-stats"><div><span>Subscription</span><strong>' + (s.usage_mode === "included" ? "Included" : "Unknown") + '</strong>' + ([quotaForecastText(s), quotaShareText(s)].filter(Boolean).map(esc).join(" · ") ? '<small>' + [quotaForecastText(s), quotaShareText(s)].filter(Boolean).map(esc).join(" · ") + '</small>' : '') + '</div><div><span>Context</span><strong>' + (pct !== null ? Math.round(pct) + "%" : "—") + "</strong><small>" + tokens(s.context_tokens) + " / " + tokens(s.context_window_tokens) + "</small></div><div><span>Prompts</span><strong>" + count(s) + "</strong><small>recorded locally</small></div></div>"
+    ? '<div class="inspector-stats"><div><span>Subscription</span><strong>' + (s.quota_status === "stale" ? "Last known: included" : s.usage_mode === "included" ? "Included" : "Unknown") + '</strong></div><div><span>Context</span><strong>' + (pct !== null ? Math.round(pct) + "%" : "—") + "</strong><small>" + tokens(s.context_tokens) + " / " + tokens(s.context_window_tokens) + "</small></div><div><span>Prompts</span><strong>" + count(s) + "</strong><small>recorded locally</small></div></div>"
     : '<div class="inspector-stats"><div><span>Recorded spend</span><strong>' + money(cost(s)) + "</strong><small>" + count(s) + " prompts</small></div><div><span>" + (last?.completed === false ? "Current prompt" : "Last prompt") + "</span><strong>" + money(last?.priced === false ? null : last?.cost_usd) + "</strong><small>" + (last?.completed === false ? "still accumulating" : "recorded cost") + "</small></div><div><span>Next 10 prompts</span><strong>" + additional(forecast(s)) + "</strong><small>additional estimate</small></div><div><span>Context</span><strong>" + (pct !== null ? Math.round(pct) + "%" : "—") + "</strong><small>" + tokens(s.context_tokens) + " / " + tokens(s.context_window_tokens) + "</small></div></div>";
   $("#inspector-body").innerHTML =
     '<span class="eyebrow">' +
@@ -1629,6 +1862,7 @@ function renderInspector() {
     age(startTime(s)) +
     ' old</div>' + stats +
     (!included && a.severity ? '<div class="inspector-signal"><strong>' + esc(a.action) + "</strong><p>" + esc(a.evidence) + "</p></div>" : "") +
+    (included ? '<div class="section-title"><h3>How context fills up</h3><span class="tiny">Share of the window, prompt by prompt</span></div>' + contextGraph(s) : "") +
     (!included ? '<div class="section-title"><h3>How this session is spending</h3><div class="mini-tabs"><button data-chart="cumulative" class="' +
     (state.chart === "cumulative" ? "on" : "") +
     '">Cumulative</button><button data-chart="prompt" class="' +
@@ -1781,6 +2015,7 @@ function bindNotificationPanel() {
 function browserAlerts(payload) {
   if (notificationPermission() !== "granted") return;
   for (const [provider, quotas] of Object.entries(payload.account_quotas || {})) {
+    if (quotas?.status === "stale") continue;
     for (const window of Array.isArray(quotas?.windows) ? quotas.windows : []) {
       if (!finite(window?.used_percent)) continue;
       const threshold = [100, 80, 50].find((value) => window.used_percent >= value);
@@ -1820,6 +2055,7 @@ function browserAlerts(payload) {
     }
   }
   for (const session of payload.sessions || []) {
+    if (payload.account_quotas?.[session.provider]?.status === "stale") continue;
     if (!showsMoney(session) || !finite(session.projected_next_10_tasks_usd) || session.projected_next_10_tasks_usd < 10) continue;
     const key = "konvu-alert-" + session.provider + "-" + session.id;
     const previous = JSON.parse(localStorage.getItem(key) || "null");

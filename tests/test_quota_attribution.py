@@ -39,6 +39,27 @@ def snapshot(used: float, sessions: list[dict[str, object]]) -> dict[str, object
 
 
 class QuotaAttributionTests(unittest.TestCase):
+    def test_session_reactivation_keeps_its_previous_usage_baseline(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+        ):
+            first = snapshot(20, [session("a", 100)])
+            first["generated_at"] = "2026-01-01T00:00:00+00:00"
+            apply_quota_attribution(first)
+
+            absent = snapshot(20, [])
+            absent["generated_at"] = "2026-01-01T00:01:00+00:00"
+            apply_quota_attribution(absent)
+
+            returned = snapshot(21, [session("a", 200)])
+            returned["generated_at"] = "2026-01-01T00:02:00+00:00"
+            apply_quota_attribution(returned)
+
+            attribution = returned["sessions"][0]["quota_attribution"]
+            self.assertEqual(attribution["state"], "estimated")
+            self.assertEqual(attribution["windows"][0]["estimated_percent"], 1.0)
+
     def test_fractional_reset_jitter_stays_in_the_same_window(self) -> None:
         with (
             tempfile.TemporaryDirectory() as directory,
@@ -113,7 +134,7 @@ class QuotaAttributionTests(unittest.TestCase):
             stored = next(iter(allocations.values()))["allocations"]
             self.assertEqual(stored, {"a": 5.0, "b": 1.0})
 
-    def test_projects_next_ten_only_after_stable_calibration(self) -> None:
+    def test_projects_next_ten_after_first_real_calibration(self) -> None:
         with (
             tempfile.TemporaryDirectory() as directory,
             patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
@@ -124,7 +145,7 @@ class QuotaAttributionTests(unittest.TestCase):
                 next_snapshot["sessions"][0]["projected_next_10_usage_tokens"] = 50
                 apply_quota_attribution(next_snapshot)
                 window = next_snapshot["sessions"][0]["quota_attribution"]["windows"][0]
-                self.assertNotIn("projected_next_10_percent", window)
+                self.assertEqual(window["projected_next_10_percent"], 1.0)
 
             calibrated = snapshot(26, [session("a", 400)])
             calibrated["sessions"][0]["projected_next_10_usage_tokens"] = 50
@@ -200,7 +221,7 @@ class QuotaAttributionTests(unittest.TestCase):
             self.assertEqual(stored["calibration_samples"], [])
             self.assertEqual(stored["pending"], {})
 
-    def test_unstable_calibration_does_not_produce_a_forecast(self) -> None:
+    def test_rounded_provider_ticks_use_the_aggregate_calibration_rate(self) -> None:
         with (
             tempfile.TemporaryDirectory() as directory,
             patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
@@ -211,7 +232,7 @@ class QuotaAttributionTests(unittest.TestCase):
                 next_snapshot["sessions"][0]["projected_next_10_usage_tokens"] = 50
                 apply_quota_attribution(next_snapshot)
             window = next_snapshot["sessions"][0]["quota_attribution"]["windows"][0]
-            self.assertNotIn("projected_next_10_percent", window)
+            self.assertEqual(window["projected_next_10_percent"], 1.43)
 
     def test_each_window_gets_the_same_interval_and_a_reset_clears_its_ledger(
         self,
@@ -244,8 +265,16 @@ class QuotaAttributionTests(unittest.TestCase):
             self.assertEqual(
                 second["sessions"][0]["quota_attribution"]["windows"],
                 [
-                    {"period": "five_hour", "estimated_percent": 3.0},
-                    {"period": "weekly", "estimated_percent": 3.0},
+                    {
+                        "period": "five_hour",
+                        "estimated_percent": 3.0,
+                        "scope": "observed_window",
+                    },
+                    {
+                        "period": "weekly",
+                        "estimated_percent": 3.0,
+                        "scope": "observed_window",
+                    },
                 ],
             )
             apply_quota_attribution(snapshot_with_windows(1, 36, [session("a", 200)]))

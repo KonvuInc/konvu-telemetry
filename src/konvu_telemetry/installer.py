@@ -448,6 +448,7 @@ def install_launch_agent(interval: int, ensure_launcher: bool = True) -> None:
         ],
         "RunAtLoad": True,
         "KeepAlive": {"SuccessfulExit": False},
+        "ThrottleInterval": 30,
         "StandardOutPath": str(logs / "collector.log"),
         "StandardErrorPath": str(logs / "collector.error.log"),
     }

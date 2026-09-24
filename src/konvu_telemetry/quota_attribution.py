@@ -15,9 +15,13 @@ class SessionUsage(TypedDict):
     credits: float | None
 
 
-MIN_FORECAST_SAMPLES = 3
-MIN_FORECAST_PERCENT = 3.0
-MAX_FORECAST_RATE_SPREAD = 3.0
+class StoredSessionUsage(SessionUsage, total=False):
+    last_seen_at: float
+
+
+MIN_FORECAST_SAMPLES = 1
+MIN_FORECAST_PERCENT = 1.0
+SESSION_BASELINE_RETENTION_SECONDS = 32 * 24 * 60 * 60
 STATE_VERSION = 2
 
 
@@ -85,10 +89,17 @@ def _calibration_rate(window: dict[str, object]) -> float | None:
     total_percent = sum(percent for percent, _ in samples)
     if total_percent < MIN_FORECAST_PERCENT:
         return None
-    rates = [percent / weight for percent, weight in samples]
-    if max(rates) / min(rates) > MAX_FORECAST_RATE_SPREAD:
-        return None
     return total_percent / sum(weight for _, weight in samples)
+
+
+def _snapshot_time(snapshot: dict[str, object]) -> float | None:
+    value = snapshot.get("generated_at")
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
 
 
 def _window_key(window: dict[str, object]) -> str | None:
@@ -117,6 +128,7 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
     if not isinstance(sessions, list) or not isinstance(quotas, dict):
         return
     state = _load_state()
+    observed_at = _snapshot_time(snapshot)
     providers = state["providers"]
     assert isinstance(providers, dict)
     session_rows = [row for row in sessions if isinstance(row, dict)]
@@ -142,7 +154,7 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
             previous_sessions = provider_state["sessions"]
             windows_state = provider_state["windows"]
         provider_state.pop("pending", None)
-        current: dict[str, SessionUsage] = {}
+        current: dict[str, StoredSessionUsage] = {}
         interval_weights: dict[str, float] = {}
         for session in session_rows:
             if session.get("provider") != provider or not isinstance(
@@ -153,7 +165,13 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
             if usage is None:
                 continue
             key = str(session["id"])
-            current[key] = usage
+            stored_usage: StoredSessionUsage = {
+                "tokens": usage["tokens"],
+                "credits": usage["credits"],
+            }
+            if observed_at is not None:
+                stored_usage["last_seen_at"] = observed_at
+            current[key] = stored_usage
             earlier = previous_sessions.get(key)
             if isinstance(earlier, dict):
                 old_tokens = _number(earlier.get("tokens")) or 0.0
@@ -170,7 +188,19 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
                 )
                 if weight > 0:
                     interval_weights[key] = weight
-        provider_state["sessions"] = current
+        retained_sessions = {
+            session_id: usage
+            for session_id, usage in previous_sessions.items()
+            if isinstance(session_id, str)
+            and isinstance(usage, dict)
+            and session_id not in current
+            and (
+                observed_at is None
+                or (last_seen := _number(usage.get("last_seen_at"))) is None
+                or observed_at - last_seen <= SESSION_BASELINE_RETENTION_SECONDS
+            )
+        }
+        provider_state["sessions"] = {**retained_sessions, **current}
         for raw_window in raw_windows:
             if not isinstance(raw_window, dict):
                 continue
@@ -280,6 +310,7 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
                     estimate: dict[str, object] = {
                         "period": raw_window.get("period"),
                         "estimated_percent": round(share, 2),
+                        "scope": "observed_window",
                     }
                     if forecast_weight is not None and calibration is not None:
                         estimate["projected_next_10_percent"] = round(
@@ -305,6 +336,14 @@ def apply_usage_modes(snapshot: dict[str, object]) -> None:
         provider = session.get("provider")
         account = quotas.get(provider) if isinstance(quotas, dict) else None
         windows = account.get("windows") if isinstance(account, dict) else None
+        status = account.get("status") if isinstance(account, dict) else None
+        session["quota_status"] = (
+            status
+            if status in {"stale", "unavailable"}
+            else "fresh"
+            if isinstance(windows, list) and windows
+            else "unavailable"
+        )
         exhausted = (
             isinstance(account, dict) and account.get("ordinary_usage_allowed") is False
         )

@@ -393,9 +393,8 @@ def _comparable_forecast(
     session: dict[str, object],
     rows: list[TranscriptTelemetry],
     replace_forecast: bool,
-    global_fallback: tuple[float, int] | None = None,
 ) -> None:
-    """Forecast from matching prompts, then provider history, then sparse session data."""
+    """Forecast from matching prompts, then sparse data from this session."""
     configurations = sorted(
         (configuration for row in rows for configuration in row.configurations),
         key=lambda item: item[0],
@@ -542,19 +541,6 @@ def _comparable_forecast(
             6,
         )
         return
-    if global_fallback is not None:
-        forecast, samples = global_fallback
-        session["projected_next_10_tasks_usd"] = round(forecast, 6)
-        session["forecast_basis"] = {
-            "method": "provider_median_history",
-            "sample_count": samples,
-            "model": None,
-            "effort": None,
-            "speed": None,
-            "coverage": "historical_fallback",
-            "reason": "sparse_session_history",
-        }
-        return
     recent_completed = [
         iteration
         for iteration in iterations
@@ -589,30 +575,6 @@ def _comparable_forecast(
         "coverage": "insufficient_history",
         "reason": "no_completed_prompt_or_provider_history",
     }
-
-
-def _provider_forecast_fallback(
-    snapshot: dict[str, object], provider: Provider
-) -> tuple[float, int] | None:
-    baselines = snapshot.get("baselines")
-    forecasts = baselines.get("forecasts") if isinstance(baselines, dict) else None
-    provider_forecasts = (
-        forecasts.get("provider_median_next_10")
-        if isinstance(forecasts, dict)
-        else None
-    )
-    fallback = (
-        provider_forecasts.get(provider)
-        if isinstance(provider_forecasts, dict)
-        else None
-    )
-    if not isinstance(fallback, dict):
-        return None
-    value = _number(fallback.get("median_next_10_usd"))
-    samples = fallback.get("sessions")
-    if value is None or not isinstance(samples, int) or samples < 1:
-        return None
-    return value, samples
 
 
 def enrich_snapshot(
@@ -671,7 +633,6 @@ def enrich_snapshot(
             session,
             rows,
             session.get("forecast_mode") != "warming_up",
-            _provider_forecast_fallback(snapshot, session_provider),
         )
         if session_provider == "codex":
             task_tools = {

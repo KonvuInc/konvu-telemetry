@@ -9,7 +9,7 @@
   </head>
   <body>
     <header class="top">
-      <div class="brand"><img src="/konvu-ghost.svg" alt="Konvu" /><strong>Coding Agents monitoring</strong></div>
+      <div class="brand"><img src="/konvu-ghost.svg" alt="Konvu" width="19" height="19" /><strong>Coding Agents monitoring</strong></div>
       <div class="top-actions">
         <button class="freshness" id="freshness" type="button"></button>
         <div class="notification-wrap">
@@ -55,25 +55,12 @@
         <div class="fleet-controls">
           <div class="provider-filter" role="group" aria-label="Filter by provider">
             <button data-provider="all" aria-pressed="true">All agents</button
-            ><button data-provider="claude" aria-pressed="false"><img src="/claude.png" alt="" />Claude</button
-            ><button data-provider="codex" aria-pressed="false"><img src="/codex.png" alt="" />Codex</button>
+            ><button data-provider="claude" aria-pressed="false"><img src="/claude.png" alt="" width="15" height="15" />Claude</button
+            ><button data-provider="codex" aria-pressed="false"><img src="/codex.png" alt="" width="15" height="15" />Codex</button>
           </div>
         </div>
       </div>
-      <section id="account-strip" aria-label="Plan usage" hidden></section>
-      <section id="outside-plan" aria-label="Sessions outside your plan" hidden></section>
-      <div id="ledger-toolbar" class="ledger-toolbar">
-        <div id="ledger-controls" class="ledger-controls" role="group" aria-label="Ledger filters">
-          <label class="sort-control"
-            >Sort
-            <select id="sort" aria-label="Sort sessions">
-              <option value="activity">Last activity</option>
-              <option value="spent">Most spent</option>
-              <option value="forecast">Highest forecast</option>
-            </select></label
-          >
-        </div>
-      </div>
+      <section id="kpi-banner" aria-label="Fleet summary"></section>
       <div id="fleet"></div>
     </main>
     <div id="graph-tooltip" role="tooltip" hidden></div>
