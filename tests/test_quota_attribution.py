@@ -36,6 +36,21 @@ def snapshot(used: float, sessions: list[dict[str, object]]) -> dict[str, object
 
 
 class QuotaAttributionTests(unittest.TestCase):
+    def test_fractional_reset_jitter_stays_in_the_same_window(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ, {"KONVU_LIVE_USAGE_HOME": directory}
+        ):
+            first = snapshot(20, [session("a", 100), session("b", 100)])
+            first["account_quotas"]["claude"]["windows"][0]["resets_at"] = "2026-01-01T05:00:00.100000+00:00"
+            apply_quota_attribution(first)
+            second = snapshot(24, [session("a", 160), session("b", 120)])
+            second["account_quotas"]["claude"]["windows"][0]["resets_at"] = "2026-01-01T05:00:00.900000+00:00"
+            apply_quota_attribution(second)
+            self.assertEqual(
+                [row["quota_attribution"]["windows"][0]["estimated_percent"] for row in second["sessions"]],
+                [3.0, 1.0],
+            )
+
     def test_codex_spending_cap_does_not_mask_available_subscription_usage(self) -> None:
         snapshot_data = {
             "sessions": [{"id": "codex", "provider": "codex"}],

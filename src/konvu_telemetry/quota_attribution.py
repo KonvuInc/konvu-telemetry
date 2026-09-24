@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from datetime import datetime
 from typing import TypedDict
 
 from .storage import quota_attribution_path, write_private_json
@@ -57,7 +58,15 @@ def _window_key(window: dict[str, object]) -> str | None:
     reset = window.get("resets_at")
     if not isinstance(period, str) or not isinstance(limit_id, str):
         return None
-    return f"{limit_id}:{period}:{reset if isinstance(reset, str) else 'unknown'}"
+    reset_key = "unknown"
+    if isinstance(reset, str):
+        try:
+            reset_key = datetime.fromisoformat(reset.replace("Z", "+00:00")).replace(
+                second=0, microsecond=0
+            ).isoformat()
+        except ValueError:
+            reset_key = reset
+    return f"{limit_id}:{period}:{reset_key}"
 
 
 def apply_quota_attribution(snapshot: dict[str, object]) -> None:
