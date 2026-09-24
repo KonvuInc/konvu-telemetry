@@ -285,8 +285,8 @@ def quota_attribution_text(session: dict[str, object]) -> str:
         if not isinstance(period, str) or not isinstance(estimate, (int, float)):
             continue
         label = "5-hour" if period == "five_hour" else period
-        parts.append(f"~{float(estimate):.1f}% of {label} burn")
-    return " · ".join(parts) if parts else "observing session share"
+        parts.append(f"~{float(estimate):.1f}% of {label} limit")
+    return " · ".join(parts)
 
 
 def usage_rows(
@@ -329,13 +329,12 @@ def usage_rows(
         rows.append(subagents)
     context_row = f"🧠 {context_text}"
     if usage_mode == "included":
-        context_row += f" · {quota_attribution_text(session)}"
+        attribution = quota_attribution_text(session)
+        if attribution:
+            context_row += f" · Responsible for {attribution.removeprefix('~')}"
     elif quota_text:
         context_row += f" · {quota_text}"
     rows.append(context_row)
-    norm = baseline_text(session)
-    if norm:
-        rows.append(norm)
     rows.append(dashboard_line())
     return rows
 

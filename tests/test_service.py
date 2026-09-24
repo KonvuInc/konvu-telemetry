@@ -1856,7 +1856,6 @@ class ServiceTests(unittest.TestCase):
                 "💸 $25.4 API-equivalent total · $4.9 API-equivalent for the next 10 prompts",
                 "🤖 1 live / 2 total · 90% context shared · $0.4 API-equivalent",
                 "🧠 50% context · 3% weekly limit",
-                "🟢 12% below your median",
                 DASHBOARD_HINT,
             ],
         )
@@ -1875,7 +1874,7 @@ class ServiceTests(unittest.TestCase):
             rows[:2],
             [
                 "🟢 Included · 20% 5-hour limit",
-                "🧠 50% context · ~1.2% of 5-hour burn",
+                "🧠 50% context · Responsible for 1.2% of 5-hour limit",
             ],
         )
         self.assertNotIn("$", "\n".join(rows))
