@@ -186,15 +186,13 @@ def apply_usage_modes(snapshot: dict[str, object]) -> None:
         provider = session.get("provider")
         account = quotas.get(provider) if isinstance(quotas, dict) else None
         windows = account.get("windows") if isinstance(account, dict) else None
-        exhausted = isinstance(account, dict) and (
-            account.get("ordinary_usage_allowed") is False
-            or account.get("spend_control_reached") is True
-        )
+        exhausted = isinstance(account, dict) and account.get("ordinary_usage_allowed") is False
         if isinstance(windows, list):
             exhausted = exhausted or any(
                 (_number(window.get("used_percent")) or 0.0) >= 100
                 for window in windows
                 if isinstance(window, dict)
+                and window.get("period") in {"five_hour", "weekly"}
             )
         if exhausted:
             session["usage_mode"] = "exhausted"

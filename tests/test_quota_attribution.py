@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from konvu_telemetry.quota_attribution import apply_quota_attribution
+from konvu_telemetry.quota_attribution import apply_quota_attribution, apply_usage_modes
 from konvu_telemetry.storage import quota_attribution_path
 
 
@@ -36,6 +36,23 @@ def snapshot(used: float, sessions: list[dict[str, object]]) -> dict[str, object
 
 
 class QuotaAttributionTests(unittest.TestCase):
+    def test_codex_spending_cap_does_not_mask_available_subscription_usage(self) -> None:
+        snapshot_data = {
+            "sessions": [{"id": "codex", "provider": "codex"}],
+            "account_quotas": {
+                "codex": {
+                    "ordinary_usage_allowed": True,
+                    "spend_control_reached": True,
+                    "windows": [
+                        {"period": "weekly", "used_percent": 38},
+                        {"period": "monthly", "used_percent": 100},
+                    ],
+                }
+            },
+        }
+        apply_usage_modes(snapshot_data)
+        self.assertEqual(snapshot_data["sessions"][0]["usage_mode"], "included")
+
     def test_starts_observing_then_keeps_finished_session_allocations(self) -> None:
         with tempfile.TemporaryDirectory() as directory, patch.dict(
             os.environ, {"KONVU_LIVE_USAGE_HOME": directory}
