@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fetch Claude and Codex account limits every two minutes using provider-owned local logins without retaining credentials. Codex executable discovery now accepts only validated standard install locations rather than trusting `PATH`.
 - Render the Claude Code CLI status line from the same code as the three boxed surfaces, so a change to what is displayed lands everywhere at once. The Codex CLI box is byte-for-byte unchanged. The status line now says `50% context` rather than `50% session context`, and when Claude has not yet reported a context percentage it shows the session's token count instead of `waiting for first response session context`.
 - End every usage summary with a dashboard line. The Claude Code CLI status line, both desktop boxes, and the Codex CLI box link `http://127.0.0.1:7824/` while the collector is healthy, and otherwise tell you to run `konvu-telemetry setup` to start it. Hooks decide this from the collector's existing health record; they never open a connection.
 - Show usage in Claude Desktop and Codex Desktop, which collapse hook system messages into a hidden notice. Setup registers a `UserPromptSubmit` hook per provider that injects the usage box as context, and the reply ends with it.
