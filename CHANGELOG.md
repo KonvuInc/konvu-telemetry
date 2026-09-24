@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 - 2026-09-24
 
 - Fetch Claude and Codex account limits every two minutes using provider-owned local logins without retaining credentials. Codex executable discovery now accepts only validated standard install locations rather than trusting `PATH`.
 - Render the Claude Code CLI status line from the same code as the three boxed surfaces, so a change to what is displayed lands everywhere at once. The Codex CLI box is byte-for-byte unchanged. The status line now says `50% context` rather than `50% session context`, and when Claude has not yet reported a context percentage it shows the session's token count instead of `waiting for first response session context`.
