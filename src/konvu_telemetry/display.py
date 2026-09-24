@@ -19,7 +19,7 @@ from .parsers import (
     codex_turn_tool_calls,
 )
 from .service import load_health
-from .storage import session_path, snapshot_path, valid_session_id
+from .storage import snapshot_path, valid_session_id
 
 # Desktop clients hide hook system messages, so the box has to ride in as model context instead.
 PROMPT_BOX_INSTRUCTION = (
@@ -77,13 +77,18 @@ def relative_age(value: object) -> str:
     return f"{seconds // 3600}h ago"
 
 
-def recorded_quota_usage_text(provider: str) -> str:
-    """Read the collector's latest quota windows for a provider hook."""
+def recorded_snapshot() -> dict[str, object] | None:
+    """Read the collector's canonical snapshot."""
     try:
         snapshot = json.loads(snapshot_path().read_text())
     except (OSError, json.JSONDecodeError):
-        return ""
-    accounts = snapshot.get("account_quotas") if isinstance(snapshot, dict) else None
+        return None
+    return snapshot if isinstance(snapshot, dict) else None
+
+
+def quota_usage_text(snapshot: dict[str, object], provider: str) -> str:
+    """Render the latest recorded quota windows for one provider."""
+    accounts = snapshot.get("account_quotas")
     account = accounts.get(provider) if isinstance(accounts, dict) else None
     windows = account.get("windows") if isinstance(account, dict) else None
     parts: list[str] = []
@@ -107,7 +112,15 @@ def recorded_quota_usage_text(provider: str) -> str:
             else "account"
         )
         parts.append(f"{round(min(100, max(0, used)))}% {label} limit")
-    return " · ".join(parts)
+    text = " · ".join(parts)
+    stale = isinstance(account, dict) and account.get("status") == "stale"
+    return f"Last known · {text}" if text and stale else text
+
+
+def recorded_quota_usage_text(provider: str) -> str:
+    """Read the collector's latest quota windows for a provider hook."""
+    snapshot = recorded_snapshot()
+    return quota_usage_text(snapshot, provider) if snapshot is not None else ""
 
 
 def subagent_usage_text(session: dict[str, object]) -> str:
@@ -158,13 +171,14 @@ def quota_attribution_text(session: dict[str, object]) -> str:
     attribution = session.get("quota_attribution")
     windows = attribution.get("windows") if isinstance(attribution, dict) else None
     provider = session.get("provider")
+    target_period = "weekly" if provider == "codex" else "five_hour"
     parts: list[str] = []
     for window in windows if isinstance(windows, list) else []:
         if not isinstance(window, dict):
             continue
         period = window.get("period")
         estimate = window.get("estimated_percent")
-        if not isinstance(period, str) or not isinstance(estimate, (int, float)):
+        if period != target_period or not isinstance(estimate, (int, float)):
             continue
         label = "5-hour" if period == "five_hour" else period
         hot = (provider == "claude" and period == "five_hour" and estimate > 20) or (
@@ -210,11 +224,15 @@ def usage_rows(
     )
     total_cost = (
         session.get("total_cost_usd")
-        if usage_mode == "api_billed" or session.get("out_of_plan_spend_status") is None
+        if usage_mode == "api_billed"
         else session.get("out_of_plan_spend_usd")
+        if session.get("out_of_plan_spend_status") is not None
+        else None
     )
     total_text = (
         f"{money(total_cost)} API-equivalent"
+        if complete and isinstance(total_cost, (int, float))
+        else "— spent beyond plan"
         if complete
         else f"known minimum {money(total_cost)} API-equivalent"
         if session.get("cost_status") == "partial"
@@ -226,10 +244,13 @@ def usage_rows(
         else context_usage_text(session)
     )
     money_visible = usage_mode in {"api_billed", "exhausted"}
+    quota_stale = session.get("quota_status") == "stale"
+    included_label = "🟡 Last known: included" if quota_stale else "🟢 Included"
+    money_label = "🟡 Last known plan status · " if quota_stale else "💸 "
     rows = (
-        [f"💸 {total_text} total · {forecast_text}"]
+        [f"{money_label}{total_text} total · {forecast_text}"]
         if money_visible
-        else [f"🟢 Included · {quota_forecast_text(session)}".rstrip(" ·")]
+        else [f"{included_label} · {quota_forecast_text(session)}".rstrip(" ·")]
         if usage_mode == "included"
         else ["⚪ Subscription limit unavailable"]
     )
@@ -426,16 +447,18 @@ def codex_prompt_hook() -> None:
 
 
 def refreshed_session(provider: str, session_id: str) -> dict[str, object] | None:
-    """Read one session document the collector rendered, whatever its age."""
+    """Read one session from the collector's canonical fleet snapshot."""
     if provider not in ALLOWED_PROVIDERS or not valid_session_id(session_id):
         return None
-    path = session_path(provider, session_id)
-    try:
-        payload = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError, ValueError):
+    snapshot = recorded_snapshot()
+    if snapshot is None:
         return None
-    return (
-        {str(key): value for key, value in payload.items()}
-        if isinstance(payload, dict)
-        else None
-    )
+    sessions = snapshot.get("sessions")
+    for payload in sessions if isinstance(sessions, list) else []:
+        if (
+            isinstance(payload, dict)
+            and payload.get("provider") == provider
+            and payload.get("id") == session_id
+        ):
+            return {str(key): value for key, value in payload.items()}
+    return None

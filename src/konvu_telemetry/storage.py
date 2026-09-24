@@ -138,6 +138,10 @@ def health_path() -> Path:
     return home_dir() / "health.json"
 
 
+def collector_lock_path() -> Path:
+    return home_dir() / "collector.lock"
+
+
 def quota_attribution_path() -> Path:
     return home_dir() / "quota-attribution.json"
 

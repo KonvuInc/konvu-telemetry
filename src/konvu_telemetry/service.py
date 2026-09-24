@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timezone
+import fcntl
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -13,6 +15,7 @@ from socket import socket
 from socketserver import BaseServer
 from threading import Condition, Lock, Thread
 import time
+from typing import Iterator
 from urllib.parse import parse_qs, urlparse
 import webbrowser
 
@@ -25,6 +28,7 @@ from .live import IncrementalLiveState
 from .provider_limits import ProviderLimitPoller, stored_provider_quotas
 from .snapshot import build_snapshot, write_snapshot
 from .storage import (
+    collector_lock_path,
     health_path,
     parse_timestamp,
     session_path,
@@ -43,6 +47,29 @@ LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost"})
 LOGGER = logging.getLogger(__name__)
 _DASHBOARD_DATA_AVAILABLE = False
 REFRESH_TIMEOUT_SECONDS = 30
+
+
+@contextmanager
+def collector_process_lock() -> Iterator[None]:
+    """Prevent two collector processes from writing the canonical snapshot."""
+    path = collector_lock_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+") as handle:
+        os.chmod(path, 0o600)
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise SystemExit(
+                "Another Konvu telemetry collector is already running"
+            ) from error
+        handle.seek(0)
+        handle.truncate()
+        handle.write(str(os.getpid()))
+        handle.flush()
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 class RefreshCoordinator:
@@ -357,8 +384,7 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
         return
 
 
-def run_local_service(interval_seconds: int, port: int) -> None:
-    """Run the collector and localhost dashboard together in one process."""
+def _run_local_service(interval_seconds: int, port: int) -> None:
     directory = Path(__file__).with_name("dashboard")
     if not directory.is_dir():
         raise SystemExit(f"Dashboard files are missing from {directory}")
@@ -387,3 +413,9 @@ def run_local_service(interval_seconds: int, port: int) -> None:
         server.serve_forever()
     except KeyboardInterrupt:
         server.server_close()
+
+
+def run_local_service(interval_seconds: int, port: int) -> None:
+    """Run the sole collector and localhost dashboard process."""
+    with collector_process_lock():
+        _run_local_service(interval_seconds, port)

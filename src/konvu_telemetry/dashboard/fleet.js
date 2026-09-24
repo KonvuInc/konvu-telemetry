@@ -17,7 +17,6 @@ const previewMode = new URLSearchParams(location.search).get("preview") === "sub
 const state = {
   payload: null,
   view: "ledger",
-  baselineMode: "provider",
   provider: "all",
   sort: "forecast",
   selected: null,
@@ -75,7 +74,7 @@ const showsMoney = (s) => s.usage_mode === "exhausted" || s.usage_mode === "api_
 const cost = (s) => {
   if (!showsMoney(s) || s.cost_status === "unavailable") return null;
   if (s.usage_mode === "api_billed") return nonnegative(s.total_cost_usd) ? s.total_cost_usd : null;
-  if (s.out_of_plan_spend_status === undefined) return nonnegative(s.total_cost_usd) ? s.total_cost_usd : null;
+  if (s.out_of_plan_spend_status === undefined) return null;
   return nonnegative(s.out_of_plan_spend_usd) ? s.out_of_plan_spend_usd : null;
 };
 const forecast = (s) => (cost(s) !== null && nonnegative(s.projected_next_10_tasks_usd) ? s.projected_next_10_tasks_usd : null);
@@ -83,26 +82,6 @@ const quotaShare = (s, period = "five_hour") => {
   const windows = s.quota_attribution?.windows;
   const row = Array.isArray(windows) ? windows.find((w) => w?.period === period && finite(w.estimated_percent)) : null;
   return row ? row.estimated_percent : null;
-};
-const quotaShareText = (s) => {
-  const period = s.provider === "codex" ? "weekly" : "five_hour";
-  const share = quotaShare(s, period);
-  if (!finite(share)) return "";
-  const hot = (s.provider === "claude" && period === "five_hour" && share > 20) || (s.provider === "codex" && period === "weekly" && share > 10);
-  return "Responsible for ~" + share.toFixed(share >= 10 ? 0 : 1) + "% of " + (period === "five_hour" ? "5-hour" : "weekly") + " limit" + (hot ? " 🔥" : "");
-};
-const quotaForecastText = (s) => {
-  const windows = s.quota_attribution?.windows;
-  if (!Array.isArray(windows)) return "";
-  for (const period of ["five_hour", "weekly"]) {
-    const row = windows.find((window) => window?.period === period && finite(window.projected_next_10_percent));
-    if (row) {
-      const v = row.projected_next_10_percent;
-      // Ten percent of a window in ten prompts is the point it stops being noise.
-      return (v >= 10 ? "\uD83D\uDD25 " : "") + "Next 10 prompts: +" + v.toFixed(v >= 10 ? 0 : 1) + "% of " + (period === "five_hour" ? "5-hour" : "weekly") + " limit";
-    }
-  }
-  return "";
 };
 const context = (s) =>
   nonnegative(s.context_tokens) && finite(s.context_window_tokens) && s.context_window_tokens > 0
@@ -371,40 +350,6 @@ function donut(s) {
     "</span></div>"
   );
 }
-function recordedBaselineComparison(s) {
-  const scope = state.baselineMode === "matched" ? "model_effort" : "provider";
-  const baseline = s.baselines?.[scope] || (s.baseline?.scope === scope ? s.baseline : null);
-  const overhead = baseline?.cost_overhead_percent;
-  if (!finite(overhead)) return null;
-  const ratio = 1 + overhead / 100;
-  if (ratio < 0) return null;
-  return {
-    ratio,
-    matched: baseline.scope === "model_effort",
-    recorded: true,
-    median: baseline.median_cost_usd,
-    samples: baseline.sample_sessions,
-  };
-}
-function spendComparison(s) {
-  const c = recordedBaselineComparison(s);
-  if (!c) {
-    return {
-      ratio: null,
-      label: "Collector has no comparable baseline",
-      detail:
-        "The collector recalculates this from your stored local median every six hours. Medians are a comparison only; alerts follow the next-ten-prompt forecast.",
-    };
-  }
-  const label = c.matched ? "model + effort median" : providerName(s.provider) + " general median";
-  return {
-    ratio: c.ratio,
-    label: c.ratio.toFixed(2) + "× " + label,
-    detail: c.matched
-      ? "Current recorded spend against the matched local median. Medians are a comparison only; alerts follow the next-ten-prompt forecast."
-      : "Current recorded spend against the general provider median. Medians are a comparison only; alerts follow the next-ten-prompt forecast.",
-  };
-}
 function roundedDollarCeiling(value) {
   const total = Math.max(0.01, value),
     unit = 10 ** Math.floor(Math.log10(total));
@@ -558,7 +503,7 @@ function spendVisual(s, scale) {
       : "";
     return (
       '<div class="spending included-copy"><div class="included-copy-text"><strong>' +
-      (included ? "Included in your plan" : "Subscription status unavailable") + "</strong>" +
+      (s.quota_status === "stale" ? "Last known: included in your plan" : included ? "Included in your plan" : "Subscription status unavailable") + "</strong>" +
       (line ? "<small>" + esc(line) + "</small>" : "") + "</div>" +
       (finite(ahead) ? quotaFireIcon(ahead) : "") + "</div>"
     );
@@ -566,6 +511,7 @@ function spendVisual(s, scale) {
   const values =
       '<div class="spend-values"><strong>' +
       money(spent) +
+      (s.quota_status === "stale" ? '<small>Plan status last known</small>' : "") +
       '</strong><span class="forecast-label">' +
       burningCashIcon(next) +
       '<b class="forecast-amount">' +
@@ -781,7 +727,8 @@ function quotaInline(providers) {
         .join("");
       return (
         '<div class="quota-pill' + (quotas[id].ordinary_usage_allowed === false ? " exhausted" : "") + '">' +
-        '<span class="quota-legend"><img src="/' + esc(id) + '.png" alt="' + providerName(id) + '" width="12" height="12">Usage limit</span>' +
+        '<span class="quota-legend"><img src="/' + esc(id) + '.png" alt="' + providerName(id) + '" width="12" height="12">' +
+        (quotas[id].status === "stale" ? "Last known usage" : "Usage limit") + "</span>" +
         meters + "</div>"
       );
     })
@@ -1461,7 +1408,7 @@ function bindEvents() {
     render();
   });
 }
-async function refresh(triggerCollector = false) {
+async function refresh(triggerCollector = false, healthAlreadyRefreshed = false) {
   if (axisDragging || state.refreshInFlight) return;
   state.refreshInFlight = true;
   renderFreshness(state.error || !state.payload || elapsed(state.payload?.generated_at) > 120000);
@@ -1470,7 +1417,7 @@ async function refresh(triggerCollector = false) {
       const refreshResponse = await fetch("/api/refresh", { method: "POST", cache: "no-store" });
       if (!refreshResponse.ok) throw new Error("Collector refresh failed");
     }
-    const health = previewMode ? Promise.resolve(false) : refreshHealth();
+    const health = previewMode || healthAlreadyRefreshed ? Promise.resolve(false) : refreshHealth();
     const headers = state.snapshotEtag ? { "If-None-Match": state.snapshotEtag } : {};
     const response = await fetch(previewMode ? "/subscription-preview.json" : "/api/live-sessions", { cache: "no-store", headers });
     await health;
@@ -1531,7 +1478,7 @@ function scheduleHealthRefresh() {
   if (state.nextRefreshAt === null) return;
   healthTimer = window.setTimeout(async () => {
     const advanced = await refreshHealth();
-    if (advanced) await refresh();
+    if (advanced) await refresh(false, true);
   }, Math.max(1000, state.nextRefreshAt - Date.now() + 100));
 }
 async function refreshNow() {
@@ -1894,7 +1841,7 @@ function renderInspector() {
     scroll = $("#inspector-body").scrollTop;
   const included = !showsMoney(s);
   const stats = included
-    ? '<div class="inspector-stats"><div><span>Subscription</span><strong>' + (s.usage_mode === "included" ? "Included" : "Unknown") + '</strong>' + ([quotaForecastText(s), quotaShareText(s)].filter(Boolean).map(esc).join(" · ") ? '<small>' + [quotaForecastText(s), quotaShareText(s)].filter(Boolean).map(esc).join(" · ") + '</small>' : '') + '</div><div><span>Context</span><strong>' + (pct !== null ? Math.round(pct) + "%" : "—") + "</strong><small>" + tokens(s.context_tokens) + " / " + tokens(s.context_window_tokens) + "</small></div><div><span>Prompts</span><strong>" + count(s) + "</strong><small>recorded locally</small></div></div>"
+    ? '<div class="inspector-stats"><div><span>Subscription</span><strong>' + (s.quota_status === "stale" ? "Last known: included" : s.usage_mode === "included" ? "Included" : "Unknown") + '</strong></div><div><span>Context</span><strong>' + (pct !== null ? Math.round(pct) + "%" : "—") + "</strong><small>" + tokens(s.context_tokens) + " / " + tokens(s.context_window_tokens) + "</small></div><div><span>Prompts</span><strong>" + count(s) + "</strong><small>recorded locally</small></div></div>"
     : '<div class="inspector-stats"><div><span>Recorded spend</span><strong>' + money(cost(s)) + "</strong><small>" + count(s) + " prompts</small></div><div><span>" + (last?.completed === false ? "Current prompt" : "Last prompt") + "</span><strong>" + money(last?.priced === false ? null : last?.cost_usd) + "</strong><small>" + (last?.completed === false ? "still accumulating" : "recorded cost") + "</small></div><div><span>Next 10 prompts</span><strong>" + additional(forecast(s)) + "</strong><small>additional estimate</small></div><div><span>Context</span><strong>" + (pct !== null ? Math.round(pct) + "%" : "—") + "</strong><small>" + tokens(s.context_tokens) + " / " + tokens(s.context_window_tokens) + "</small></div></div>";
   $("#inspector-body").innerHTML =
     '<span class="eyebrow">' +
@@ -2068,6 +2015,7 @@ function bindNotificationPanel() {
 function browserAlerts(payload) {
   if (notificationPermission() !== "granted") return;
   for (const [provider, quotas] of Object.entries(payload.account_quotas || {})) {
+    if (quotas?.status === "stale") continue;
     for (const window of Array.isArray(quotas?.windows) ? quotas.windows : []) {
       if (!finite(window?.used_percent)) continue;
       const threshold = [100, 80, 50].find((value) => window.used_percent >= value);
@@ -2107,6 +2055,7 @@ function browserAlerts(payload) {
     }
   }
   for (const session of payload.sessions || []) {
+    if (payload.account_quotas?.[session.provider]?.status === "stale") continue;
     if (!showsMoney(session) || !finite(session.projected_next_10_tasks_usd) || session.projected_next_10_tasks_usd < 10) continue;
     const key = "konvu-alert-" + session.provider + "-" + session.id;
     const previous = JSON.parse(localStorage.getItem(key) || "null");

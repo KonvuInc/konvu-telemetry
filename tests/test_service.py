@@ -1,5 +1,6 @@
 import json
 from collections.abc import Callable
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from io import StringIO
 import os
@@ -113,6 +114,16 @@ def health_patch(health: object) -> object:
 
 
 class ServiceTests(unittest.TestCase):
+    def test_collector_process_lock_rejects_a_second_writer(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+            service.collector_process_lock(),
+        ):
+            with self.assertRaisesRegex(SystemExit, "already running"):
+                with service.collector_process_lock():
+                    pass
+
     def test_once_collects_authoritative_provider_quotas(self) -> None:
         quotas = {"claude": {"windows": []}, "codex": {"windows": []}}
         with (
@@ -121,6 +132,10 @@ class ServiceTests(unittest.TestCase):
             patch("konvu_telemetry.collector.build_snapshot", return_value={}) as build,
             patch("konvu_telemetry.collector.write_snapshot"),
             patch("konvu_telemetry.collector.write_health"),
+            patch(
+                "konvu_telemetry.collector.collector_process_lock",
+                return_value=nullcontext(),
+            ),
         ):
             poller.return_value.refresh.return_value = quotas
             collector_main(["once"])
@@ -810,10 +825,6 @@ class ServiceTests(unittest.TestCase):
                     return_value=[parent, child],
                 ),
                 patch("konvu_telemetry.snapshot.load_pricing", return_value=prices),
-                patch(
-                    "konvu_telemetry.snapshot.load_baselines",
-                    return_value={"forecasts": {"provider_median_next_10": {}}},
-                ),
                 patch("konvu_telemetry.snapshot.enrich_snapshot"),
                 patch("konvu_telemetry.snapshot.locate_compactions"),
                 patch("konvu_telemetry.snapshot.apply_session_hot_state"),
@@ -830,13 +841,13 @@ class ServiceTests(unittest.TestCase):
                 "iterations",
                 "context_history",
                 "token_usage",
-                "total_credit_equivalent",
-                "projected_next_10_tasks_credit_equivalent",
             }.issubset(session)
         )
         self.assertFalse(
             {
                 "baseline",
+                "total_credit_equivalent",
+                "projected_next_10_tasks_credit_equivalent",
                 "baselines",
                 "comparison_configuration",
                 "last_task_cost_usd",
@@ -1409,26 +1420,29 @@ class ServiceTests(unittest.TestCase):
     def test_refreshed_session_reads_existing_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            session = root / "session.json"
-            session.write_text('{"id":"session"}')
-            with patch("konvu_telemetry.display.session_path", return_value=session):
-                payload = refreshed_session(
-                    "claude", "00000000-0000-0000-0000-000000000001"
+            snapshot = root / "live-sessions.json"
+            session_id = "00000000-0000-0000-0000-000000000001"
+            snapshot.write_text(
+                json.dumps(
+                    {"sessions": [{"id": session_id, "provider": "claude", "value": 1}]}
                 )
-        self.assertEqual(payload, {"id": "session"})
+            )
+            with patch("konvu_telemetry.display.snapshot_path", return_value=snapshot):
+                payload = refreshed_session("claude", session_id)
+        self.assertEqual(payload, {"id": session_id, "provider": "claude", "value": 1})
 
-    def test_refreshed_session_reads_stale_snapshot(self) -> None:
+    def test_refreshed_session_ignores_stale_per_session_document(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             session = root / "session.json"
             session.write_text('{"id":"fallback"}')
-            stale_at = time.time() - 24 * 60 * 60
-            os.utime(session, (stale_at, stale_at))
-            with patch("konvu_telemetry.display.session_path", return_value=session):
+            snapshot = root / "live-sessions.json"
+            snapshot.write_text('{"sessions":[]}')
+            with patch("konvu_telemetry.display.snapshot_path", return_value=snapshot):
                 payload = refreshed_session(
                     "claude", "00000000-0000-0000-0000-000000000001"
                 )
-        self.assertEqual(payload, {"id": "fallback"})
+        self.assertIsNone(payload)
 
     def run_claude_hook(
         self,
@@ -1462,6 +1476,8 @@ class ServiceTests(unittest.TestCase):
             "total_cost_usd": 25.0,
             "cost_status": "complete",
             "usage_mode": "exhausted",
+            "out_of_plan_spend_status": "complete",
+            "out_of_plan_spend_usd": 25.0,
             "projected_next_10_tasks_usd": 5.0,
             "task_count": 9,
             "context_tokens": 500,
@@ -1476,6 +1492,8 @@ class ServiceTests(unittest.TestCase):
             "total_cost_usd": 25.0,
             "cost_status": "complete",
             "usage_mode": "exhausted",
+            "out_of_plan_spend_status": "complete",
+            "out_of_plan_spend_usd": 25.0,
             "projected_next_10_tasks_usd": 5.0,
             "last_task_tool_calls": 3,
             "context_tokens": 500,
@@ -1553,6 +1571,8 @@ class ServiceTests(unittest.TestCase):
             "task_count": 5,
             "cost_status": "complete",
             "usage_mode": "exhausted",
+            "out_of_plan_spend_status": "complete",
+            "out_of_plan_spend_usd": 25.4,
             "projected_next_10_tasks_usd": 4.9,
             "context_tokens": 650,
             "context_window_tokens": 1000,
@@ -1794,6 +1814,8 @@ class ServiceTests(unittest.TestCase):
             "total_cost_usd": 25.4,
             "cost_status": "complete",
             "usage_mode": "exhausted",
+            "out_of_plan_spend_status": "complete",
+            "out_of_plan_spend_usd": 25.4,
             "projected_next_10_tasks_usd": 4.9,
             "last_task_tool_calls": 3,
             "context_tokens": 500,
@@ -2471,10 +2493,6 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(session["projected_next_10_usage_tokens"], 2000.0)
             self.assertEqual(session["forecast_basis"]["sample_count"], 3)
             telemetry.configurations.append((3.0, "other-model", "medium"))
-            _comparable_forecast(session, [telemetry], True, (12.5, 7))
-        self.assertEqual(session["projected_next_10_tasks_usd"], 12.5)
-        self.assertEqual(session["forecast_basis"]["method"], "provider_median_history")
-        self.assertEqual(session["forecast_basis"]["sample_count"], 7)
         with patch(
             "konvu_telemetry.fleet_telemetry._timestamp",
             side_effect=lambda value: (

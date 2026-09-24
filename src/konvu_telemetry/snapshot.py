@@ -16,7 +16,6 @@ from .analytics import (
     context_usage_history,
     deduplicate_usage_events,
     iteration_series,
-    load_baselines,
     locate_compactions,
     next_ten_forecast,
     scaled_precompact_forecast,
@@ -132,9 +131,6 @@ def build_snapshot(
 ) -> dict[str, object]:
     """Summarise currently active Claude Code and Codex transcripts."""
     prices = load_pricing()
-    baselines = load_baselines(
-        now, prices, refresh_in_background=live_state is not None
-    )
     grouped: dict[str, list[UsageEvent]] = defaultdict(list)
     prompt_times: dict[str, list[float]] = defaultdict(list)
     compact_times: dict[str, list[float]] = defaultdict(list)
@@ -714,7 +710,6 @@ def build_snapshot(
     snapshot = {
         "generated_at": datetime.fromtimestamp(now, timezone.utc).isoformat(),
         "live_activity_window_seconds": LIVE_ACTIVITY_SECONDS,
-        "baselines": baselines,
         "sessions": sessions,
     }
     enrich_snapshot(
@@ -724,10 +719,12 @@ def build_snapshot(
         now,
         provider_quotas,
     )
-    snapshot.pop("baselines", None)
     apply_quota_attribution(snapshot)
     apply_usage_modes(snapshot)
     apply_out_of_plan_accounting(snapshot)
+    for session in sessions:
+        session.pop("total_credit_equivalent", None)
+        session.pop("projected_next_10_tasks_credit_equivalent", None)
     locate_compactions(snapshot)
     for session in sessions:
         for internal_field in (
