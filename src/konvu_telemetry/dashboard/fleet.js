@@ -482,7 +482,6 @@ function spendVisual(s, scale) {
   return '<div class="spending">' + values + visual + "</div>";
 }
 function medianCell(s, comparison) {
-  if (!showsMoney(s)) return '<div class="median-cell missing">—<small>subscription usage</small></div>';
   const ratio = comparison.ratio;
   if (ratio === null) return '<div class="median-cell missing" title="' + esc(comparison.detail) + '">—<small>' + esc(comparison.label) + "</small></div>";
   return (
