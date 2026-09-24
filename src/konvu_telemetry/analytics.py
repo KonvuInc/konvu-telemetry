@@ -10,18 +10,12 @@ import logging
 from pathlib import Path
 from statistics import median
 from threading import Lock, Thread
-from typing import Iterator, Literal, cast
+from typing import Iterator, cast
 
 from .config import (
     ACTIVITY_CLOCK_SKEW_SECONDS,
-    ALERT_FORECAST_RENOTIFY_SECONDS,
     ALERT_FORECAST_USD,
-    ALERT_QUOTA_5H_PERCENT,
-    ALERT_QUOTA_RENOTIFY_SECONDS,
-    ALERT_QUOTA_WEEKLY_PERCENT,
     BASELINE_LOOKBACK_SECONDS,
-    BASELINE_MIN_SESSIONS,
-    BASELINE_MILESTONES,
     BASELINE_REFRESH_SECONDS,
     BASELINE_SCHEMA_VERSION,
     FORECAST_WINDOW,
@@ -43,7 +37,6 @@ from .storage import (
     claude_roots,
     codex_roots,
     file_cached,
-    notification_state_path,
     parse_timestamp,
     root_claude_transcripts,
     transcript_files,
@@ -192,18 +185,6 @@ def locate_compactions(snapshot: dict[str, object]) -> None:
         session["compact_events"] = located
 
 
-def quota_alert_window(window: dict[str, object]) -> tuple[str, int] | None:
-    """Return the alert name and threshold for a supported quota window."""
-    minutes = window.get("window_minutes")
-    if not isinstance(minutes, (int, float)):
-        return None
-    if minutes == 5 * 60:
-        return "5-hour", ALERT_QUOTA_5H_PERCENT
-    if minutes == 7 * 24 * 60:
-        return "weekly", ALERT_QUOTA_WEEKLY_PERCENT
-    return None
-
-
 def alert_number(value: object) -> float | None:
     """Return a real number, rejecting booleans and everything non-numeric."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -211,155 +192,26 @@ def alert_number(value: object) -> float | None:
     return float(value)
 
 
-def apply_notification_tracking(
-    sessions: list[dict[str, object]],
-    now: float,
-    account_quotas: dict[str, object] | None = None,
-) -> None:
-    """Persist alerts so repeated browser polls do not repeatedly notify the user."""
-    try:
-        raw_state = json.loads(notification_state_path().read_text())
-    except (OSError, json.JSONDecodeError):
-        raw_state = {}
-    state = raw_state if isinstance(raw_state, dict) else {}
+def apply_session_hot_state(sessions: list[dict[str, object]], now: float) -> None:
+    """Mark currently active, fully priced sessions with a large paid forecast."""
     for session in sessions:
-        session_id = session.get("id")
-        provider = session.get("provider")
-        comparisons = session.get("baselines")
-        comparison = (
-            comparisons.get("provider") if isinstance(comparisons, dict) else None
-        )
-        if not isinstance(session_id, str) or not isinstance(provider, str):
-            continue
-        key = f"{provider}:{session_id}"
-        previous = state.get(key)
-        record = previous if isinstance(previous, dict) else {}
-        overhead = (
-            comparison.get("cost_overhead_percent")
-            if isinstance(comparison, dict)
-            else None
-        )
         forecast = alert_number(session.get("projected_next_10_tasks_usd"))
         basis = session.get("forecast_basis")
         coverage = basis.get("coverage") if isinstance(basis, dict) else None
         last_activity = parse_timestamp(session.get("last_activity_at"))
-        if (
-            forecast is None
-            # A forecast borrowed from a median is display-only; the session has not earned it.
-            or coverage not in (None, "fully_priced")
-            or session.get("cost_status") != "complete"
-            or forecast <= ALERT_FORECAST_USD
-            or last_activity is None
-            # Bounded below too: a skewed future stamp must not pin a dead session live.
-            or not -ACTIVITY_CLOCK_SKEW_SECONDS
-            <= now - last_activity
-            <= LIVE_ACTIVITY_SECONDS
-        ):
-            # Forget the alerted peak, but keep the clock: the repeat floor spans cooldowns.
-            cooled = alert_number(record.get("last_notified_at"))
-            record = {"sequence": int(record.get("sequence", 0)), "hot": False}
-            if cooled is not None:
-                record["last_notified_at"] = cooled
-            state[key] = record
-            session["notification"] = dict(record)
-            continue
-        sequence = int(record.get("sequence", 0))
-        last_notified_at = alert_number(record.get("last_notified_at"))
-        last_forecast = alert_number(record.get("last_forecast_usd"))
-        if last_notified_at is None:
-            notify = True
-        else:
-            # A forgotten peak re-arms the comparison but never skips the repeat floor.
-            notify = now - last_notified_at >= ALERT_FORECAST_RENOTIFY_SECONDS and (
-                last_forecast is None or forecast >= last_forecast
+        session["notification"] = {
+            "hot": (
+                session.get("usage_mode") in {"api_billed", "exhausted"}
+                and forecast is not None
+                and forecast >= ALERT_FORECAST_USD
+                and coverage in (None, "fully_priced")
+                and session.get("cost_status") == "complete"
+                and last_activity is not None
+                and -ACTIVITY_CLOCK_SKEW_SECONDS
+                <= now - last_activity
+                <= LIVE_ACTIVITY_SECONDS
             )
-        if notify:
-            sequence += 1
-            last_notified_at = now
-            last_forecast = forecast
-        record = {
-            "sequence": sequence,
-            "hot": True,
-            "last_notified_at": last_notified_at,
-            "last_forecast_usd": last_forecast,
         }
-        state[key] = record
-        # Display-only: the median no longer gates the alert.
-        session["notification"] = {**record, "overhead_percent": overhead}
-    for provider, quotas in (account_quotas or {}).items():
-        if not isinstance(provider, str) or not isinstance(quotas, dict):
-            continue
-        raw_windows = quotas.get("windows")
-        windows = (
-            [window for window in raw_windows if isinstance(window, dict)]
-            if isinstance(raw_windows, list)
-            else []
-        )
-        notifications: list[dict[str, object]] = []
-        for window in windows:
-            alert_window = quota_alert_window(window)
-            used_percent = window.get("used_percent")
-            if alert_window is None or not isinstance(used_percent, (int, float)):
-                continue
-            source_session_id = window.get("session_id")
-            target_session = next(
-                (
-                    session
-                    for session in sessions
-                    if session.get("provider") == provider
-                    and session.get("id") == source_session_id
-                ),
-                None,
-            )
-            if target_session is None or not isinstance(source_session_id, str):
-                continue
-            window_name, threshold = alert_window
-            limit_id = window.get("limit_id")
-            key = f"quota:{provider}:{limit_id if isinstance(limit_id, str) else 'default'}:{window_name}"
-            previous = state.get(key)
-            record = previous if isinstance(previous, dict) else {}
-            reset_at = window.get("resets_at")
-            reset_changed = (
-                isinstance(reset_at, str)
-                and isinstance(record.get("reset_at"), str)
-                and reset_at != record["reset_at"]
-            )
-            if used_percent < threshold:
-                record["hot"] = False
-                if isinstance(reset_at, str):
-                    record["reset_at"] = reset_at
-                state[key] = record
-                continue
-            last_notified_at = record.get("last_notified_at")
-            last_used_percent = record.get("last_used_percent")
-            first_alert = record.get("hot") is not True or reset_changed
-            rising = (
-                isinstance(last_used_percent, (int, float))
-                and used_percent > last_used_percent
-            )
-            may_renotify = (
-                isinstance(last_notified_at, (int, float))
-                and now - last_notified_at >= ALERT_QUOTA_RENOTIFY_SECONDS
-            )
-            if first_alert or (may_renotify and rising):
-                record["sequence"] = int(record.get("sequence", 0)) + 1
-                record["last_notified_at"] = now
-                record["last_used_percent"] = used_percent
-            record["hot"] = True
-            if isinstance(reset_at, str):
-                record["reset_at"] = reset_at
-            state[key] = record
-            notifications.append(
-                {
-                    "sequence": int(record.get("sequence", 0)),
-                    "hot": True,
-                    "window": window_name,
-                    "used_percent": round(used_percent),
-                    "session_id": source_session_id,
-                }
-            )
-        quotas["notifications"] = notifications
-    write_private_json(notification_state_path(), state)
 
 
 def task_series(
@@ -391,14 +243,6 @@ def single_configuration(events: list[UsageEvent]) -> tuple[str, str, str] | Non
     return next(iter(configurations)) if len(configurations) == 1 else None
 
 
-def single_model_effort(events: list[UsageEvent]) -> tuple[str, str] | None:
-    """Return one priced model and effort when a task series is uniform."""
-    configurations = {
-        (event.model, event.effort) for event in events if requires_pricing(event)
-    }
-    return next(iter(configurations)) if len(configurations) == 1 else None
-
-
 def deduplicate_usage_events(events: list[UsageEvent]) -> list[UsageEvent]:
     """Keep one event per message, preferring an explicitly marked subagent copy."""
     deduplicated: dict[str, UsageEvent] = {}
@@ -417,8 +261,8 @@ def deduplicate_usage_events(events: list[UsageEvent]) -> list[UsageEvent]:
 
 def historical_task_series(
     provider: str, since: float, prices: dict[str, dict[str, float]]
-) -> Iterator[tuple[str | None, str | None, list[tuple[float, int]]]]:
-    """Read completed task curves and trustworthy model-effort cohorts."""
+) -> Iterator[list[tuple[float, int]]]:
+    """Read completed task curves for the provider forecast fallback."""
     if provider == "claude":
         for root in claude_roots():
             if not root.is_dir():
@@ -436,7 +280,6 @@ def historical_task_series(
                     for event in events_in_file(transcript)
                     if event.session_id == session_id
                 ]
-                main_events = [event for event in root_events if not event.is_subagent]
                 child_events = [
                     event
                     for path in transcript_files(transcript.parent / session_id)
@@ -447,11 +290,7 @@ def historical_task_series(
                 if starts and events and cost_status(events, prices)[0] == "complete":
                     series = task_series(events, starts, prices)
                     if series is not None:
-                        configuration = single_model_effort(main_events)
-                        model, effort = (
-                            configuration if configuration is not None else (None, None)
-                        )
-                        yield model, effort, series
+                        yield series
         return
     roots: list[tuple[Path, list[UsageEvent]]] = []
     children: dict[str, list[UsageEvent]] = defaultdict(list)
@@ -503,9 +342,7 @@ def historical_task_series(
             continue
         series = task_series(events, starts, prices)
         if series is not None:
-            configuration = single_model_effort(main_events)
-            model, effort = configuration if configuration is not None else (None, None)
-            yield model, effort, series
+            yield series
 
 
 @file_cached
@@ -551,31 +388,6 @@ def claude_task_costs(
     return starts, costs
 
 
-def claude_compact_next_ten_costs(
-    since: float, prices: dict[str, dict[str, float]]
-) -> list[float]:
-    """Collect completed ten-task windows that began immediately after compact."""
-    windows: list[float] = []
-    for root in claude_roots():
-        if not root.is_dir():
-            continue
-        for transcript in root_claude_transcripts(root):
-            try:
-                if transcript.stat().st_mtime < since:
-                    continue
-            except OSError:
-                continue
-            task_costs = claude_task_costs(transcript, prices)
-            if task_costs is None:
-                continue
-            starts, costs = task_costs
-            for compact_time in claude_compact_times(transcript):
-                point = bisect_right(starts, compact_time)
-                if point + 10 <= len(costs):
-                    windows.append(sum(costs[point : point + 10]))
-    return windows
-
-
 def median_absolute_percentage_error(samples: list[tuple[float, float]]) -> float:
     """Return median forecast error, excluding zero-cost actual windows."""
     errors = [
@@ -586,28 +398,11 @@ def median_absolute_percentage_error(samples: list[tuple[float, float]]) -> floa
     return float(median(errors)) if errors else 0.0
 
 
-def configuration_key(model: str, effort: str) -> str:
-    """Build a stable model and effort baseline key."""
-    return json.dumps([model, effort], separators=(",", ":"))
-
-
 def next_ten_forecast(costs: list[float], provider: str) -> float:
     """Forecast the next ten tasks from the last ten comparable tasks."""
     del provider
     recent = costs[-FORECAST_WINDOW:]
     return sum(recent) / len(recent) * 10 if recent else 0.0
-
-
-def forecast_backtest_sample(
-    series: list[tuple[float, int]],
-) -> tuple[float, float] | None:
-    """Backtest the live forecast against a held-out final ten-task window."""
-    if len(series) < FORECAST_WINDOW * 2:
-        return None
-    costs = [cost for cost, _ in series]
-    point = len(costs) - FORECAST_WINDOW
-    prediction = next_ten_forecast(costs[:point], "historical")
-    return prediction, sum(costs[point:])
 
 
 def scaled_precompact_forecast(
@@ -739,32 +534,13 @@ def backtest_next_ten() -> None:
 def build_baselines(
     now: float, prices: dict[str, dict[str, float]]
 ) -> dict[str, object]:
-    """Build provider and model-effort median checkpoints."""
-    providers: dict[str, list[dict[str, object]]] = {}
-    configurations: dict[str, dict[str, dict[str, object]]] = {}
-    forecast_backtests: dict[str, dict[str, object]] = {}
+    """Build the provider-level fallback used by sparse session forecasts."""
     provider_forecasts: dict[str, dict[str, object]] = {}
     since = now - BASELINE_LOOKBACK_SECONDS
     for provider in ("claude", "codex"):
-        provider_series: list[list[tuple[float, int]]] = []
-        configuration_series: dict[str, list[list[tuple[float, int]]]] = defaultdict(
-            list
-        )
-        configuration_labels: dict[str, tuple[str, str]] = {}
-        forecast_samples: list[tuple[float, float]] = []
-        for model, effort, series in historical_task_series(provider, since, prices):
-            provider_series.append(series)
-            forecast_sample = forecast_backtest_sample(series)
-            if forecast_sample is not None:
-                forecast_samples.append(forecast_sample)
-            if model is not None and effort is not None:
-                key = configuration_key(model, effort)
-                configuration_labels[key] = (model, effort)
-                configuration_series[key].append(series)
-        providers[provider] = cumulative_median_checkpoints(provider_series)
         provider_forecast_values = [
             next_ten_forecast([cost for cost, _ in series], provider)
-            for series in provider_series
+            for series in historical_task_series(provider, since, prices)
             if series
         ]
         provider_forecasts[provider] = {
@@ -773,74 +549,14 @@ def build_baselines(
             else None,
             "sessions": len(provider_forecast_values),
         }
-        valid_forecast_samples = [
-            sample for sample in forecast_samples if sample[1] > 0
-        ]
-        forecast_backtests[provider] = {
-            "samples": len(valid_forecast_samples),
-            "median_absolute_percentage_error": round(
-                median_absolute_percentage_error(valid_forecast_samples), 1
-            )
-            if valid_forecast_samples
-            else None,
-        }
-        configurations[provider] = {}
-        for key, cohort_series in configuration_series.items():
-            model, effort = configuration_labels[key]
-            config_checkpoints = cumulative_median_checkpoints(cohort_series)
-            if config_checkpoints:
-                configurations[provider][key] = {
-                    "model": model,
-                    "effort": effort,
-                    "checkpoints": config_checkpoints,
-                }
-    compact_windows = claude_compact_next_ten_costs(since, prices)
     return {
         "schema_version": BASELINE_SCHEMA_VERSION,
         "generated_at": datetime.fromtimestamp(now, timezone.utc).isoformat(),
         "lookback_days": BASELINE_LOOKBACK_SECONDS // 86400,
-        "minimum_sessions": BASELINE_MIN_SESSIONS,
-        "milestones": list(BASELINE_MILESTONES),
-        "median_method": "checkpoint_cohort_medians",
-        "providers": providers,
-        "configurations": configurations,
         "forecasts": {
-            "claude_after_compact_next_10_usd": round(float(median(compact_windows)), 6)
-            if compact_windows
-            else 0.0,
-            "claude_after_compact_samples": len(compact_windows),
             "provider_median_next_10": provider_forecasts,
-            "rolling_next_10_backtest": forecast_backtests,
         },
     }
-
-
-def cumulative_median_checkpoints(
-    series: list[list[tuple[float, int]]],
-) -> list[dict[str, object]]:
-    """Return cumulative sums of per-prompt medians for reached sessions."""
-    milestones = set(BASELINE_MILESTONES)
-    observed_iterations = max((len(row) for row in series), default=0)
-    cumulative_cost = 0.0
-    cumulative_tokens = 0.0
-    checkpoints: list[dict[str, object]] = []
-    for iteration in range(1, observed_iterations + 1):
-        cohort = [row for row in series if len(row) >= iteration]
-        if len(cohort) < BASELINE_MIN_SESSIONS:
-            break
-        cumulative_cost += float(median(row[iteration - 1][0] for row in cohort))
-        cumulative_tokens += float(median(row[iteration - 1][1] for row in cohort))
-        if iteration not in milestones:
-            continue
-        checkpoints.append(
-            {
-                "iterations": iteration,
-                "sessions": len(cohort),
-                "median_cost_usd": round(cumulative_cost, 6),
-                "median_tokens": int(cumulative_tokens),
-            }
-        )
-    return checkpoints
 
 
 def load_baselines(
@@ -857,17 +573,16 @@ def load_baselines(
             else None
         )
         forecasts = baseline.get("forecasts") if isinstance(baseline, dict) else None
-        configurations = (
-            baseline.get("configurations") if isinstance(baseline, dict) else None
+        provider_forecasts = (
+            forecasts.get("provider_median_next_10")
+            if isinstance(forecasts, dict)
+            else None
         )
         valid = (
             isinstance(baseline, dict)
             and baseline.get("schema_version") == BASELINE_SCHEMA_VERSION
-            and baseline.get("milestones") == list(BASELINE_MILESTONES)
-            and baseline.get("minimum_sessions") == BASELINE_MIN_SESSIONS
-            and baseline.get("median_method") == "checkpoint_cohort_medians"
             and isinstance(forecasts, dict)
-            and isinstance(configurations, dict)
+            and isinstance(provider_forecasts, dict)
             and generated_at is not None
         )
         if valid and generated_at is not None:
@@ -900,143 +615,3 @@ def _refresh_baselines(now: float, prices: dict[str, dict[str, float]]) -> None:
         LOGGER.exception("Background baseline refresh failed")
     finally:
         _BASELINE_REFRESH_LOCK.release()
-
-
-def baseline_comparison(
-    provider: str,
-    task_count: int,
-    token_count: int,
-    baseline: dict[str, object],
-    model: str = "unknown",
-    effort: str = "standard",
-    since_compact: bool = False,
-    cost_usd: float | None = None,
-    comparison_scope: Literal["provider", "model_effort"] = "provider",
-) -> dict[str, object] | None:
-    def eligible_checkpoints(value: object) -> list[dict[str, object]]:
-        if not isinstance(value, list):
-            return []
-        eligible: list[dict[str, object]] = []
-        for item in value:
-            if not isinstance(item, dict):
-                continue
-            iterations = item.get("iterations")
-            sessions = item.get("sessions")
-            if (
-                not isinstance(iterations, int)
-                or isinstance(iterations, bool)
-                or not isinstance(sessions, int)
-                or isinstance(sessions, bool)
-                or sessions < BASELINE_MIN_SESSIONS
-            ):
-                continue
-            eligible.append(item)
-        return eligible
-
-    def checkpoint_iteration(item: dict[str, object]) -> int:
-        iteration = item.get("iterations")
-        if not isinstance(iteration, int):
-            raise ValueError("eligible checkpoint has no iteration")
-        return iteration
-
-    def covers(items: list[dict[str, object]]) -> bool:
-        iterations = [checkpoint_iteration(item) for item in items]
-        return bool(iterations) and min(iterations) <= task_count <= max(iterations)
-
-    providers = baseline.get("providers")
-    provider_checkpoints = eligible_checkpoints(
-        providers.get(provider) if isinstance(providers, dict) else None
-    )
-    scope = "provider"
-    configurations = baseline.get("configurations")
-    provider_configurations = (
-        configurations.get(provider) if isinstance(configurations, dict) else None
-    )
-    configuration = (
-        provider_configurations.get(configuration_key(model, effort))
-        if isinstance(provider_configurations, dict)
-        else None
-    )
-    config_checkpoints = (
-        configuration.get("checkpoints") if isinstance(configuration, dict) else None
-    )
-    configuration_checkpoints = eligible_checkpoints(config_checkpoints)
-    if comparison_scope == "model_effort":
-        eligible = configuration_checkpoints
-        scope = "model_effort"
-    else:
-        eligible = provider_checkpoints
-    if not covers(eligible):
-        return None
-    ordered = sorted(eligible, key=checkpoint_iteration)
-    lower_index = (
-        bisect_right([checkpoint_iteration(item) for item in ordered], task_count) - 1
-    )
-    lower = ordered[lower_index]
-    upper = ordered[lower_index + 1] if lower_index + 1 < len(ordered) else None
-    if task_count == checkpoint_iteration(lower):
-        upper = lower
-    if upper is None:
-        return None
-
-    lower_iterations = checkpoint_iteration(lower)
-    lower_tokens = lower.get("median_tokens")
-    upper_iterations = checkpoint_iteration(upper)
-    upper_tokens = upper.get("median_tokens")
-    if (
-        not isinstance(lower_tokens, int)
-        or lower_tokens < 0
-        or not isinstance(upper_tokens, int)
-        or upper_tokens <= 0
-        or (upper_iterations <= lower_iterations and task_count != lower_iterations)
-    ):
-        return None
-    fraction = (
-        0
-        if upper_iterations == lower_iterations
-        else (task_count - lower_iterations) / (upper_iterations - lower_iterations)
-    )
-    typical_tokens = round(lower_tokens + (upper_tokens - lower_tokens) * fraction)
-    if typical_tokens <= 0:
-        return None
-    lower_cost = lower.get("median_cost_usd")
-    upper_cost = upper.get("median_cost_usd")
-    typical_cost = (
-        round(float(lower_cost) + (float(upper_cost) - float(lower_cost)) * fraction, 6)
-        if isinstance(lower_cost, (int, float)) and isinstance(upper_cost, (int, float))
-        else None
-    )
-    lower_sessions = lower.get("sessions", 0)
-    upper_sessions = upper.get("sessions", 0)
-    sample_sessions = (
-        min(lower_sessions, upper_sessions)
-        if isinstance(lower_sessions, int) and isinstance(upper_sessions, int)
-        else 0
-    )
-    overhead_percent = round((token_count / typical_tokens - 1) * 100)
-    cost_overhead_percent = (
-        round((cost_usd / typical_cost - 1) * 100)
-        if isinstance(cost_usd, (int, float))
-        and isinstance(typical_cost, (int, float))
-        and typical_cost > 0
-        else None
-    )
-    comparison_percent = (
-        cost_overhead_percent if cost_overhead_percent is not None else overhead_percent
-    )
-    emoji = (
-        "🟢" if comparison_percent <= 10 else "🟠" if comparison_percent <= 50 else "🔴"
-    )
-    return {
-        "iterations": task_count,
-        "sample_sessions": sample_sessions,
-        "median_cost_usd": typical_cost,
-        "median_tokens": typical_tokens,
-        "token_overhead_percent": overhead_percent,
-        "cost_overhead_percent": cost_overhead_percent,
-        "emoji": emoji,
-        "since_compact": since_compact,
-        "scope": scope,
-        "model": model,
-        "effort": effort,
-    }

@@ -42,9 +42,9 @@ brew uninstall konvu-telemetry
 - Tracks Claude Code, Claude Code Desktop, Codex CLI, and Codex Desktop sessions from their local transcripts.
 - Estimates spend from bundled model pricing and records subscription-credit equivalents for supported Codex models.
 - Runs only on your Mac and serves the dashboard only at `127.0.0.1`.
-- Uses browser notifications only when you enable them in the local dashboard. An active session alerts once its next ten prompts are forecast above $4, then repeats at most every five minutes and only while the forecast has not come down.
+- Uses browser notifications only when you enable them in the local dashboard. An active paid session alerts once its next ten prompts are forecast at $10 or more; repeat suppression stays in that browser.
 
-Costs are estimates, not provider invoices. See [ACCURACY.md](ACCURACY.md) for the exact accounting, forecast, median, context, and subagent methodology. Linux and Windows are not supported in this first release.
+Costs are estimates, not provider invoices. See [ACCURACY.md](ACCURACY.md) for the exact accounting, forecast, context, and subagent methodology. Linux and Windows are not supported in this first release.
 
 ## Privacy
 

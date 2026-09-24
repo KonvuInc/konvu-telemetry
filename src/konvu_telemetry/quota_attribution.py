@@ -95,9 +95,11 @@ def _window_key(window: dict[str, object]) -> str | None:
     reset_key = "unknown"
     if isinstance(reset, str):
         try:
-            reset_key = datetime.fromisoformat(reset.replace("Z", "+00:00")).replace(
-                second=0, microsecond=0
-            ).isoformat()
+            reset_key = (
+                datetime.fromisoformat(reset.replace("Z", "+00:00"))
+                .replace(second=0, microsecond=0)
+                .isoformat()
+            )
         except ValueError:
             reset_key = reset
     return f"{limit_id}:{period}:{reset_key}"
@@ -126,14 +128,24 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
         previous_sessions = provider_state.setdefault("sessions", {})
         pending = provider_state.setdefault("pending", {})
         windows_state = provider_state.setdefault("windows", {})
-        if not isinstance(previous_sessions, dict) or not isinstance(pending, dict) or not isinstance(windows_state, dict):
-            providers[provider] = provider_state = {"sessions": {}, "pending": {}, "windows": {}}
+        if (
+            not isinstance(previous_sessions, dict)
+            or not isinstance(pending, dict)
+            or not isinstance(windows_state, dict)
+        ):
+            providers[provider] = provider_state = {
+                "sessions": {},
+                "pending": {},
+                "windows": {},
+            }
             previous_sessions = provider_state["sessions"]
             pending = provider_state["pending"]
             windows_state = provider_state["windows"]
         current: dict[str, SessionUsage] = {}
         for session in session_rows:
-            if session.get("provider") != provider or not isinstance(session.get("id"), str):
+            if session.get("provider") != provider or not isinstance(
+                session.get("id"), str
+            ):
                 continue
             usage = _session_usage(session)
             if usage is None:
@@ -154,7 +166,9 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
                 total = existing if isinstance(existing, dict) else {}
                 total["tokens"] = (_number(total.get("tokens")) or 0.0) + token_delta
                 if credit_delta is not None:
-                    total["credits"] = (_number(total.get("credits")) or 0.0) + credit_delta
+                    total["credits"] = (
+                        _number(total.get("credits")) or 0.0
+                    ) + credit_delta
                 pending[key] = total
         provider_state["sessions"] = current
         interval_weights = {
@@ -168,7 +182,11 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
             for session_id, value in pending.items()
             if isinstance(value, dict)
         }
-        interval_weights = {session_id: weight for session_id, weight in interval_weights.items() if weight > 0}
+        interval_weights = {
+            session_id: weight
+            for session_id, weight in interval_weights.items()
+            if weight > 0
+        }
         total_weight = sum(interval_weights.values())
         for raw_window in raw_windows:
             if not isinstance(raw_window, dict):
@@ -198,7 +216,9 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
             allocations = old_window.setdefault("allocations", {})
             if isinstance(allocations, dict) and total_weight > 0:
                 for session_id, weight in interval_weights.items():
-                    allocations[session_id] = (_number(allocations.get(session_id)) or 0.0) + increase * weight / total_weight
+                    allocations[session_id] = (
+                        _number(allocations.get(session_id)) or 0.0
+                    ) + increase * weight / total_weight
                 samples = old_window.setdefault("calibration_samples", [])
                 if isinstance(samples, list):
                     samples.append({"percent": increase, "weight": total_weight})
@@ -207,29 +227,44 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
         # One interval is allocated independently to every provider window.
         provider_state["pending"] = {}
         for session in session_rows:
-            if session.get("provider") != provider or not isinstance(session.get("id"), str):
+            if session.get("provider") != provider or not isinstance(
+                session.get("id"), str
+            ):
                 continue
             estimates: list[dict[str, object]] = []
             for raw_window in raw_windows:
                 if not isinstance(raw_window, dict):
                     continue
-                key = _window_key(raw_window)
-                stored = windows_state.get(key) if key is not None else None
-                allocations = stored.get("allocations") if isinstance(stored, dict) else None
-                share = _number(allocations.get(session["id"])) if isinstance(allocations, dict) else None
+                window_key = _window_key(raw_window)
+                stored = (
+                    windows_state.get(window_key) if window_key is not None else None
+                )
+                allocations = (
+                    stored.get("allocations") if isinstance(stored, dict) else None
+                )
+                share = (
+                    _number(allocations.get(session["id"]))
+                    if isinstance(allocations, dict)
+                    else None
+                )
                 if share is not None:
                     estimate: dict[str, object] = {
                         "period": raw_window.get("period"),
                         "estimated_percent": round(share, 2),
                     }
                     forecast_weight = _forecast_weight(provider, session)
-                    calibration = _calibration_rate(stored) if isinstance(stored, dict) else None
+                    calibration = (
+                        _calibration_rate(stored) if isinstance(stored, dict) else None
+                    )
                     if forecast_weight is not None and calibration is not None:
                         estimate["projected_next_10_percent"] = round(
                             calibration * forecast_weight, 2
                         )
                     estimates.append(estimate)
-            session["quota_attribution"] = {"state": "observing" if not estimates else "estimated", "windows": estimates}
+            session["quota_attribution"] = {
+                "state": "observing" if not estimates else "estimated",
+                "windows": estimates,
+            }
     write_private_json(quota_attribution_path(), state)
 
 
@@ -245,7 +280,9 @@ def apply_usage_modes(snapshot: dict[str, object]) -> None:
         provider = session.get("provider")
         account = quotas.get(provider) if isinstance(quotas, dict) else None
         windows = account.get("windows") if isinstance(account, dict) else None
-        exhausted = isinstance(account, dict) and account.get("ordinary_usage_allowed") is False
+        exhausted = (
+            isinstance(account, dict) and account.get("ordinary_usage_allowed") is False
+        )
         if isinstance(windows, list):
             exhausted = exhausted or any(
                 (_number(window.get("used_percent")) or 0.0) >= 100

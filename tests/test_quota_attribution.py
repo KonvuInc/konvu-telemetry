@@ -1,6 +1,5 @@
 import json
 import os
-from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -41,21 +40,31 @@ def snapshot(used: float, sessions: list[dict[str, object]]) -> dict[str, object
 
 class QuotaAttributionTests(unittest.TestCase):
     def test_fractional_reset_jitter_stays_in_the_same_window(self) -> None:
-        with tempfile.TemporaryDirectory() as directory, patch.dict(
-            os.environ, {"KONVU_LIVE_USAGE_HOME": directory}
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
         ):
             first = snapshot(20, [session("a", 100), session("b", 100)])
-            first["account_quotas"]["claude"]["windows"][0]["resets_at"] = "2026-01-01T05:00:00.100000+00:00"
+            first["account_quotas"]["claude"]["windows"][0]["resets_at"] = (
+                "2026-01-01T05:00:00.100000+00:00"
+            )
             apply_quota_attribution(first)
             second = snapshot(24, [session("a", 160), session("b", 120)])
-            second["account_quotas"]["claude"]["windows"][0]["resets_at"] = "2026-01-01T05:00:00.900000+00:00"
+            second["account_quotas"]["claude"]["windows"][0]["resets_at"] = (
+                "2026-01-01T05:00:00.900000+00:00"
+            )
             apply_quota_attribution(second)
             self.assertEqual(
-                [row["quota_attribution"]["windows"][0]["estimated_percent"] for row in second["sessions"]],
+                [
+                    row["quota_attribution"]["windows"][0]["estimated_percent"]
+                    for row in second["sessions"]
+                ],
                 [3.0, 1.0],
             )
 
-    def test_codex_spending_cap_does_not_mask_available_subscription_usage(self) -> None:
+    def test_codex_spending_cap_does_not_mask_available_subscription_usage(
+        self,
+    ) -> None:
         snapshot_data = {
             "sessions": [{"id": "codex", "provider": "codex"}],
             "account_quotas": {
@@ -73,12 +82,15 @@ class QuotaAttributionTests(unittest.TestCase):
         self.assertEqual(snapshot_data["sessions"][0]["usage_mode"], "included")
 
     def test_starts_observing_then_keeps_finished_session_allocations(self) -> None:
-        with tempfile.TemporaryDirectory() as directory, patch.dict(
-            os.environ, {"KONVU_LIVE_USAGE_HOME": directory}
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
         ):
             first = snapshot(20, [session("a", 100), session("b", 100)])
             apply_quota_attribution(first)
-            self.assertEqual(first["sessions"][0]["quota_attribution"]["state"], "observing")
+            self.assertEqual(
+                first["sessions"][0]["quota_attribution"]["state"], "observing"
+            )
 
             second = snapshot(24, [session("a", 160), session("b", 120)])
             apply_quota_attribution(second)
@@ -91,7 +103,9 @@ class QuotaAttributionTests(unittest.TestCase):
             third = snapshot(26, [session("a", 200)])
             apply_quota_attribution(third)
             self.assertEqual(
-                third["sessions"][0]["quota_attribution"]["windows"][0]["estimated_percent"],
+                third["sessions"][0]["quota_attribution"]["windows"][0][
+                    "estimated_percent"
+                ],
                 5.0,
             )
             ledger = json.loads(quota_attribution_path().read_text())
@@ -100,8 +114,9 @@ class QuotaAttributionTests(unittest.TestCase):
             self.assertEqual(stored, {"a": 5.0, "b": 1.0})
 
     def test_projects_next_ten_only_after_stable_calibration(self) -> None:
-        with tempfile.TemporaryDirectory() as directory, patch.dict(
-            os.environ, {"KONVU_LIVE_USAGE_HOME": directory}
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
         ):
             apply_quota_attribution(snapshot(20, [session("a", 100)]))
             for used, tokens in ((22, 200), (24, 300)):
@@ -119,8 +134,9 @@ class QuotaAttributionTests(unittest.TestCase):
             self.assertEqual(window["projected_next_10_percent"], 1.0)
 
     def test_unstable_calibration_does_not_produce_a_forecast(self) -> None:
-        with tempfile.TemporaryDirectory() as directory, patch.dict(
-            os.environ, {"KONVU_LIVE_USAGE_HOME": directory}
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
         ):
             apply_quota_attribution(snapshot(20, [session("a", 100)]))
             for used, tokens in ((22, 110), (24, 210), (26, 310)):
@@ -130,7 +146,9 @@ class QuotaAttributionTests(unittest.TestCase):
             window = next_snapshot["sessions"][0]["quota_attribution"]["windows"][0]
             self.assertNotIn("projected_next_10_percent", window)
 
-    def test_each_window_gets_the_same_interval_and_a_reset_clears_its_ledger(self) -> None:
+    def test_each_window_gets_the_same_interval_and_a_reset_clears_its_ledger(
+        self,
+    ) -> None:
         def snapshot_with_windows(
             five_hour: float, weekly: float, rows: list[dict[str, object]]
         ) -> dict[str, object]:
@@ -145,13 +163,16 @@ class QuotaAttributionTests(unittest.TestCase):
             )
             return data
 
-        with tempfile.TemporaryDirectory() as directory, patch.dict(
-            os.environ, {"KONVU_LIVE_USAGE_HOME": directory}
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
         ):
             apply_quota_attribution(
                 snapshot_with_windows(20, 30, [session("a", 100), session("b", 100)])
             )
-            second = snapshot_with_windows(24, 34, [session("a", 160), session("b", 120)])
+            second = snapshot_with_windows(
+                24, 34, [session("a", 160), session("b", 120)]
+            )
             apply_quota_attribution(second)
             self.assertEqual(
                 second["sessions"][0]["quota_attribution"]["windows"],
@@ -170,13 +191,32 @@ class QuotaAttributionTests(unittest.TestCase):
             self.assertEqual(five_hour_ledger["calibration_samples"], [])
 
     def test_exhausted_plan_spend_starts_when_the_cutoff_is_observed(self) -> None:
-        with tempfile.TemporaryDirectory() as directory, patch.dict(
-            os.environ, {"KONVU_LIVE_USAGE_HOME": directory}
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
         ):
-            first = {"sessions": [{"id": "a", "provider": "claude", "usage_mode": "exhausted", "total_cost_usd": 12.0}]}
+            first = {
+                "sessions": [
+                    {
+                        "id": "a",
+                        "provider": "claude",
+                        "usage_mode": "exhausted",
+                        "total_cost_usd": 12.0,
+                    }
+                ]
+            }
             apply_out_of_plan_accounting(first)
             self.assertEqual(first["sessions"][0]["out_of_plan_spend_usd"], 0.0)
-            second = {"sessions": [{"id": "a", "provider": "claude", "usage_mode": "exhausted", "total_cost_usd": 17.5}]}
+            second = {
+                "sessions": [
+                    {
+                        "id": "a",
+                        "provider": "claude",
+                        "usage_mode": "exhausted",
+                        "total_cost_usd": 17.5,
+                    }
+                ]
+            }
             apply_out_of_plan_accounting(second)
             self.assertEqual(second["sessions"][0]["out_of_plan_spend_usd"], 5.5)
 
