@@ -605,12 +605,6 @@ def build_snapshot(
             for start in starts
             if start not in unpriced_tasks
         ]
-        task_credits = [
-            credit_equivalents_by_task.get(start, 0.0)
-            if start not in unrated_credit_tasks
-            else None
-            for start in starts
-        ]
         complete_task_credits = [
             credit_equivalents_by_task.get(start, 0.0)
             for start in starts

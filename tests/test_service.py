@@ -24,7 +24,6 @@ from konvu_telemetry.analytics import (
     iteration_series,
     load_baselines,
     scaled_precompact_forecast,
-    single_configuration,
     task_series,
 )
 from konvu_telemetry.config import (
@@ -52,7 +51,6 @@ from konvu_telemetry.fleet_telemetry import (
     TranscriptTelemetry,
     _comparable_forecast,
     _timestamp,
-    enrich_snapshot,
     is_claude_prompt,
     parse_telemetry,
 )
