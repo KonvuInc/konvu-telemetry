@@ -1103,7 +1103,8 @@ function renderAccounts() {
   for (const provider of ["codex", "claude"]) {
     const q = quotas?.[provider];
     for (const w of Array.isArray(q?.windows) ? q.windows : []) {
-      if (!finite(w.used_percent) || !finite(w.window_minutes) || w.window_minutes <= 0) continue;
+      if (!finite(w.used_percent)) continue;
+      if (!finite(w.window_minutes) && !["five_hour", "weekly", "monthly"].includes(w.period)) continue;
       const period = w.period === "five_hour" ? "5-hour" : w.period === "weekly" ? "weekly" : w.period === "monthly" ? "monthly" : duration(w.window_minutes * 60);
       html +=
         "<span>" +

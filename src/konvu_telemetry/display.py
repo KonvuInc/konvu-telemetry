@@ -211,14 +211,19 @@ def recorded_quota_usage_text(provider: str) -> str:
             continue
         minutes = window.get("window_minutes")
         used = window.get("used_percent")
-        if not isinstance(minutes, (int, float)) or not isinstance(used, (int, float)):
+        period = window.get("period")
+        if not isinstance(used, (int, float)):
             continue
         label = (
             "5-hour"
-            if minutes == 300
+            if period == "five_hour" or minutes == 300
             else "weekly"
-            if minutes == 10_080
+            if period == "weekly" or minutes == 10_080
+            else "monthly"
+            if period == "monthly"
             else f"{round(minutes / 60)}-hour"
+            if isinstance(minutes, (int, float))
+            else "account"
         )
         parts.append(f"{round(min(100, max(0, used)))}% {label} limit")
     return " · ".join(parts)
