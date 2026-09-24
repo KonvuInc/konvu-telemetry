@@ -126,7 +126,9 @@ def summary_snapshot(snapshot: dict[str, object]) -> dict[str, object]:
 
 
 def build_snapshot(
-    now: float, live_state: IncrementalLiveState | None = None
+    now: float,
+    live_state: IncrementalLiveState | None = None,
+    provider_quotas: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Summarise currently active Claude Code and Codex transcripts."""
     prices = load_pricing()
@@ -811,7 +813,13 @@ def build_snapshot(
         "baselines": baselines,
         "sessions": sessions,
     }
-    enrich_snapshot(snapshot, claude_transcripts, codex_transcripts, now)
+    enrich_snapshot(
+        snapshot,
+        claude_transcripts,
+        codex_transcripts,
+        now,
+        provider_quotas,
+    )
     locate_compactions(snapshot)
     for session in sessions:
         history = session.get("context_history")

@@ -2132,7 +2132,13 @@ class ServiceTests(unittest.TestCase):
             self.assertLogs("konvu_telemetry.service", level="ERROR"),
             self.assertRaises(StopIteration),
         ):
-            collect_forever(60, IncrementalLiveState(), Lock(), coordinator)
+            collect_forever(
+                60,
+                IncrementalLiveState(),
+                Lock(),
+                coordinator,
+                Mock(refresh=Mock(return_value={})),
+            )
         recorded.assert_called_once()
         coordinator.start_collection.assert_called_once_with()
         coordinator.finish_collection.assert_called_once_with("OSError: full")
@@ -2219,7 +2225,13 @@ class ServiceTests(unittest.TestCase):
             patch("konvu_telemetry.service.time.time", return_value=1_767_225_630.0),
             self.assertRaises(StopIteration),
         ):
-            collect_forever(60, IncrementalLiveState(), Lock(), coordinator)
+            collect_forever(
+                60,
+                IncrementalLiveState(),
+                Lock(),
+                coordinator,
+                Mock(refresh=Mock(return_value={})),
+            )
         recorded.assert_called_once()
         self.assertTrue(service._DASHBOARD_DATA_AVAILABLE)
 

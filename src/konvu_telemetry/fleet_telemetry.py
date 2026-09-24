@@ -679,6 +679,7 @@ def enrich_snapshot(
     claude_paths: list[Path],
     codex_paths: list[Path],
     now: float,
+    provider_quotas: dict[str, object] | None = None,
 ) -> None:
     """Add explicit transcript telemetry without changing cost accounting."""
     grouped: dict[tuple[str, str], list[TranscriptTelemetry]] = {}
@@ -765,4 +766,11 @@ def enrich_snapshot(
     claude_quotas = _claude_quota_snapshot(now)
     if claude_quotas is not None:
         account_quotas["claude"] = claude_quotas
+    if provider_quotas is not None:
+        for provider in ("claude", "codex"):
+            fresh = provider_quotas.get(provider)
+            if isinstance(fresh, dict):
+                account_quotas[provider] = fresh
+            else:
+                account_quotas.pop(provider, None)
     snapshot["account_quotas"] = account_quotas
