@@ -165,6 +165,10 @@ def notification_state_path() -> Path:
     return home_dir() / "notification-state.json"
 
 
+def quota_attribution_path() -> Path:
+    return home_dir() / "quota-attribution.json"
+
+
 def tracking_state_path() -> Path:
     return home_dir() / "tracking-state.json"
 

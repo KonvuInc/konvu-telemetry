@@ -66,6 +66,7 @@ from .pricing import (
     load_pricing,
     requires_pricing,
 )
+from .quota_attribution import apply_quota_attribution, apply_usage_modes
 from .storage import (
     home_dir,
     parse_timestamp,
@@ -869,6 +870,8 @@ def build_snapshot(
         now,
         provider_quotas,
     )
+    apply_quota_attribution(snapshot)
+    apply_usage_modes(snapshot)
     locate_compactions(snapshot)
     for session in sessions:
         history = session.get("context_history")

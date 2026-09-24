@@ -278,6 +278,23 @@ def context_usage_text(session: dict[str, object]) -> str:
     return f"{tokens(context)} context"
 
 
+def quota_attribution_text(session: dict[str, object]) -> str:
+    """Render the current session's explicitly estimated subscription share."""
+    attribution = session.get("quota_attribution")
+    windows = attribution.get("windows") if isinstance(attribution, dict) else None
+    parts: list[str] = []
+    for window in windows if isinstance(windows, list) else []:
+        if not isinstance(window, dict):
+            continue
+        period = window.get("period")
+        estimate = window.get("estimated_percent")
+        if not isinstance(period, str) or not isinstance(estimate, (int, float)):
+            continue
+        label = "5-hour" if period == "five_hour" else period
+        parts.append(f"~{float(estimate):.1f}% of {label} burn")
+    return " · ".join(parts) if parts else "observing session share"
+
+
 def usage_rows(
     session: dict[str, object],
     quota_text: str,
@@ -325,11 +342,24 @@ def usage_rows(
         if context_percent is not None
         else context_usage_text(session)
     )
-    rows = [f"💸 {total_text} total · {forecast_text}"]
+    usage_mode = session.get("usage_mode")
+    money_visible = usage_mode in {"api_billed", "exhausted"}
+    rows = (
+        [f"💸 {total_text} total · {forecast_text}"]
+        if money_visible
+        else [f"🟢 Included · {quota_text or 'subscription limits available'}"]
+        if usage_mode == "included"
+        else ["⚪ Subscription limit unavailable"]
+    )
     subagents = subagent_usage_text(session)
-    if subagents:
+    if subagents and money_visible:
         rows.append(subagents)
-    rows.append(f"🧠 {context_text}" + (f" · {quota_text}" if quota_text else ""))
+    context_row = f"🧠 {context_text}"
+    if usage_mode == "included":
+        context_row += f" · {quota_attribution_text(session)}"
+    elif quota_text:
+        context_row += f" · {quota_text}"
+    rows.append(context_row)
     norm = baseline_text(session)
     if norm:
         rows.append(norm)

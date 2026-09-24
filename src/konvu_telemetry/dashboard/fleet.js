@@ -12,7 +12,7 @@ const COLORS = {
   orange: "#DB5F37",
   red: "#A60808",
 };
-const BURNING_FORECAST_USD = 4;
+const BURNING_FORECAST_USD = 10;
 const state = {
   payload: null,
   view: "ledger",
@@ -70,8 +70,19 @@ const series = (s) =>
         .filter((q) => q && nonnegative(q.cumulative_cost_usd) && nonnegative(q.cost_usd))
         .sort((a, b) => Date.parse(a.started_at) - Date.parse(b.started_at))
     : [];
-const cost = (s) => (!nonnegative(s.total_cost_usd) || s.cost_status === "unavailable" ? null : s.total_cost_usd);
+const showsMoney = (s) => s.usage_mode === "exhausted" || s.usage_mode === "api_billed";
+const cost = (s) => (!showsMoney(s) || !nonnegative(s.total_cost_usd) || s.cost_status === "unavailable" ? null : s.total_cost_usd);
 const forecast = (s) => (cost(s) !== null && nonnegative(s.projected_next_10_tasks_usd) ? s.projected_next_10_tasks_usd : null);
+const quotaShare = (s, period = "five_hour") => {
+  const windows = s.quota_attribution?.windows;
+  const row = Array.isArray(windows) ? windows.find((w) => w?.period === period && finite(w.estimated_percent)) : null;
+  return row ? row.estimated_percent : null;
+};
+const quotaShareText = (s) => {
+  const share = quotaShare(s);
+  if (finite(share)) return "~" + share.toFixed(share >= 10 ? 0 : 1) + "% of 5-hour burn";
+  return s.quota_attribution?.state === "observing" ? "observing session share" : "subscription usage unavailable";
+};
 const context = (s) =>
   nonnegative(s.context_tokens) && finite(s.context_window_tokens) && s.context_window_tokens > 0
     ? (s.context_tokens / s.context_window_tokens) * 100
@@ -219,7 +230,7 @@ function subagentLabel(a) {
     .replace(/_/g, " ");
   return label.charAt(0).toUpperCase() + label.slice(1);
 }
-function subagentNode(a, index = null) {
+function subagentNode(a, index = null, showCosts = true) {
   const id = typeof a.id === "string" ? a.id : "",
     label = subagentLabel(a) + (index === null ? "" : " " + (index + 1));
   return (
@@ -238,16 +249,15 @@ function subagentNode(a, index = null) {
     tokens(a.entry_context_tokens) +
     "<small>" +
     (nonnegative(a.entry_context_tokens) ? "tokens" : "Not recorded") +
-    '</small></div><div class="agent-cost">' +
-    money(a.cost_usd) +
-    "<small>" +
-    (nonnegative(a.cost_usd) ? "recorded" : "Not recorded") +
-    "</small></div></div>"
+    '</small></div>' +
+    (showCosts ? '<div class="agent-cost">' + money(a.cost_usd) + "<small>" + (nonnegative(a.cost_usd) ? "recorded" : "Not recorded") + "</small></div>" : "") +
+    "</div>"
   );
 }
 function subagentDetails(s) {
   const agents = Array.isArray(s.subagents) ? s.subagents.filter((a) => a && typeof a === "object") : [];
   if (!agents.length) return "";
+  const showCosts = showsMoney(s);
   const grouped = new Map();
   for (const agent of agents) {
     const key = String(agent.label || "Subagent");
@@ -265,7 +275,7 @@ function subagentDetails(s) {
         (a, b) =>
           (nonnegative(b.cost_usd) ? b.cost_usd : -1) - (nonnegative(a.cost_usd) ? a.cost_usd : -1) || String(a.id || "").localeCompare(String(b.id || "")),
       );
-      if (children.length === 1) return '<div class="agent-branch">' + subagentNode(children[0]) + "</div>";
+      if (children.length === 1) return '<div class="agent-branch">' + subagentNode(children[0], null, showCosts) + "</div>";
       const key = keyOf(s) + "|" + label,
         live = children.filter((a) => a.live === true).length,
         contexts = children.map((a) => a.entry_context_tokens).filter(nonnegative),
@@ -300,12 +310,10 @@ function subagentDetails(s) {
         contextRange +
         "<small>" +
         contextNote +
-        '</small></div><div class="agent-cost">' +
-        costLabel +
-        "<small>" +
-        costNote +
-        '</small></div></summary><div class="agent-children">' +
-        children.map((a, i) => subagentNode(a, i)).join("") +
+        '</small></div>' +
+        (showCosts ? '<div class="agent-cost">' + costLabel + "<small>" + costNote + "</small></div>" : "") +
+        '</summary><div class="agent-children">' +
+        children.map((a, i) => subagentNode(a, i, showCosts)).join("") +
         "</div></details>"
       );
     })
@@ -450,8 +458,10 @@ function burningCashIcon(next) {
 }
 function spendVisual(s, scale) {
   const spent = cost(s),
-    next = forecast(s),
-    values =
+    next = forecast(s);
+  if (s.usage_mode === "included" || s.usage_mode === "unknown")
+    return '<div class="spending"><strong>' + (s.usage_mode === "included" ? "Included" : "Subscription status unavailable") + '</strong><small>' + esc(quotaShareText(s)) + "</small></div>";
+  const values =
       '<div class="spend-values"><strong>' +
       money(spent) +
       '</strong><span class="forecast-label">' +
@@ -472,6 +482,7 @@ function spendVisual(s, scale) {
   return '<div class="spending">' + values + visual + "</div>";
 }
 function medianCell(s, comparison) {
+  if (!showsMoney(s)) return '<div class="median-cell missing">—<small>subscription usage</small></div>';
   const ratio = comparison.ratio;
   if (ratio === null) return '<div class="median-cell missing" title="' + esc(comparison.detail) + '">—<small>' + esc(comparison.label) + "</small></div>";
   return (
@@ -492,9 +503,9 @@ function subagentCell(s) {
     (live > 0 ? "subagents-live" : "") +
     '">' +
     live +
-    '</strong> live</span><small title="Recorded subagent cost from the local collector">' +
-    money(s.subagent_cost_usd) +
-    " spent</small></div>"
+    '</strong> live</span>' +
+    (showsMoney(s) ? '<small title="Recorded subagent cost from the local collector">' + money(s.subagent_cost_usd) + " spent</small>" : "") +
+    "</div>"
   );
 }
 function ledger(rows) {
@@ -977,7 +988,10 @@ function graphLegend(baselines) {
 }
 
 function fleetGraph(rows) {
-  const measurable = rows.filter((s) => cost(s) !== null && count(s) > 0),
+  const measurable = rows.filter((s) => cost(s) !== null && count(s) > 0);
+  if (!measurable.length)
+    return '<div class="empty"><h3>Subscription usage is included</h3><p>Money is hidden while these sessions remain within their provider allowance.</p></div>';
+  const
     W = 1100,
     H = 450,
     L = 65,
@@ -1091,14 +1105,15 @@ function renderAccounts() {
     const q = quotas?.[provider];
     for (const w of Array.isArray(q?.windows) ? q.windows : []) {
       if (!finite(w.used_percent) || !finite(w.window_minutes) || w.window_minutes <= 0) continue;
+      const period = w.period === "five_hour" ? "5-hour" : w.period === "weekly" ? "weekly" : w.period === "monthly" ? "monthly" : duration(w.window_minutes * 60);
       html +=
         "<span>" +
         providerName(provider) +
         " · " +
-        duration(w.window_minutes * 60) +
+        period +
         " <b>" +
-        Math.max(0, Math.min(100, 100 - w.used_percent)).toFixed(0) +
-        "% left</b></span>";
+        Math.max(0, Math.min(100, w.used_percent)).toFixed(0) +
+        "% used</b></span>";
     }
   }
   $("#account-strip").innerHTML = html;
@@ -1587,6 +1602,10 @@ function renderInspector() {
     rows = series(s),
     last = rows.at(-1),
     scroll = $("#inspector-body").scrollTop;
+  const included = !showsMoney(s);
+  const stats = included
+    ? '<div class="inspector-stats"><div><span>Subscription</span><strong>' + (s.usage_mode === "included" ? "Included" : "Unknown") + '</strong><small>' + esc(quotaShareText(s)) + '</small></div><div><span>Context</span><strong>' + (pct !== null ? Math.round(pct) + "%" : "—") + "</strong><small>" + tokens(s.context_tokens) + " / " + tokens(s.context_window_tokens) + "</small></div><div><span>Prompts</span><strong>" + count(s) + "</strong><small>recorded locally</small></div></div>"
+    : '<div class="inspector-stats"><div><span>Recorded spend</span><strong>' + money(cost(s)) + "</strong><small>" + count(s) + " prompts</small></div><div><span>" + (last?.completed === false ? "Current prompt" : "Last prompt") + "</span><strong>" + money(last?.priced === false ? null : last?.cost_usd) + "</strong><small>" + (last?.completed === false ? "still accumulating" : "recorded cost") + "</small></div><div><span>Next 10 prompts</span><strong>" + additional(forecast(s)) + "</strong><small>additional estimate</small></div><div><span>Context</span><strong>" + (pct !== null ? Math.round(pct) + "%" : "—") + "</strong><small>" + tokens(s.context_tokens) + " / " + tokens(s.context_window_tokens) + "</small></div></div>";
   $("#inspector-body").innerHTML =
     '<span class="eyebrow">' +
     providerName(s.provider) +
@@ -1604,32 +1623,13 @@ function renderInspector() {
     age(s.last_activity_at) +
     " ago · " +
     age(startTime(s)) +
-    ' old</div><div class="inspector-stats"><div><span>Recorded spend</span><strong>' +
-    money(cost(s)) +
-    "</strong><small>" +
-    count(s) +
-    " prompts</small></div><div><span>" +
-    (last?.completed === false ? "Current prompt" : "Last prompt") +
-    "</span><strong>" +
-    money(last?.priced === false ? null : last?.cost_usd) +
-    "</strong><small>" +
-    (last?.completed === false ? "still accumulating" : "recorded cost") +
-    "</small></div><div><span>Next 10 prompts</span><strong>" +
-    additional(forecast(s)) +
-    "</strong><small>additional estimate</small></div><div><span>Context</span><strong>" +
-    (pct !== null ? Math.round(pct) + "%" : "—") +
-    "</strong><small>" +
-    tokens(s.context_tokens) +
-    " / " +
-    tokens(s.context_window_tokens) +
-    "</small></div></div>" +
-    (a.severity ? '<div class="inspector-signal"><strong>' + esc(a.action) + "</strong><p>" + esc(a.evidence) + "</p></div>" : "") +
-    '<div class="section-title"><h3>How this session is spending</h3><div class="mini-tabs"><button data-chart="cumulative" class="' +
+    ' old</div>' + stats +
+    (!included && a.severity ? '<div class="inspector-signal"><strong>' + esc(a.action) + "</strong><p>" + esc(a.evidence) + "</p></div>" : "") +
+    (!included ? '<div class="section-title"><h3>How this session is spending</h3><div class="mini-tabs"><button data-chart="cumulative" class="' +
     (state.chart === "cumulative" ? "on" : "") +
     '">Cumulative</button><button data-chart="prompt" class="' +
     (state.chart === "prompt" ? "on" : "") +
-    '">Per prompt</button></div></div>' +
-    sessionGraph(s) +
+    '">Per prompt</button></div></div>' + sessionGraph(s) : "") +
     '<div class="section-title"><h3>Where the tokens went</h3><span class="tiny">Recorded token traffic</span></div>' +
     tokenBreakdown(s) +
     subagentDetails(s);
@@ -1776,15 +1776,18 @@ function bindNotificationPanel() {
 function browserAlerts(payload) {
   if (notificationPermission() !== "granted") return;
   for (const [provider, quotas] of Object.entries(payload.account_quotas || {})) {
-    for (const alert of quotas?.notifications || []) {
-      if (!alert?.hot || !Number.isInteger(alert.sequence) || alert.sequence < 1) continue;
-      const key = "konvu-quota-alert-" + provider + "-" + alert.window;
-      if (Number(localStorage.getItem(key) || 0) >= alert.sequence) continue;
-      localStorage.setItem(key, String(alert.sequence));
+    for (const window of Array.isArray(quotas?.windows) ? quotas.windows : []) {
+      if (!finite(window?.used_percent)) continue;
+      const threshold = [100, 80, 50].find((value) => window.used_percent >= value);
+      if (!threshold) continue;
+      const period = window.period || duration(window.window_minutes * 60);
+      const key = "konvu-quota-alert-" + provider + "-" + period + "-" + (window.resets_at || "unknown");
+      if (Number(localStorage.getItem(key) || 0) >= threshold) continue;
+      localStorage.setItem(key, String(threshold));
       const notification = new Notification(
-        providerName(provider) + " " + alert.window + " limit at " + alert.used_percent + "%",
+        providerName(provider) + " " + period + " limit at " + Math.round(window.used_percent) + "%",
         {
-          body: alert.used_percent + "% of your " + alert.window + " limit is used.",
+          body: Math.round(window.used_percent) + "% of your " + period + " subscription limit is used.",
           icon: "/konvu-ghost.svg",
           requireInteraction: true,
           tag: key,
@@ -1792,31 +1795,25 @@ function browserAlerts(payload) {
       );
       notification.onclick = () => {
         window.focus();
-        const session = (payload.sessions || []).find(
-          (item) => item?.provider === provider && item?.id === alert.session_id
-        );
+        const session = (payload.sessions || []).find((item) => item?.provider === provider);
         if (session) openSession(keyOf(session));
         notification.close();
       };
     }
   }
   for (const session of payload.sessions || []) {
-    const alert = session.notification;
-    if (!alert?.hot || !Number.isInteger(alert.sequence) || alert.sequence < 1) continue;
+    if (!showsMoney(session) || !finite(session.projected_next_10_tasks_usd) || session.projected_next_10_tasks_usd < 10) continue;
     const key = "konvu-alert-" + session.provider + "-" + session.id;
-    if (Number(localStorage.getItem(key) || 0) >= alert.sequence) continue;
-    localStorage.setItem(key, String(alert.sequence));
-    const overhead = alert.overhead_percent;
+    const previous = JSON.parse(localStorage.getItem(key) || "null");
+    const now = Date.now(), forecastUsd = session.projected_next_10_tasks_usd;
+    if (previous && now - previous.at < 300000 && forecastUsd < previous.forecast + 5) continue;
+    localStorage.setItem(key, JSON.stringify({ at: now, forecast: forecastUsd }));
     const notification = new Notification(providerName(session.provider) + " session running hot", {
       body:
-        "🔥 $" +
-        Number(session.projected_next_10_tasks_usd || 0).toFixed(1) +
+        "🔥 " +
+        (forecastUsd >= 50 ? "💸💸💸" : forecastUsd >= 30 ? "💸💸" : "💸") + " $" + forecastUsd.toFixed(1) +
         " forecast for the next 10 prompts\n💸 $" +
-        Number(session.total_cost_usd || 0).toFixed(1) +
-        " spent so far" +
-        (finite(overhead)
-          ? " · " + Math.abs(Math.round(overhead)) + "% " + (overhead < 0 ? "below" : "above") + " your usual burn"
-          : ""),
+        Number(session.total_cost_usd || 0).toFixed(1) + " API-equivalent so far",
       icon: "/konvu-ghost.svg",
       requireInteraction: true,
       tag: key,

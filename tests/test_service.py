@@ -1503,6 +1503,7 @@ class ServiceTests(unittest.TestCase):
             "id": "00000000-0000-0000-0000-000000000001",
             "total_cost_usd": 25.0,
             "cost_status": "complete",
+            "usage_mode": "exhausted",
             "projected_next_10_tasks_usd": 5.0,
             "task_count": 9,
             "context_tokens": 500,
@@ -1516,6 +1517,7 @@ class ServiceTests(unittest.TestCase):
             "id": "00000000-0000-0000-0000-000000000001",
             "total_cost_usd": 25.0,
             "cost_status": "complete",
+            "usage_mode": "exhausted",
             "projected_next_10_tasks_usd": 5.0,
             "last_task_tool_calls": 3,
             "context_tokens": 500,
@@ -1592,6 +1594,7 @@ class ServiceTests(unittest.TestCase):
             "total_cost_usd": 25.4,
             "task_count": 5,
             "cost_status": "complete",
+            "usage_mode": "exhausted",
             "projected_next_10_tasks_usd": 4.9,
             "context_tokens": 650,
             "context_window_tokens": 1000,
@@ -1660,6 +1663,7 @@ class ServiceTests(unittest.TestCase):
             "id": "00000000-0000-0000-0000-000000000001",
             "total_cost_usd": 0.02,
             "cost_status": "complete",
+            "usage_mode": "exhausted",
             "projected_next_10_tasks_usd": 0.1,
             "task_count": 1,
             "context_tokens": 500,
@@ -1826,6 +1830,7 @@ class ServiceTests(unittest.TestCase):
             "id": "00000000-0000-0000-0000-000000000001",
             "total_cost_usd": 25.4,
             "cost_status": "complete",
+            "usage_mode": "exhausted",
             "projected_next_10_tasks_usd": 4.9,
             "last_task_tool_calls": 3,
             "context_tokens": 500,
@@ -1860,6 +1865,7 @@ class ServiceTests(unittest.TestCase):
             **self.shared_row_session(),
             "provider": "codex",
             "billing_mode": "chatgpt_subscription",
+            "usage_mode": "exhausted",
             "credit_status": "complete",
             "total_credits": 12.25,
             "projected_next_10_tasks_credits": 5.5,
@@ -1875,6 +1881,32 @@ class ServiceTests(unittest.TestCase):
                 "🧠 50% context · 25% weekly limit",
             ],
         )
+
+    def test_included_usage_rows_hide_monetary_estimates(self) -> None:
+        session = {
+            **self.shared_row_session(),
+            "usage_mode": "included",
+            "quota_attribution": {
+                "windows": [{"period": "five_hour", "estimated_percent": 1.25}]
+            },
+        }
+        with health_patch({"status": "stale"}):
+            rows = usage_rows(session, "20% 5-hour limit")
+        self.assertEqual(
+            rows[:2],
+            [
+                "🟢 Included · 20% 5-hour limit",
+                "🧠 50% context · ~1.2% of 5-hour burn",
+            ],
+        )
+        self.assertNotIn("$", "\n".join(rows))
+
+    def test_unknown_subscription_usage_hides_monetary_estimates(self) -> None:
+        session = {**self.shared_row_session(), "usage_mode": "unknown"}
+        with health_patch({"status": "stale"}):
+            rows = usage_rows(session, "")
+        self.assertEqual(rows[0], "⚪ Subscription limit unavailable")
+        self.assertNotIn("$", "\n".join(rows))
 
     def test_the_usage_box_is_the_shared_rows_inside_a_frame(self) -> None:
         session = self.shared_row_session()
@@ -3146,16 +3178,11 @@ class ServiceTests(unittest.TestCase):
             ],
         )
 
-    def test_live_codex_quota_is_attached_to_the_latest_codex_session(self) -> None:
+    def test_codex_billing_mode_is_attached_without_fetching_usage(self) -> None:
         account = {
             "billing_mode": "chatgpt_subscription",
             "plan_type": "plus",
             "plan_label": "Plus",
-        }
-        quota = {
-            "source": "codex_usage_endpoint",
-            "windows": [{"window_minutes": 10080, "used_percent": 25}],
-            **account,
         }
         snapshot = {
             "sessions": [
@@ -3175,17 +3202,10 @@ class ServiceTests(unittest.TestCase):
             patch(
                 "konvu_telemetry.fleet_telemetry.codex_account", return_value=account
             ),
-            patch(
-                "konvu_telemetry.fleet_telemetry.fetch_codex_usage", return_value=quota
-            ),
         ):
-            enrich_snapshot(snapshot, [], [], time.time(), fetch_provider_usage=True)
+            enrich_snapshot(snapshot, [], [], time.time())
         self.assertEqual(
             snapshot["sessions"][0]["billing_mode"], "chatgpt_subscription"
-        )
-        self.assertEqual(
-            snapshot["account_quotas"]["codex"]["windows"][0]["session_id"],
-            "latest",
         )
 
 

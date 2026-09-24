@@ -705,7 +705,6 @@ def enrich_snapshot(
                     quotas[limit_id] = observation
     account = codex_account()
     sessions = snapshot.get("sessions")
-    latest_codex_session: tuple[float, str] | None = None
     for session in sessions if isinstance(sessions, list) else []:
         if not isinstance(session, dict):
             continue
@@ -721,13 +720,6 @@ def enrich_snapshot(
             continue
         if session_provider == "codex":
             session.update(account)
-            activity = _timestamp(session.get("last_activity_at"))
-            candidate = (
-                activity if activity is not None else float("-inf"),
-                session_id,
-            )
-            if latest_codex_session is None or candidate > latest_codex_session:
-                latest_codex_session = candidate
         rows = grouped.get((session_provider, session_id), [])
         if not rows:
             continue
