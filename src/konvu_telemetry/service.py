@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import errno
 import fcntl
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -396,7 +397,12 @@ def _run_local_service(interval_seconds: int, port: int) -> None:
         directory=str(directory),
         refresh_coordinator=refresh_coordinator,
     )
-    server = ThreadingHTTPServer(("127.0.0.1", port), handler)
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", port), handler)
+    except OSError as error:
+        if error.errno != errno.EADDRINUSE:
+            raise
+        raise SystemExit(f"Konvu dashboard port {port} is already in use") from None
     collector = Thread(
         target=collect_forever,
         args=(interval_seconds, live_state, snapshot_lock, refresh_coordinator),

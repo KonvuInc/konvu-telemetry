@@ -415,6 +415,7 @@ class InstallerTests(unittest.TestCase):
                 installer.install_launch_agent(60)
                 payload = plistlib.loads(installer.launch_agent_path().read_bytes())
             self.assertEqual(payload["KeepAlive"], {"SuccessfulExit": False})
+            self.assertEqual(payload["ThrottleInterval"], 30)
 
     def test_private_launcher_ignores_an_untrusted_working_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -2,6 +2,7 @@ import json
 from collections.abc import Callable
 from contextlib import nullcontext
 from datetime import datetime, timezone
+import errno
 from io import StringIO
 import os
 import subprocess
@@ -114,6 +115,14 @@ def health_patch(health: object) -> object:
 
 
 class ServiceTests(unittest.TestCase):
+    def test_local_service_reports_a_port_collision_without_a_traceback(self) -> None:
+        collision = OSError(errno.EADDRINUSE, "Address already in use")
+        with patch(
+            "konvu_telemetry.service.ThreadingHTTPServer", side_effect=collision
+        ):
+            with self.assertRaisesRegex(SystemExit, "port 7824 is already in use"):
+                service._run_local_service(60, 7824)
+
     def test_collector_process_lock_rejects_a_second_writer(self) -> None:
         with (
             tempfile.TemporaryDirectory() as directory,
