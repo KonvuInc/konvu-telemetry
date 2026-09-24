@@ -16,6 +16,7 @@ from .config import (
     ALERT_QUOTA_WEEKLY_PERCENT,
     ALLOWED_PROVIDERS,
     CLAUDE_DESKTOP_ENTRYPOINT,
+    DASHBOARD_PORT,
 )
 from .parsers import (
     claude_hook_transcript,
@@ -23,6 +24,7 @@ from .parsers import (
     codex_hook_transcript,
     codex_turn_tool_calls,
 )
+from .service import load_health
 from .storage import (
     claude_quota_path,
     session_path,
@@ -242,6 +244,20 @@ def subagent_usage_text(session: dict[str, object]) -> str:
     return f"🤖 {live or 0} live / {total} total · {shared_text} · {money(spend)} spent"
 
 
+def dashboard_line() -> str:
+    """Link the local dashboard, or name the command that starts it when it is not serving."""
+    # Only a healthy collector is serving the dashboard; a wrong URL is worse than a hint.
+    try:
+        reachable = load_health().get("status") == "healthy"
+    except Exception:
+        reachable = False
+    return (
+        f"🔗 dashboard: http://127.0.0.1:{DASHBOARD_PORT}/"
+        if reachable
+        else "🔗 run konvu-telemetry setup to start the dashboard"
+    )
+
+
 def context_usage_text(session: dict[str, object]) -> str:
     """Render context as a percentage when the provider exposes its window size."""
     context = session.get("context_tokens")
@@ -309,6 +325,7 @@ def statusline() -> None:
     norm = baseline_text(session)
     if norm:
         print(norm)
+    print(dashboard_line())
 
 
 def claude_is_desktop() -> bool:
@@ -350,6 +367,7 @@ def usage_box_lines(session: dict[str, object], quota_text: str) -> list[str]:
     norm = baseline_text(session)
     if norm:
         lines.append(f"│ {norm}")
+    lines.append(f"│ {dashboard_line()}")
     lines.append("╰─")
     return lines
 

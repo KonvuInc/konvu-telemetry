@@ -15,6 +15,7 @@ Konvu Telemetry is one Python package with a single resident process. The proces
 - Desktop clients collapse a hook `systemMessage` into a hidden notice, so the desktop path uses a `UserPromptSubmit` hook returning `hookSpecificOutput.additionalContext` that asks the model to end its reply with the usage box.
 - Claude installs no `Stop` hook. Setup removes the one earlier versions installed and leaves every other `Stop` entry in the file alone; `claude-hook` remains a silent no-op so settings written by an older version keep working.
 - Claude is identified as desktop by `CLAUDE_CODE_ENTRYPOINT=claude-desktop` in the hook environment; Codex by its recorded client (Desktop app or VS Code) as opposed to the TUI, read from the rollout's `session_meta` record. An absent, unreadable, or unrecognized client means CLI, so the desktop path is never entered by accident.
+- Every usage summary ends with one dashboard line: the `DASHBOARD_PORT` loopback URL when `service.load_health()` reports `healthy`, and otherwise the `konvu-telemetry setup` command that installs and starts the collector serving it. Only `healthy` counts as reachable; `stale`, `starting`, a missing or unreadable health record, and a failed read all show the command, because a dead link costs more than a redundant hint. No surface opens a socket to decide this.
 - A usage box is shown when, and only when, the last prompt used a tool. The prompt hooks read the rendered session's `last_task_tool_calls`; the Codex `Stop` hook counts tool calls on the exact turn it fires on, which is more precise for that one hook. A missing, zero, or non-integer count shows nothing. There is no cost floor, prompt-count floor, or rate limit.
 
 ## Runtime flow
@@ -26,7 +27,7 @@ Konvu Telemetry is one Python package with a single resident process. The proces
 5. `pricing.py` applies the bundled local price table and marks missing prices explicitly.
 6. `analytics.py` derives prompt series, personal baselines, forecasts, compaction state, and alert decisions. Expired valid baselines remain usable while one background refresh rebuilds them.
 7. `snapshot.py` writes a bounded dashboard summary plus detailed per-session documents. Unchanged detail documents are not rewritten.
-8. `display.py` renders the Claude status line, the Codex `Stop` hook, and both providers' desktop `UserPromptSubmit` context from per-session documents.
+8. `display.py` renders the Claude status line, the Codex `Stop` hook, and both providers' desktop `UserPromptSubmit` context from per-session documents, and reads `service.load_health()` for the closing dashboard line.
 9. `dashboard/` contains static HTML, CSS, JavaScript, and images served by the local process.
 
 ## Local files
