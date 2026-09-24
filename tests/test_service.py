@@ -46,10 +46,13 @@ from konvu_telemetry.display import (
     codex_prompt_hook,
     dashboard_line,
     last_prompt_used_a_tool,
+    payload_context_percent,
     quota_usage_text,
     record_claude_quotas,
     refreshed_session,
     statusline,
+    usage_box_lines,
+    usage_rows,
 )
 from konvu_telemetry.exporter import normalized_event
 from konvu_telemetry.fleet_telemetry import (
@@ -1715,14 +1718,18 @@ class ServiceTests(unittest.TestCase):
             {"suppressOutput": True},
         )
 
-    def run_statusline(self, session: dict[str, object] | None, health: object) -> str:
+    def run_statusline(
+        self,
+        session: dict[str, object] | None,
+        health: object,
+        payload_extra: dict[str, object] | None = None,
+    ) -> str:
         """Render the Claude CLI status line against one session and health state."""
         session_id = "00000000-0000-0000-0000-000000000001"
+        payload: dict[str, object] = {"session_id": session_id, **(payload_extra or {})}
         stdout = StringIO()
         with (
-            patch.object(
-                sys, "stdin", StringIO(json.dumps({"session_id": session_id}))
-            ),
+            patch.object(sys, "stdin", StringIO(json.dumps(payload))),
             patch.object(sys, "stdout", stdout),
             patch(
                 "konvu_telemetry.display.claude_hook_transcript",
@@ -1809,6 +1816,98 @@ class ServiceTests(unittest.TestCase):
         for surface, output in self.surface_outputs(boom).items():
             self.assertIn(DASHBOARD_HINT, output, surface)
             self.assertNotIn("http://127.0.0.1", output, surface)
+
+    def shared_row_session(self) -> dict[str, object]:
+        """Build a session that exercises every optional row of the shared summary."""
+        return {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "total_cost_usd": 25.4,
+            "cost_status": "complete",
+            "projected_next_10_tasks_usd": 4.9,
+            "last_task_tool_calls": 3,
+            "context_tokens": 500,
+            "context_window_tokens": 1000,
+            "subagent_total": 2,
+            "active_subagents": 1,
+            "subagent_entry_context_tokens": 900,
+            "subagent_cost_usd": 0.4,
+            "baseline": {
+                "emoji": "🟢",
+                "cost_overhead_percent": -12,
+                "iterations": 4,
+            },
+        }
+
+    def test_usage_rows_are_the_content_every_surface_renders(self) -> None:
+        with health_patch({"status": "stale"}):
+            rows = usage_rows(self.shared_row_session(), "3% weekly limit")
+        self.assertEqual(
+            rows,
+            [
+                "💸 $25.4 total · $4.9 for the next 10 prompts",
+                "🤖 1 live / 2 total · 90% context shared · $0.4 spent",
+                "🧠 50% context · 3% weekly limit",
+                "🟢 12% below your median",
+                DASHBOARD_HINT,
+            ],
+        )
+
+    def test_the_usage_box_is_the_shared_rows_inside_a_frame(self) -> None:
+        session = self.shared_row_session()
+        with health_patch({"status": "stale"}):
+            lines = usage_box_lines(session, "3% weekly limit")
+            rows = usage_rows(session, "3% weekly limit")
+        self.assertEqual(lines[0], "╭─ Konvu usage")
+        self.assertEqual(lines[-1], "╰─")
+        self.assertEqual(lines[1:-1], [f"│ {row}" for row in rows])
+
+    def test_the_status_line_prints_the_shared_rows_unframed(self) -> None:
+        # Mutation guard: a status line that renders its own rows again fails here.
+        session = self.shared_row_session()
+        quotas = {"five_hour": {"utilization": 0.03}}
+        output = self.run_statusline(
+            session,
+            {"status": "stale"},
+            {"rate_limits": quotas, "context_window": {"used_percentage": 87.4}},
+        )
+        with health_patch({"status": "stale"}):
+            rows = usage_rows(session, quota_usage_text({"rate_limits": quotas}), 87.4)
+        self.assertEqual(output, "".join(f"{row}\n" for row in rows))
+        self.assertIn("🧠 87% context · ⏳ 3% 5-hour limit\n", output)
+        self.assertNotIn("│", output)
+        self.assertNotIn("╭", output)
+
+    def test_the_status_line_prefers_the_payload_context_percentage(self) -> None:
+        # Claude reports the live window to the status line; the snapshot lags a turn.
+        session = self.shared_row_session()
+        output = self.run_statusline(
+            session, {"status": "stale"}, {"context_window": {"used_percentage": 87.4}}
+        )
+        self.assertIn("🧠 87% context\n", output)
+        with health_patch({"status": "stale"}):
+            self.assertIn("│ 🧠 50% context", usage_box_lines(session, ""))
+
+    def test_an_unusable_payload_context_falls_back_to_the_snapshot(self) -> None:
+        for context_window in (None, {}, {"used_percentage": True}, "50%"):
+            self.assertIsNone(
+                payload_context_percent({"context_window": context_window}),
+                repr(context_window),
+            )
+            output = self.run_statusline(
+                self.shared_row_session(),
+                {"status": "stale"},
+                {"context_window": context_window},
+            )
+            self.assertIn("🧠 50% context\n", output, repr(context_window))
+        self.assertIsNone(payload_context_percent({}))
+        for value in (float("nan"), float("inf")):
+            self.assertIsNone(
+                payload_context_percent({"context_window": {"used_percentage": value}}),
+                repr(value),
+            )
+        self.assertEqual(
+            payload_context_percent({"context_window": {"used_percentage": 0}}), 0.0
+        )
 
     def run_hook_command(
         self, command: str, stdin: str, home: Path

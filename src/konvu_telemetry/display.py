@@ -267,6 +267,53 @@ def context_usage_text(session: dict[str, object]) -> str:
     return f"{tokens(context)} context"
 
 
+def usage_rows(
+    session: dict[str, object],
+    quota_text: str,
+    context_percent: float | None = None,
+) -> list[str]:
+    """Build the usage summary every surface shows, unframed; each surface wraps it itself."""
+    complete = session.get("cost_status") == "complete"
+    forecast = session.get("projected_next_10_tasks_usd")
+    forecast_text = (
+        f"{money(forecast)} for the next 10 prompts"
+        if complete and isinstance(forecast, (int, float))
+        else "forecast unavailable"
+    )
+    total_cost = session.get("total_cost_usd")
+    total_text = (
+        money(total_cost)
+        if complete
+        else f"known minimum {money(total_cost)}"
+        if session.get("cost_status") == "partial"
+        else "cost unavailable"
+    )
+    context_text = (
+        f"{context_percent:.0f}% context"
+        if context_percent is not None
+        else context_usage_text(session)
+    )
+    rows = [f"💸 {total_text} total · {forecast_text}"]
+    subagents = subagent_usage_text(session)
+    if subagents:
+        rows.append(subagents)
+    rows.append(f"🧠 {context_text}" + (f" · {quota_text}" if quota_text else ""))
+    norm = baseline_text(session)
+    if norm:
+        rows.append(norm)
+    rows.append(dashboard_line())
+    return rows
+
+
+def payload_context_percent(payload: dict[str, object]) -> float | None:
+    """Read the live context percentage Claude reports to the status-line hook."""
+    context = payload.get("context_window")
+    value = context.get("used_percentage") if isinstance(context, dict) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if math.isfinite(value) else None
+
+
 def statusline() -> None:
     """Render only the local metrics that belong to the current Claude session."""
     try:
@@ -289,43 +336,12 @@ def statusline() -> None:
     if session is None:
         print("Konvu live usage: collector starting")
         return
-    context = payload.get("context_window")
-    used_percentage = (
-        context.get("used_percentage") if isinstance(context, dict) else None
+    # The hook payload's context percentage is fresher than the collector's snapshot.
+    rows = usage_rows(
+        session, quota_usage_text(payload), payload_context_percent(payload)
     )
-    context_text = (
-        f"{float(used_percentage):.0f}%"
-        if isinstance(used_percentage, (int, float))
-        else "waiting for first response"
-    )
-    quota_text = quota_usage_text(payload)
-    complete = session.get("cost_status") == "complete"
-    forecast = session.get("projected_next_10_tasks_usd")
-    forecast_text = (
-        f"{money(forecast)} for the next 10 prompts"
-        if complete and isinstance(forecast, (int, float))
-        else "forecast unavailable"
-    )
-    cost_status_value = session.get("cost_status")
-    total_text = (
-        money(session.get("total_cost_usd"))
-        if complete
-        else f"known minimum {money(session.get('total_cost_usd'))}"
-        if cost_status_value == "partial"
-        else "cost unavailable"
-    )
-    print(f"💸 {total_text} total · {forecast_text}")
-    subagents = subagent_usage_text(session)
-    if subagents:
-        print(subagents)
-    print(
-        f"🧠 {context_text} session context"
-        + (f" · {quota_text}" if quota_text else "")
-    )
-    norm = baseline_text(session)
-    if norm:
-        print(norm)
-    print(dashboard_line())
+    for row in rows:
+        print(row)
 
 
 def claude_is_desktop() -> bool:
@@ -339,37 +355,9 @@ def codex_is_desktop(transcript: Path | None) -> bool:
 
 
 def usage_box_lines(session: dict[str, object], quota_text: str) -> list[str]:
-    """Build the boxed usage summary shared by the Codex Stop hook and both prompt hooks."""
-    total_cost = session.get("total_cost_usd")
-    complete = session.get("cost_status") == "complete"
-    forecast = session.get("projected_next_10_tasks_usd")
-    forecast_text = (
-        f"{money(forecast)} for the next 10 prompts"
-        if complete and isinstance(forecast, (int, float))
-        else "forecast unavailable"
-    )
-    total_text = (
-        money(total_cost)
-        if complete
-        else f"known minimum {money(total_cost)}"
-        if session.get("cost_status") == "partial"
-        else "cost unavailable"
-    )
-    lines = [
-        "╭─ Konvu usage",
-        f"│ 💸 {total_text} total · {forecast_text}",
-        f"│ 🧠 {context_usage_text(session)}"
-        + (f" · {quota_text}" if quota_text else ""),
-    ]
-    subagents = subagent_usage_text(session)
-    if subagents:
-        lines.insert(2, f"│ {subagents}")
-    norm = baseline_text(session)
-    if norm:
-        lines.append(f"│ {norm}")
-    lines.append(f"│ {dashboard_line()}")
-    lines.append("╰─")
-    return lines
+    """Frame the shared usage rows for the Codex Stop hook and both prompt hooks."""
+    rows = usage_rows(session, quota_text)
+    return ["╭─ Konvu usage", *(f"│ {row}" for row in rows), "╰─"]
 
 
 def prompt_box_context(provider: str, session_id: str) -> str | None:
