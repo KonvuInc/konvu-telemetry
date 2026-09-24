@@ -276,6 +276,7 @@ def quota_attribution_text(session: dict[str, object]) -> str:
     """Render the current session's explicitly estimated subscription share."""
     attribution = session.get("quota_attribution")
     windows = attribution.get("windows") if isinstance(attribution, dict) else None
+    provider = session.get("provider")
     parts: list[str] = []
     for window in windows if isinstance(windows, list) else []:
         if not isinstance(window, dict):
@@ -285,7 +286,10 @@ def quota_attribution_text(session: dict[str, object]) -> str:
         if not isinstance(period, str) or not isinstance(estimate, (int, float)):
             continue
         label = "5-hour" if period == "five_hour" else period
-        parts.append(f"~{float(estimate):.1f}% of {label} limit")
+        hot = (provider == "claude" and period == "five_hour" and estimate > 20) or (
+            provider == "codex" and period == "weekly" and estimate > 10
+        )
+        parts.append(f"~{float(estimate):.1f}% of {label} limit" + (" 🔥" if hot else ""))
     return " · ".join(parts)
 
 

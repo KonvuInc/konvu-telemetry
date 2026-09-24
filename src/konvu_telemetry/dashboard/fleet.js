@@ -79,8 +79,11 @@ const quotaShare = (s, period = "five_hour") => {
   return row ? row.estimated_percent : null;
 };
 const quotaShareText = (s) => {
-  const share = quotaShare(s);
-  return finite(share) ? "Responsible for ~" + share.toFixed(share >= 10 ? 0 : 1) + "% of 5-hour limit" : "";
+  const period = s.provider === "codex" ? "weekly" : "five_hour";
+  const share = quotaShare(s, period);
+  if (!finite(share)) return "";
+  const hot = (s.provider === "claude" && period === "five_hour" && share > 20) || (s.provider === "codex" && period === "weekly" && share > 10);
+  return "Responsible for ~" + share.toFixed(share >= 10 ? 0 : 1) + "% of " + (period === "five_hour" ? "5-hour" : "weekly") + " limit" + (hot ? " 🔥" : "");
 };
 const quotaForecastText = (s) => {
   const windows = s.quota_attribution?.windows;

@@ -1880,6 +1880,21 @@ class ServiceTests(unittest.TestCase):
         )
         self.assertNotIn("$", "\n".join(rows))
 
+    def test_hot_subscription_share_gets_a_fire_marker(self) -> None:
+        for provider, period, estimate in (
+            ("claude", "five_hour", 20.1),
+            ("codex", "weekly", 10.1),
+        ):
+            session = {
+                **self.shared_row_session(),
+                "provider": provider,
+                "usage_mode": "included",
+                "quota_attribution": {
+                    "windows": [{"period": period, "estimated_percent": estimate}]
+                },
+            }
+            self.assertIn("🔥", "\n".join(usage_rows(session, "")))
+
     def test_unknown_subscription_usage_hides_monetary_estimates(self) -> None:
         session = {**self.shared_row_session(), "usage_mode": "unknown"}
         with health_patch({"status": "stale"}):
