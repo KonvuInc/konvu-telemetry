@@ -10,7 +10,6 @@ import math
 import os
 from pathlib import Path
 import selectors
-import shutil
 import stat
 import subprocess
 import sys
@@ -384,17 +383,24 @@ def fetch_claude_limits(
 
 
 def _codex_executable() -> str | None:
-    configured = shutil.which("codex")
-    if configured is not None:
-        return configured
     for candidate in (
         Path("/Applications/Codex.app/Contents/Resources/codex"),
         Path.home() / ".local" / "bin" / "codex",
         Path("/opt/homebrew/bin/codex"),
         Path("/usr/local/bin/codex"),
     ):
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return str(candidate)
+        try:
+            resolved = candidate.resolve(strict=True)
+            metadata = resolved.stat()
+        except OSError:
+            continue
+        if (
+            stat.S_ISREG(metadata.st_mode)
+            and metadata.st_uid in {0, os.getuid()}
+            and not metadata.st_mode & 0o022
+            and os.access(resolved, os.X_OK)
+        ):
+            return str(resolved)
     return None
 
 

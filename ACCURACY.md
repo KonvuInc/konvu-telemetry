@@ -14,6 +14,10 @@ Prompt boundaries come from explicit provider records. Subagent calls are dedupl
 
 Context is the latest provider-recorded input plus cache traffic for a model call. It is not cumulative token traffic. Codex supplies its context-window size directly. Claude uses the published capacity in the bundled model-price snapshot and labels it as model pricing rather than provider-observed capacity.
 
+## Account limits
+
+Account-limit percentages and reset times are provider-reported rather than estimated. Every two minutes, the collector reads Claude's five-hour and weekly windows from Anthropic's usage endpoint and asks Codex's local app-server for every reported rolling, monthly, model-specific, and denial state. Invalid percentages are rejected, and a failed or unavailable request removes that provider's live limit snapshot instead of presenting stale data as current.
+
 ## Forecasts and medians
 
 The next-ten forecast first uses the mean cost of up to ten completed, fully priced prompts matching the current model, reasoning effort, and service speed. With fewer than three comparable prompts, it falls back to the provider-wide median forecast from recent local sessions; if no global history exists, any completed prompts in the current session are used. After compaction, only post-compaction prompts are comparable; while that history warms up, a context-scaled pre-compaction estimate is labeled separately. The baseline document includes the median held-out percentage error for recent Claude and Codex sessions with at least 20 prompts.
