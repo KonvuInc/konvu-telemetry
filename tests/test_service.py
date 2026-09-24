@@ -44,10 +44,12 @@ from konvu_telemetry.display import (
     codex_hook,
     codex_is_desktop,
     codex_prompt_hook,
+    dashboard_line,
     last_prompt_used_a_tool,
     quota_usage_text,
     record_claude_quotas,
     refreshed_session,
+    statusline,
 )
 from konvu_telemetry.exporter import normalized_event
 from konvu_telemetry.fleet_telemetry import (
@@ -106,6 +108,16 @@ from konvu_telemetry.storage import (
     transcript_files,
     write_private_json_if_changed,
 )
+
+
+DASHBOARD_HINT = "🔗 run konvu-telemetry setup to start the dashboard"
+
+
+def health_patch(health: object) -> object:
+    """Patch the display's health read with a value, a real reader, or a failure."""
+    if isinstance(health, BaseException) or callable(health):
+        return patch("konvu_telemetry.display.load_health", side_effect=health)
+    return patch("konvu_telemetry.display.load_health", return_value=health)
 
 
 class ServiceTests(unittest.TestCase):
@@ -1462,6 +1474,7 @@ class ServiceTests(unittest.TestCase):
         hook: Callable[[], None],
         entrypoint: str | None,
         session: dict[str, object] | None,
+        health: object = None,
     ) -> str:
         """Run a Claude hook against one client entrypoint and return its stdout."""
         session_id = "00000000-0000-0000-0000-000000000001"
@@ -1477,6 +1490,7 @@ class ServiceTests(unittest.TestCase):
             patch.object(sys, "stdout", stdout),
             patch("konvu_telemetry.display.refreshed_session", return_value=session),
             patch("konvu_telemetry.display.recorded_quota_usage_text", return_value=""),
+            health_patch({"status": "starting"} if health is None else health),
         ):
             hook()
         return stdout.getvalue()
@@ -1533,6 +1547,7 @@ class ServiceTests(unittest.TestCase):
         client: str,
         session: dict[str, object] | None,
         turn_tool_calls: int = 1,
+        health: object = None,
     ) -> str:
         """Run a Codex hook against one recorded client and return its stdout."""
         session_id = "00000000-0000-0000-0000-000000000001"
@@ -1558,6 +1573,7 @@ class ServiceTests(unittest.TestCase):
                 "konvu_telemetry.display.recorded_quota_usage_text",
                 return_value="3% weekly limit",
             ),
+            health_patch({"status": "starting"} if health is None else health),
         ):
             hook()
         return stdout.getvalue()
@@ -1574,14 +1590,15 @@ class ServiceTests(unittest.TestCase):
             "context_tokens": 650,
             "context_window_tokens": 1000,
         }
-        # Byte-for-byte: the CLI box is unchanged, and quota rides the context line rather
-        # than appearing on one of its own.
+        # Byte-for-byte: quota rides the context line rather than appearing on one of its
+        # own, and the dashboard row is the last line inside the frame.
         self.assertEqual(
             json.loads(self.run_codex_hook(codex_hook, "cli", session)),
             {
                 "systemMessage": "\n╭─ Konvu usage\n"
                 "│ 💸 $25.4 total · $4.9 for the next 10 prompts\n"
                 "│ 🧠 65% context · 3% weekly limit\n"
+                "│ 🔗 run konvu-telemetry setup to start the dashboard\n"
                 "╰─"
             },
         )
@@ -1697,6 +1714,101 @@ class ServiceTests(unittest.TestCase):
             ),
             {"suppressOutput": True},
         )
+
+    def run_statusline(self, session: dict[str, object] | None, health: object) -> str:
+        """Render the Claude CLI status line against one session and health state."""
+        session_id = "00000000-0000-0000-0000-000000000001"
+        stdout = StringIO()
+        with (
+            patch.object(
+                sys, "stdin", StringIO(json.dumps({"session_id": session_id}))
+            ),
+            patch.object(sys, "stdout", stdout),
+            patch(
+                "konvu_telemetry.display.claude_hook_transcript",
+                return_value=Path("session.jsonl"),
+            ),
+            patch("konvu_telemetry.display.refreshed_session", return_value=session),
+            health_patch(health),
+        ):
+            statusline()
+        return stdout.getvalue()
+
+    def surface_outputs(self, health: object) -> dict[str, str]:
+        """Render the text all four usage surfaces show for one collector health state."""
+        session = self.usage_session(1)
+        return {
+            "claude_desktop": self.injected_context(
+                self.run_claude_hook(
+                    claude_prompt_hook, "claude-desktop", session, health
+                )
+            ),
+            "codex_desktop": self.injected_context(
+                self.run_codex_hook(
+                    codex_prompt_hook, "desktop", session, health=health
+                )
+            ),
+            "codex_cli": str(
+                json.loads(
+                    self.run_codex_hook(codex_hook, "cli", session, health=health)
+                )["systemMessage"]
+            ),
+            "statusline": self.run_statusline(session, health),
+        }
+
+    def test_every_usage_surface_links_the_dashboard_when_the_collector_is_healthy(
+        self,
+    ) -> None:
+        # The port comes from configuration, so an overridden one reaches every surface.
+        with patch("konvu_telemetry.display.DASHBOARD_PORT", 9999):
+            outputs = self.surface_outputs({"status": "healthy"})
+        link = "🔗 dashboard: http://127.0.0.1:9999/"
+        for surface, output in outputs.items():
+            self.assertIn(link, output, surface)
+            self.assertNotIn("konvu-telemetry setup", output, surface)
+        for surface in ("claude_desktop", "codex_desktop", "codex_cli"):
+            self.assertIn(f"│ {link}\n╰─", outputs[surface], surface)
+        self.assertTrue(outputs["statusline"].endswith(f"{link}\n"))
+
+    def test_every_usage_surface_points_at_setup_when_the_collector_is_not_healthy(
+        self,
+    ) -> None:
+        # Stale, starting, error, and any unrecognized status all fail to the hint.
+        for status in ("stale", "starting", "error", "", "HEALTHY"):
+            outputs = self.surface_outputs({"status": status})
+            for surface, output in outputs.items():
+                self.assertIn(DASHBOARD_HINT, output, (status, surface))
+                self.assertNotIn("http://127.0.0.1", output, (status, surface))
+            for surface in ("claude_desktop", "codex_desktop", "codex_cli"):
+                self.assertIn(
+                    f"│ {DASHBOARD_HINT}\n╰─", outputs[surface], (status, surface)
+                )
+            self.assertTrue(
+                outputs["statusline"].endswith(f"{DASHBOARD_HINT}\n"), status
+            )
+
+    def test_every_usage_surface_points_at_setup_when_health_cannot_be_read(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "health.json"
+            unreadable = Path(directory) / "corrupt.json"
+            unreadable.write_text("{not json")
+            for path in (missing, unreadable):
+                with patch("konvu_telemetry.service.health_path", return_value=path):
+                    self.assertEqual(dashboard_line(), DASHBOARD_HINT, path.name)
+                    for surface, output in self.surface_outputs(
+                        service.load_health
+                    ).items():
+                        self.assertIn(DASHBOARD_HINT, output, (path.name, surface))
+
+    def test_every_usage_surface_points_at_setup_when_reading_health_raises(
+        self,
+    ) -> None:
+        boom = RuntimeError("health exploded")
+        for surface, output in self.surface_outputs(boom).items():
+            self.assertIn(DASHBOARD_HINT, output, surface)
+            self.assertNotIn("http://127.0.0.1", output, surface)
 
     def run_hook_command(
         self, command: str, stdin: str, home: Path

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- End every usage summary with a dashboard line. The Claude Code CLI status line, both desktop boxes, and the Codex CLI box link `http://127.0.0.1:7824/` while the collector is healthy, and otherwise tell you to run `konvu-telemetry setup` to start it. Hooks decide this from the collector's existing health record; they never open a connection.
 - Show usage in Claude Desktop and Codex Desktop, which collapse hook system messages into a hidden notice. Setup registers a `UserPromptSubmit` hook per provider that injects the usage box as context, and the reply ends with it.
 - Each client now reports usage in exactly one place: the Claude Code CLI in its status line, Claude Desktop in the appended box, the Codex CLI in its Stop hook box, and Codex Desktop in the appended box.
 - Stop reporting Claude usage from a Stop hook. Setup removes the Claude `Stop` entry earlier versions installed, leaving any hooks you added yourself untouched, and the `claude-hook` command stays accepted but silent for settings written by older versions.
