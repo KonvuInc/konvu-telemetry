@@ -1731,6 +1731,7 @@ class ServiceTests(unittest.TestCase):
         session: dict[str, object] | None,
         health: object,
         payload_extra: dict[str, object] | None = None,
+        quota_text: str = "",
     ) -> str:
         """Render the Claude CLI status line against one session and health state."""
         session_id = "00000000-0000-0000-0000-000000000001"
@@ -1744,6 +1745,11 @@ class ServiceTests(unittest.TestCase):
                 return_value=Path("session.jsonl"),
             ),
             patch("konvu_telemetry.display.refreshed_session", return_value=session),
+            patch("konvu_telemetry.display.record_claude_quotas"),
+            patch(
+                "konvu_telemetry.display.recorded_quota_usage_text",
+                return_value=quota_text,
+            ),
             health_patch(health),
         ):
             statusline()
@@ -1911,19 +1917,29 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(lines[-1], "╰─")
         self.assertEqual(lines[1:-1], [f"│ {row}" for row in rows])
 
-    def test_the_status_line_prints_the_shared_rows_unframed(self) -> None:
+    def test_the_status_line_uses_collector_quotas_instead_of_stale_payload(self) -> None:
         # Mutation guard: a status line that renders its own rows again fails here.
         session = self.shared_row_session()
-        quotas = {"five_hour": {"utilization": 0.03}}
+        stale_quotas = {
+            "five_hour": {"utilization": 0.11},
+            "seven_day": {"utilization": 0.52},
+        }
+        current_quotas = "6% 5-hour limit · 51% weekly limit"
         output = self.run_statusline(
             session,
             {"status": "stale"},
-            {"rate_limits": quotas, "context_window": {"used_percentage": 87.4}},
+            {
+                "rate_limits": stale_quotas,
+                "context_window": {"used_percentage": 87.4},
+            },
+            current_quotas,
         )
         with health_patch({"status": "stale"}):
-            rows = usage_rows(session, quota_usage_text({"rate_limits": quotas}), 87.4)
+            rows = usage_rows(session, current_quotas, 87.4)
         self.assertEqual(output, "".join(f"{row}\n" for row in rows))
-        self.assertIn("🧠 87% context · ⏳ 3% 5-hour limit\n", output)
+        self.assertIn("6% 5-hour limit · 51% weekly limit\n", output)
+        self.assertNotIn("11% 5-hour limit", output)
+        self.assertNotIn("52% weekly limit", output)
         self.assertNotIn("│", output)
         self.assertNotIn("╭", output)
 

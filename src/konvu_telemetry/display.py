@@ -396,9 +396,11 @@ def statusline() -> None:
     if session is None:
         print("Konvu live usage: collector starting")
         return
-    # The hook payload's context percentage is fresher than the collector's snapshot.
+    # Claude's context is live, but its rate-limit payload can lag the provider API.
     rows = usage_rows(
-        session, quota_usage_text(payload), payload_context_percent(payload)
+        session,
+        recorded_quota_usage_text("claude"),
+        payload_context_percent(payload),
     )
     for row in rows:
         print(row)
