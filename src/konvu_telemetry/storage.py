@@ -122,29 +122,6 @@ def _write_private_bytes(path: Path, payload: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def pinned_path() -> Path:
-    return home_dir() / "pinned.json"
-
-
-def pinned_sessions() -> list[dict[str, object]]:
-    """Sessions kept on the dashboard past the live window, for testing against real history."""
-    try:
-        rows = json.loads(pinned_path().read_text())
-    except (OSError, json.JSONDecodeError):
-        return []
-    if not isinstance(rows, list):
-        return []
-    return [
-        row
-        for row in rows
-        if isinstance(row, dict)
-        and valid_session_id(row.get("id"))
-        and isinstance(row.get("provider"), str)
-        and row["provider"] in ALLOWED_PROVIDERS
-        and SESSION_ID_PATTERN.fullmatch(row["id"])
-    ]
-
-
 def snapshot_path() -> Path:
     return home_dir() / "live-sessions.json"
 
@@ -161,8 +138,12 @@ def health_path() -> Path:
     return home_dir() / "health.json"
 
 
-def notification_state_path() -> Path:
-    return home_dir() / "notification-state.json"
+def collector_lock_path() -> Path:
+    return home_dir() / "collector.lock"
+
+
+def quota_attribution_path() -> Path:
+    return home_dir() / "quota-attribution.json"
 
 
 def tracking_state_path() -> Path:
@@ -171,10 +152,6 @@ def tracking_state_path() -> Path:
 
 def tracking_queue_path() -> Path:
     return home_dir() / "tracking-queue.json"
-
-
-def claude_quota_path() -> Path:
-    return home_dir() / "claude-quotas.json"
 
 
 def session_path(provider: str, session_id: str) -> Path:

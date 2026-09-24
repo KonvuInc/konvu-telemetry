@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timezone
+import errno
+import fcntl
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -13,6 +16,7 @@ from socket import socket
 from socketserver import BaseServer
 from threading import Condition, Lock, Thread
 import time
+from typing import Iterator
 from urllib.parse import parse_qs, urlparse
 import webbrowser
 
@@ -22,9 +26,10 @@ from .config import (
     LIVE_ACTIVITY_SECONDS,
 )
 from .live import IncrementalLiveState
-from .provider_limits import ProviderLimitPoller
+from .provider_limits import ProviderLimitPoller, stored_provider_quotas
 from .snapshot import build_snapshot, write_snapshot
 from .storage import (
+    collector_lock_path,
     health_path,
     parse_timestamp,
     session_path,
@@ -43,6 +48,29 @@ LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost"})
 LOGGER = logging.getLogger(__name__)
 _DASHBOARD_DATA_AVAILABLE = False
 REFRESH_TIMEOUT_SECONDS = 30
+
+
+@contextmanager
+def collector_process_lock() -> Iterator[None]:
+    """Prevent two collector processes from writing the canonical snapshot."""
+    path = collector_lock_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+") as handle:
+        os.chmod(path, 0o600)
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise SystemExit(
+                "Another Konvu telemetry collector is already running"
+            ) from error
+        handle.seek(0)
+        handle.truncate()
+        handle.write(str(os.getpid()))
+        handle.flush()
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 class RefreshCoordinator:
@@ -201,7 +229,9 @@ def collect_forever(
     """Refresh local session files until the operating system stops the service."""
     global _DASHBOARD_DATA_AVAILABLE
     coordinator = refresh_coordinator or RefreshCoordinator()
-    quota_poller = provider_limit_poller or ProviderLimitPoller()
+    quota_poller = provider_limit_poller or ProviderLimitPoller(
+        initial_snapshots=stored_provider_quotas()
+    )
     while True:
         coordinator.start_collection()
         started_at = time.time()
@@ -355,8 +385,7 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
         return
 
 
-def run_local_service(interval_seconds: int, port: int) -> None:
-    """Run the collector and localhost dashboard together in one process."""
+def _run_local_service(interval_seconds: int, port: int) -> None:
     directory = Path(__file__).with_name("dashboard")
     if not directory.is_dir():
         raise SystemExit(f"Dashboard files are missing from {directory}")
@@ -368,7 +397,12 @@ def run_local_service(interval_seconds: int, port: int) -> None:
         directory=str(directory),
         refresh_coordinator=refresh_coordinator,
     )
-    server = ThreadingHTTPServer(("127.0.0.1", port), handler)
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", port), handler)
+    except OSError as error:
+        if error.errno != errno.EADDRINUSE:
+            raise
+        raise SystemExit(f"Konvu dashboard port {port} is already in use") from None
     collector = Thread(
         target=collect_forever,
         args=(interval_seconds, live_state, snapshot_lock, refresh_coordinator),
@@ -385,3 +419,9 @@ def run_local_service(interval_seconds: int, port: int) -> None:
         server.serve_forever()
     except KeyboardInterrupt:
         server.server_close()
+
+
+def run_local_service(interval_seconds: int, port: int) -> None:
+    """Run the sole collector and localhost dashboard process."""
+    with collector_process_lock():
+        _run_local_service(interval_seconds, port)

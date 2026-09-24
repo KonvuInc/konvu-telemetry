@@ -135,25 +135,24 @@ p {
   --slate: var(--orange);
 }
 #account-strip {
-  display: flex;
-  gap: 22px;
-  padding: 9px 32px;
-  background: var(--wash);
-  border-bottom: 1px solid var(--line);
-  font-size: 9px;
-  color: var(--mist);
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin: 0 0 22px;
 }
 #account-strip[hidden] {
   display: none;
 }
-#account-strip b {
-  margin-left: 7px;
-  color: var(--ink);
-}
+.quota-meter + .quota-meter { margin-top: 12px; }
+.quota-meter > div { display: flex; justify-content: space-between; gap: 12px; color: var(--mist); font-size: 10px; margin-bottom: 5px; }
+.quota-meter b { color: var(--ink); }
+.quota-meter > i { display: block; height: 7px; overflow: hidden; background: var(--soft); border-radius: 4px; }
+.quota-meter > i > em { display: block; height: 100%; background: var(--purple); border-radius: inherit; }
+#outside-plan { margin: 0 0 18px; }
 main {
   max-width: 1460px;
   margin: auto;
-  padding: 30px 32px;
+  padding: 34px clamp(36px, 4vw, 64px) 52px;
 }
 .fleet-toolbar {
   display: flex;
@@ -266,7 +265,9 @@ select {
   border: 1px solid var(--line);
   border-radius: 5px;
   font-size: 9px;
-  padding: 5px 7px;
+  /* The native chevron is drawn inside the box, so the right side needs
+     room of its own or the arrow sits on the border and reads as clipped. */
+  padding: 5px 6px 5px 8px;
 }
 .table-shell {
   overflow-x: auto;
@@ -292,7 +293,7 @@ select {
 }
 .session-ledger th:first-child {
   width: 35%;
-  padding-left: 0;
+  padding-left: 14px;
 }
 .session-ledger th:nth-child(2) {
   width: 32%;
@@ -310,7 +311,11 @@ select {
   vertical-align: middle;
 }
 .session-ledger td:first-child {
-  padding-left: 0;
+  padding-left: 14px;
+}
+.session-ledger th:last-child,
+.session-ledger td:last-child {
+  padding-right: 14px;
 }
 .session-ledger tbody tr {
   cursor: pointer;
@@ -352,6 +357,9 @@ select {
 .spending {
   max-width: 305px;
 }
+.included-copy strong { color: var(--green); display: block; font-size: 11px; font-weight: 500; }
+.included-copy small { color: var(--mist); display: block; font-size: 9px; margin-top: 4px; }
+.responsibility-cell { color: var(--ink); font-size: 10px; line-height: 1.35; }
 .spend-values {
   display: flex;
   align-items: baseline;
@@ -666,7 +674,7 @@ select {
     display: none;
   }
   main {
-    padding: 22px 16px;
+    padding: 24px 20px 40px;
   }
   .fleet-toolbar {
     display: block;
@@ -1123,23 +1131,36 @@ select {
 .compact-ledger th {
   padding: 9px 12px;
 }
+/* Plan/spend is the main column and keeps the width. Responsible for gets a
+   modest breather, and the last three sit together in a tight, even block on
+   the right so no gap opens up between Subagents and Activity. */
 .compact-ledger th:first-child {
-  width: 29%;
+  width: 26%;
 }
 .compact-ledger th:nth-child(2) {
-  width: 28%;
+  width: 32%;
 }
 .compact-ledger th:nth-child(3) {
-  width: 11%;
-}
-.compact-ledger th:nth-child(4) {
-  width: 8%;
-}
-.compact-ledger th:nth-child(5) {
   width: 14%;
 }
-.compact-ledger th:nth-child(6) {
+.compact-ledger th:nth-child(4) {
+  width: 9%;
+}
+.compact-ledger th:nth-child(5) {
   width: 10%;
+}
+.compact-ledger th:nth-child(6) {
+  width: 9%;
+  text-align: right;
+}
+.compact-ledger td:nth-child(6) {
+  text-align: right;
+}
+.compact-ledger td:nth-child(2) {
+  padding-right: 16px;
+}
+.compact-ledger td:nth-child(3) {
+  padding-left: 12px;
 }
 .compact-ledger td {
   padding: 11px 12px;
@@ -2634,4 +2655,413 @@ select {
   .cash-alert .bonfire-tongue {
     animation: none;
   }
+}
+@media (max-width: 700px) {
+  #account-strip { grid-template-columns: 1fr; }
+}
+
+/* ---------- plan-state table blocks ---------- */
+.ledger-block + .ledger-block {
+  margin-top: 30px;
+}
+.group-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding-bottom: 10px;
+  min-height: 34px;
+}
+.group-heading h2 {
+  margin: 0;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+.group-heading.paying h2 {
+  color: var(--purple);
+}
+.head-count {
+  font-size: 10px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.head-count:before {
+  content: "·";
+  margin-right: 8px;
+}
+.head-meter.tight em {
+  background: var(--orange);
+}
+.head-meter.spent em {
+  background: var(--red);
+}
+.head-meter.spent b {
+  color: var(--red);
+}
+
+/* ---------- responsibility slice bar ---------- */
+.share-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 132px;
+}
+.share-line {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+}
+.share-line b {
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--purple);
+}
+.share-line span {
+  font-size: 9.5px;
+  color: var(--mist);
+}
+.share-bar i {
+  display: block;
+  height: 5px;
+  border-radius: 1px;
+  background: var(--soft);
+  overflow: hidden;
+}
+.share-bar em {
+  display: block;
+  height: 100%;
+  background: var(--purple);
+}
+
+/* ---------- quota fire ---------- */
+.included-copy {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.included-copy-text {
+  flex: 1;
+  min-width: 0;
+}
+.quota-fire {
+  display: inline-flex;
+  flex: none;
+  align-self: center;
+  pointer-events: none;
+}
+.quota-fire svg {
+  display: block;
+  overflow: visible;
+}
+.quota-fire.fire-1 svg {
+  width: 14px;
+  height: 20px;
+}
+.quota-fire.fire-2 svg {
+  width: 27px;
+  height: 28px;
+}
+.quota-fire.fire-3 svg {
+  width: 36px;
+  height: 34px;
+}
+.quota-fire .bonfire-tongue {
+  transform-box: fill-box;
+  transform-origin: 50% 100%;
+}
+
+/* ---------- dataset switch ---------- */
+.design-switch {
+  display: flex;
+  gap: 2px;
+  background: var(--soft);
+  padding: 3px;
+  border-radius: 5px;
+}
+.design-switch button {
+  padding: 6px 10px;
+  border-radius: 3px;
+  font-weight: 600;
+  color: var(--mist);
+  line-height: 1;
+  white-space: nowrap;
+}
+.design-switch button:hover {
+  color: var(--ink);
+}
+.design-switch button[aria-pressed="true"] {
+  background: var(--ink);
+  color: var(--white);
+}
+
+/* ---------- inline quota meters, beside the sort ---------- */
+.heading-controls {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-left: auto;
+  flex-wrap: wrap;
+}
+.quota-inline {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.heading-controls .ledger-controls {
+  margin: 0;
+}
+.quota-pill {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 12px 7px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.quota-legend {
+  position: absolute;
+  top: -7px;
+  left: 9px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 5px;
+  background: var(--white);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--mist);
+}
+.quota-legend img {
+  border-radius: 2px;
+}
+.quota-pill.exhausted .quota-legend {
+  color: var(--mist);
+}
+
+.qm {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.qm i {
+  font-style: normal;
+  font-size: 9.5px;
+  color: var(--mist);
+}
+.qm u {
+  display: block;
+  width: 42px;
+  height: 4px;
+  border-radius: 1px;
+  background: var(--soft);
+  overflow: hidden;
+  text-decoration: none;
+}
+.qm em {
+  display: block;
+  height: 100%;
+  background: var(--purple);
+}
+.qm b {
+  font-size: 10.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  min-width: 26px;
+  color: var(--mist);
+}
+
+/* ---------- KPI tiles ---------- */
+/* Status bands for KPI values. Built dynamically in JS as "metric-" + tone,
+   so these class names never appear literally in the source. */
+.metric-good {
+  color: #1f9d55;
+}
+.metric-warning {
+  color: #d9a406;
+}
+.metric-high {
+  color: #e2701a;
+}
+.metric-bad {
+  color: #d92d20;
+}
+.metric-none {
+  color: var(--muted);
+}
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(186px, 1fr));
+  gap: 12px;
+  margin: 12px 0 52px;
+  align-items: stretch;
+}
+.kpi-tile {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--white);
+  padding: 13px 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+.kpi-tile.kpi-lead {
+  grid-column: span 2;
+}
+.kpi-label {
+  line-height: 1.4;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--mist);
+}
+.metric-primary {
+  font-size: 2.5rem;
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.metric-secondary {
+  font-size: 1.5rem;
+  font-weight: 500;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.kpi-session {
+  display: flex;
+  align-items: center;
+  margin-top: auto;
+  gap: 5px;
+  min-width: 0;
+  padding: 4px 7px 4px 5px;
+  border-radius: 4px;
+  background: var(--soft);
+  border: 1px solid transparent;
+  max-width: 100%;
+  width: 100%;
+  margin-top: auto;
+  text-align: left;
+  cursor: pointer;
+}
+.kpi-session:hover {
+  border-color: var(--line);
+  background: var(--white);
+}
+.kpi-session:focus-visible {
+  outline: 1px solid var(--muted);
+  outline-offset: 2px;
+}
+.kpi-session i {
+  font-style: normal;
+  font-size: 9.5px;
+  color: var(--mist);
+  margin-left: auto;
+  padding-left: 6px;
+  white-space: nowrap;
+}
+.kpi-session img {
+  border-radius: 2px;
+  flex: none;
+}
+.kpi-session em {
+  font-style: normal;
+  font-size: 10.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kpi-note {
+  color: var(--mist);
+  font-size: 10px;
+  margin-top: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+
+/* ---------- context-over-prompts graph ---------- */
+.context-graph {
+  margin: 0 0 6px;
+}
+.context-graph svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+.cg-grid {
+  stroke: var(--line);
+  stroke-width: 1;
+}
+.cg-area {
+  fill: var(--purple);
+  opacity: 0.1;
+}
+.cg-line {
+  fill: none;
+  stroke: var(--purple);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+.cg-end {
+  fill: var(--purple);
+  stroke: var(--white);
+  stroke-width: 2;
+}
+.cg-end-label {
+  fill: var(--purple);
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.cg-compact {
+  stroke: var(--muted);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+.cg-ylab {
+  fill: var(--muted);
+  font-size: 9px;
+  text-anchor: end;
+  font-variant-numeric: tabular-nums;
+}
+.cg-xlab {
+  fill: var(--muted);
+  font-size: 9px;
+  text-anchor: middle;
+  font-variant-numeric: tabular-nums;
+}
+.cg-axis {
+  fill: var(--mist);
+  font-size: 9px;
+  text-anchor: middle;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.graph-empty {
+  color: var(--muted);
+  font-size: 11px;
+  margin: 0 0 12px;
+}
+
+/* Quota exhausted but nothing billed yet: a note, not a table move. */
+.head-warn {
+  font-size: 10px;
+  color: var(--orange);
+  font-weight: 600;
+}
+.head-warn:before {
+  content: "·";
+  margin-right: 8px;
+  color: var(--muted);
 }

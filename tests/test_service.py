@@ -1,6 +1,8 @@
 import json
 from collections.abc import Callable
+from contextlib import nullcontext
 from datetime import datetime, timezone
+import errno
 from io import StringIO
 import os
 import subprocess
@@ -18,27 +20,20 @@ from scripts.update_pricing import validated_payload
 
 from konvu_telemetry import service
 from konvu_telemetry.analytics import (
-    apply_notification_tracking,
-    baseline_comparison,
+    apply_session_hot_state,
     build_baselines,
-    cumulative_median_checkpoints,
     deduplicate_usage_events,
-    forecast_backtest_sample,
     iteration_series,
     load_baselines,
     scaled_precompact_forecast,
-    single_configuration,
-    single_model_effort,
     task_series,
 )
 from konvu_telemetry.config import (
     ALERT_FORECAST_USD,
-    BASELINE_MILESTONES,
-    BASELINE_MIN_SESSIONS,
     BASELINE_SCHEMA_VERSION,
 )
+from konvu_telemetry.collector import main as collector_main
 from konvu_telemetry.display import (
-    baseline_text,
     claude_hook,
     claude_prompt_hook,
     codex_hook,
@@ -48,7 +43,6 @@ from konvu_telemetry.display import (
     last_prompt_used_a_tool,
     payload_context_percent,
     quota_usage_text,
-    record_claude_quotas,
     refreshed_session,
     statusline,
     usage_box_lines,
@@ -60,8 +54,6 @@ from konvu_telemetry.fleet_telemetry import (
     TranscriptTelemetry,
     _comparable_forecast,
     _timestamp,
-    _quota_windows,
-    enrich_snapshot,
     is_claude_prompt,
     parse_telemetry,
 )
@@ -124,6 +116,41 @@ def health_patch(health: object) -> object:
 
 
 class ServiceTests(unittest.TestCase):
+    def test_local_service_reports_a_port_collision_without_a_traceback(self) -> None:
+        collision = OSError(errno.EADDRINUSE, "Address already in use")
+        with patch(
+            "konvu_telemetry.service.ThreadingHTTPServer", side_effect=collision
+        ):
+            with self.assertRaisesRegex(SystemExit, "port 7824 is already in use"):
+                service._run_local_service(60, 7824)
+
+    def test_collector_process_lock_rejects_a_second_writer(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+            service.collector_process_lock(),
+        ):
+            with self.assertRaisesRegex(SystemExit, "already running"):
+                with service.collector_process_lock():
+                    pass
+
+    def test_once_collects_authoritative_provider_quotas(self) -> None:
+        quotas = {"claude": {"windows": []}, "codex": {"windows": []}}
+        with (
+            patch("konvu_telemetry.collector.time.time", return_value=100.0),
+            patch("konvu_telemetry.collector.ProviderLimitPoller") as poller,
+            patch("konvu_telemetry.collector.build_snapshot", return_value={}) as build,
+            patch("konvu_telemetry.collector.write_snapshot"),
+            patch("konvu_telemetry.collector.write_health"),
+            patch(
+                "konvu_telemetry.collector.collector_process_lock",
+                return_value=nullcontext(),
+            ),
+        ):
+            poller.return_value.refresh.return_value = quotas
+            collector_main(["once"])
+        build.assert_called_once_with(100.0, provider_quotas=quotas)
+
     def test_usage_completeness_rejects_boolean_token_counters(self) -> None:
         self.assertTrue(
             has_usage_fields(
@@ -190,7 +217,6 @@ class ServiceTests(unittest.TestCase):
                     {
                         "schema_version": 8,
                         "generated_at": "2026-09-21T00:00:00Z",
-                        "milestones": list(BASELINE_MILESTONES),
                         "median_method": "checkpoint_cohort_medians",
                         "providers": {},
                         "configurations": {},
@@ -287,26 +313,6 @@ class ServiceTests(unittest.TestCase):
             claude_context_window(
                 "invalid", {"invalid": {"context_window_tokens": float("inf")}}
             )
-        )
-
-    def test_baseline_milestones_cover_long_sessions(self) -> None:
-        self.assertEqual(
-            BASELINE_MILESTONES,
-            (
-                *range(1, 101),
-                150,
-                200,
-                250,
-                300,
-                350,
-                400,
-                500,
-                600,
-                700,
-                800,
-                900,
-                1000,
-            ),
         )
 
     def test_claude_stream_records_are_deduplicated(self) -> None:
@@ -508,6 +514,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(exported["reasoning_effort"], "high")
         self.assertEqual(exported["speed"], "standard")
         self.assertTrue(exported["usage_complete"])
+        self.assertIsNone(exported["estimated_credit_equivalent"])
 
     def test_missing_billable_usage_is_not_reported_as_a_complete_cost(self) -> None:
         event = assistant_event(
@@ -567,12 +574,6 @@ class ServiceTests(unittest.TestCase):
             "standard",
         )
         self.assertEqual(deduplicate_usage_events([first, replay]), [first])
-
-    def test_ratio_quota_values_are_normalized_to_percent(self) -> None:
-        windows = _quota_windows(
-            {"primary": {"used_percent": 0.8, "window_minutes": 300}}, 0
-        )
-        self.assertEqual(windows[0]["used_percent"], 80.0)
 
     def test_claude_sdk_client_is_explicitly_attributed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -834,14 +835,9 @@ class ServiceTests(unittest.TestCase):
                     return_value=[parent, child],
                 ),
                 patch("konvu_telemetry.snapshot.load_pricing", return_value=prices),
-                patch(
-                    "konvu_telemetry.snapshot.load_baselines",
-                    return_value={"providers": {}, "configurations": {}},
-                ),
-                patch("konvu_telemetry.snapshot.pinned_sessions", return_value=[]),
                 patch("konvu_telemetry.snapshot.enrich_snapshot"),
                 patch("konvu_telemetry.snapshot.locate_compactions"),
-                patch("konvu_telemetry.snapshot.apply_notification_tracking"),
+                patch("konvu_telemetry.snapshot.apply_session_hot_state"),
             ):
                 snapshot = build_snapshot(1767225630.0)
         session = snapshot["sessions"][0]
@@ -850,6 +846,27 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(session["subagents"][0]["cost_usd"], 1.0)
         self.assertEqual(session["subagent_cost_usd"], 1.0)
         self.assertEqual(session["total_cost_usd"], 2.0)
+        self.assertTrue(
+            {
+                "iterations",
+                "context_history",
+                "token_usage",
+            }.issubset(session)
+        )
+        self.assertFalse(
+            {
+                "baseline",
+                "total_credit_equivalent",
+                "projected_next_10_tasks_credit_equivalent",
+                "baselines",
+                "comparison_configuration",
+                "last_task_cost_usd",
+                "credit_equivalent_status",
+                "priced_events",
+            }
+            & session.keys()
+        )
+        self.assertNotIn("baselines", snapshot)
 
     def test_long_context_and_fast_fallback_pricing_are_applied(self) -> None:
         prices = {
@@ -964,36 +981,6 @@ class ServiceTests(unittest.TestCase):
         record = {"message": {"role": "user", "content": "<div>real user markup</div>"}}
         self.assertTrue(is_human_claude_prompt(record))
         self.assertTrue(is_claude_prompt(record))
-
-    def test_cumulative_median_uses_sessions_that_reached_each_checkpoint(self) -> None:
-        series = [
-            [(1.0, 1)] * 250,
-            [(2.0, 2)] * 250,
-            [(3.0, 3)] * 250,
-            [(4.0, 4)] * 250,
-            [(5.0, 5)] * 250,
-            [(100.0, 100)] * 10,
-        ]
-        points = cumulative_median_checkpoints(series)
-        self.assertEqual(points[0]["sessions"], 6)
-        self.assertEqual(points[-1]["sessions"], 5)
-        self.assertEqual(points[9]["median_cost_usd"], 35.0)
-        self.assertEqual(points[19]["median_cost_usd"], 65.0)
-
-    def test_cumulative_median_does_not_carry_finished_sessions_forward(self) -> None:
-        series = [
-            *[[(100.0, 100)] * 10 for _ in range(5)],
-            [(1.0, 1)] * 20,
-            [(2.0, 2)] * 20,
-            [(3.0, 3)] * 20,
-            [(4.0, 4)] * 20,
-            [(5.0, 5)] * 20,
-        ]
-        points = cumulative_median_checkpoints(series)
-        self.assertEqual(points[9]["median_cost_usd"], 525.0)
-        self.assertEqual(points[19]["median_cost_usd"], 555.0)
-        self.assertEqual(points[9]["median_tokens"], 525)
-        self.assertEqual(points[19]["median_tokens"], 555)
 
     def test_incremental_reader_keeps_large_prompt_boundary_without_retaining_text(
         self,
@@ -1314,12 +1301,8 @@ class ServiceTests(unittest.TestCase):
     def test_stale_valid_baseline_refreshes_without_blocking(self) -> None:
         old = {
             "schema_version": BASELINE_SCHEMA_VERSION,
-            "milestones": list(BASELINE_MILESTONES),
-            "minimum_sessions": BASELINE_MIN_SESSIONS,
             "generated_at": "2026-01-01T00:00:00+00:00",
-            "forecasts": {},
-            "configurations": {},
-            "median_method": "checkpoint_cohort_medians",
+            "forecasts": {"provider_median_next_10": {}},
         }
         new = {**old, "generated_at": "2026-01-02T00:00:00+00:00"}
         with tempfile.TemporaryDirectory() as directory:
@@ -1346,12 +1329,8 @@ class ServiceTests(unittest.TestCase):
     def test_failed_baseline_thread_start_does_not_hold_refresh_lock(self) -> None:
         baseline = {
             "schema_version": BASELINE_SCHEMA_VERSION,
-            "milestones": list(BASELINE_MILESTONES),
-            "minimum_sessions": BASELINE_MIN_SESSIONS,
             "generated_at": "2026-01-01T00:00:00+00:00",
-            "forecasts": {},
-            "configurations": {},
-            "median_method": "checkpoint_cohort_medians",
+            "forecasts": {"provider_median_next_10": {}},
         }
         with tempfile.TemporaryDirectory() as directory:
             destination = Path(directory) / "baselines.json"
@@ -1451,26 +1430,29 @@ class ServiceTests(unittest.TestCase):
     def test_refreshed_session_reads_existing_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            session = root / "session.json"
-            session.write_text('{"id":"session"}')
-            with patch("konvu_telemetry.display.session_path", return_value=session):
-                payload = refreshed_session(
-                    "claude", "00000000-0000-0000-0000-000000000001"
+            snapshot = root / "live-sessions.json"
+            session_id = "00000000-0000-0000-0000-000000000001"
+            snapshot.write_text(
+                json.dumps(
+                    {"sessions": [{"id": session_id, "provider": "claude", "value": 1}]}
                 )
-        self.assertEqual(payload, {"id": "session"})
+            )
+            with patch("konvu_telemetry.display.snapshot_path", return_value=snapshot):
+                payload = refreshed_session("claude", session_id)
+        self.assertEqual(payload, {"id": session_id, "provider": "claude", "value": 1})
 
-    def test_refreshed_session_reads_stale_snapshot(self) -> None:
+    def test_refreshed_session_ignores_stale_per_session_document(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             session = root / "session.json"
             session.write_text('{"id":"fallback"}')
-            stale_at = time.time() - 24 * 60 * 60
-            os.utime(session, (stale_at, stale_at))
-            with patch("konvu_telemetry.display.session_path", return_value=session):
+            snapshot = root / "live-sessions.json"
+            snapshot.write_text('{"sessions":[]}')
+            with patch("konvu_telemetry.display.snapshot_path", return_value=snapshot):
                 payload = refreshed_session(
                     "claude", "00000000-0000-0000-0000-000000000001"
                 )
-        self.assertEqual(payload, {"id": "fallback"})
+        self.assertIsNone(payload)
 
     def run_claude_hook(
         self,
@@ -1503,6 +1485,9 @@ class ServiceTests(unittest.TestCase):
             "id": "00000000-0000-0000-0000-000000000001",
             "total_cost_usd": 25.0,
             "cost_status": "complete",
+            "usage_mode": "exhausted",
+            "out_of_plan_spend_status": "complete",
+            "out_of_plan_spend_usd": 25.0,
             "projected_next_10_tasks_usd": 5.0,
             "task_count": 9,
             "context_tokens": 500,
@@ -1516,6 +1501,9 @@ class ServiceTests(unittest.TestCase):
             "id": "00000000-0000-0000-0000-000000000001",
             "total_cost_usd": 25.0,
             "cost_status": "complete",
+            "usage_mode": "exhausted",
+            "out_of_plan_spend_status": "complete",
+            "out_of_plan_spend_usd": 25.0,
             "projected_next_10_tasks_usd": 5.0,
             "last_task_tool_calls": 3,
             "context_tokens": 500,
@@ -1532,7 +1520,10 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("verbatim as the very last thing in your reply", context)
         self.assertNotIn("```", context)
         self.assertIn("╭─ Konvu usage", context)
-        self.assertIn("│ 💸 $25.0 total · $5.0 for the next 10 prompts", context)
+        self.assertIn(
+            "│ 💸 $25.0 API-equivalent total · $5.0 API-equivalent for the next 10 prompts",
+            context,
+        )
         self.assertTrue(context.endswith("╰─"))
         self.assertEqual(self.run_claude_hook(claude_prompt_hook, "cli", session), "")
         self.assertEqual(self.run_claude_hook(claude_prompt_hook, None, session), "")
@@ -1589,6 +1580,9 @@ class ServiceTests(unittest.TestCase):
             "total_cost_usd": 25.4,
             "task_count": 5,
             "cost_status": "complete",
+            "usage_mode": "exhausted",
+            "out_of_plan_spend_status": "complete",
+            "out_of_plan_spend_usd": 25.4,
             "projected_next_10_tasks_usd": 4.9,
             "context_tokens": 650,
             "context_window_tokens": 1000,
@@ -1599,7 +1593,7 @@ class ServiceTests(unittest.TestCase):
             json.loads(self.run_codex_hook(codex_hook, "cli", session)),
             {
                 "systemMessage": "\n╭─ Konvu usage\n"
-                "│ 💸 $25.4 total · $4.9 for the next 10 prompts\n"
+                "│ 💸 $25.4 API-equivalent total · $4.9 API-equivalent for the next 10 prompts\n"
                 "│ 🧠 65% context · 3% weekly limit\n"
                 "│ 🔗 run konvu-telemetry setup to start the dashboard\n"
                 "╰─"
@@ -1657,6 +1651,7 @@ class ServiceTests(unittest.TestCase):
             "id": "00000000-0000-0000-0000-000000000001",
             "total_cost_usd": 0.02,
             "cost_status": "complete",
+            "usage_mode": "exhausted",
             "projected_next_10_tasks_usd": 0.1,
             "task_count": 1,
             "context_tokens": 500,
@@ -1723,6 +1718,7 @@ class ServiceTests(unittest.TestCase):
         session: dict[str, object] | None,
         health: object,
         payload_extra: dict[str, object] | None = None,
+        quota_text: str = "",
     ) -> str:
         """Render the Claude CLI status line against one session and health state."""
         session_id = "00000000-0000-0000-0000-000000000001"
@@ -1736,6 +1732,10 @@ class ServiceTests(unittest.TestCase):
                 return_value=Path("session.jsonl"),
             ),
             patch("konvu_telemetry.display.refreshed_session", return_value=session),
+            patch(
+                "konvu_telemetry.display.recorded_quota_usage_text",
+                return_value=quota_text,
+            ),
             health_patch(health),
         ):
             statusline()
@@ -1823,6 +1823,9 @@ class ServiceTests(unittest.TestCase):
             "id": "00000000-0000-0000-0000-000000000001",
             "total_cost_usd": 25.4,
             "cost_status": "complete",
+            "usage_mode": "exhausted",
+            "out_of_plan_spend_status": "complete",
+            "out_of_plan_spend_usd": 25.4,
             "projected_next_10_tasks_usd": 4.9,
             "last_task_tool_calls": 3,
             "context_tokens": 500,
@@ -1831,11 +1834,6 @@ class ServiceTests(unittest.TestCase):
             "active_subagents": 1,
             "subagent_entry_context_tokens": 900,
             "subagent_cost_usd": 0.4,
-            "baseline": {
-                "emoji": "🟢",
-                "cost_overhead_percent": -12,
-                "iterations": 4,
-            },
         }
 
     def test_usage_rows_are_the_content_every_surface_renders(self) -> None:
@@ -1844,13 +1842,77 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(
             rows,
             [
-                "💸 $25.4 total · $4.9 for the next 10 prompts",
-                "🤖 1 live / 2 total · 90% context shared · $0.4 spent",
+                "💸 $25.4 API-equivalent total · $4.9 API-equivalent for the next 10 prompts",
+                "🤖 1 live / 2 total · 90% context shared · $0.4 API-equivalent",
                 "🧠 50% context · 3% weekly limit",
-                "🟢 12% below your median",
                 DASHBOARD_HINT,
             ],
         )
+
+    def test_included_usage_rows_hide_monetary_estimates(self) -> None:
+        session = {
+            **self.shared_row_session(),
+            "usage_mode": "included",
+            "quota_attribution": {
+                "windows": [
+                    {
+                        "period": "five_hour",
+                        "estimated_percent": 1.25,
+                        "projected_next_10_percent": 3.0,
+                    }
+                ]
+            },
+        }
+        with health_patch({"status": "stale"}):
+            rows = usage_rows(session, "20% 5-hour limit")
+        self.assertEqual(
+            rows[:3],
+            [
+                "🟢 Included · ~3.0% of 5-hour limit in the next 10 prompts",
+                "20% 5-hour limit",
+                "🧠 50% context · 🎯 Responsible for ~1.2% of 5-hour limit",
+            ],
+        )
+        self.assertNotIn("$", "\n".join(rows))
+
+    def test_quota_usage_text_distinguishes_each_window(self) -> None:
+        snapshot = {
+            "account_quotas": {
+                "claude": {
+                    "windows": [
+                        {"period": "five_hour", "used_percent": 6},
+                        {"period": "weekly", "used_percent": 54},
+                        {"period": "monthly", "used_percent": 100},
+                    ]
+                }
+            }
+        }
+        self.assertEqual(
+            quota_usage_text(snapshot, "claude"),
+            "⏳ 6% 5-hour limit · 📅 54% weekly limit · 🌙 100% monthly limit",
+        )
+
+    def test_hot_subscription_share_gets_a_fire_marker(self) -> None:
+        for provider, period, estimate in (
+            ("claude", "five_hour", 20.1),
+            ("codex", "weekly", 10.1),
+        ):
+            session = {
+                **self.shared_row_session(),
+                "provider": provider,
+                "usage_mode": "included",
+                "quota_attribution": {
+                    "windows": [{"period": period, "estimated_percent": estimate}]
+                },
+            }
+            self.assertIn("🔥", "\n".join(usage_rows(session, "")))
+
+    def test_unknown_subscription_usage_hides_monetary_estimates(self) -> None:
+        session = {**self.shared_row_session(), "usage_mode": "unknown"}
+        with health_patch({"status": "stale"}):
+            rows = usage_rows(session, "")
+        self.assertEqual(rows[0], "⚪ Subscription limit unavailable")
+        self.assertNotIn("$", "\n".join(rows))
 
     def test_the_usage_box_is_the_shared_rows_inside_a_frame(self) -> None:
         session = self.shared_row_session()
@@ -1861,19 +1923,31 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(lines[-1], "╰─")
         self.assertEqual(lines[1:-1], [f"│ {row}" for row in rows])
 
-    def test_the_status_line_prints_the_shared_rows_unframed(self) -> None:
+    def test_the_status_line_uses_collector_quotas_instead_of_stale_payload(
+        self,
+    ) -> None:
         # Mutation guard: a status line that renders its own rows again fails here.
         session = self.shared_row_session()
-        quotas = {"five_hour": {"utilization": 0.03}}
+        stale_quotas = {
+            "five_hour": {"utilization": 0.11},
+            "seven_day": {"utilization": 0.52},
+        }
+        current_quotas = "6% 5-hour limit · 51% weekly limit"
         output = self.run_statusline(
             session,
             {"status": "stale"},
-            {"rate_limits": quotas, "context_window": {"used_percentage": 87.4}},
+            {
+                "rate_limits": stale_quotas,
+                "context_window": {"used_percentage": 87.4},
+            },
+            current_quotas,
         )
         with health_patch({"status": "stale"}):
-            rows = usage_rows(session, quota_usage_text({"rate_limits": quotas}), 87.4)
+            rows = usage_rows(session, current_quotas, 87.4)
         self.assertEqual(output, "".join(f"{row}\n" for row in rows))
-        self.assertIn("🧠 87% context · ⏳ 3% 5-hour limit\n", output)
+        self.assertIn("6% 5-hour limit · 51% weekly limit\n", output)
+        self.assertNotIn("11% 5-hour limit", output)
+        self.assertNotIn("52% weekly limit", output)
         self.assertNotIn("│", output)
         self.assertNotIn("╭", output)
 
@@ -2422,10 +2496,6 @@ class ServiceTests(unittest.TestCase):
         )
         self.assertEqual(session["forecast_basis"]["sample_count"], 2)
 
-    def test_forecast_backtest_holds_out_the_final_ten_tasks(self) -> None:
-        self.assertEqual(forecast_backtest_sample([(1.0, 1)] * 20), (10.0, 10.0))
-        self.assertIsNone(forecast_backtest_sample([(1.0, 1)] * 19))
-
     def test_forecast_uses_completed_matching_configuration_only(self) -> None:
         session: dict[str, object] = {
             "speed": "standard",
@@ -2433,6 +2503,7 @@ class ServiceTests(unittest.TestCase):
                 {
                     "started_at": f"2026-01-01T00:00:0{index}Z",
                     "cost_usd": float(index + 1),
+                    "usage_tokens": float((index + 1) * 100),
                     "priced": True,
                     "speed": "standard",
                 }
@@ -2452,12 +2523,9 @@ class ServiceTests(unittest.TestCase):
         ):
             _comparable_forecast(session, [telemetry], True)
             self.assertEqual(session["projected_next_10_tasks_usd"], 20.0)
+            self.assertEqual(session["projected_next_10_usage_tokens"], 2000.0)
             self.assertEqual(session["forecast_basis"]["sample_count"], 3)
             telemetry.configurations.append((3.0, "other-model", "medium"))
-            _comparable_forecast(session, [telemetry], True, (12.5, 7))
-        self.assertEqual(session["projected_next_10_tasks_usd"], 12.5)
-        self.assertEqual(session["forecast_basis"]["method"], "provider_median_history")
-        self.assertEqual(session["forecast_basis"]["sample_count"], 7)
         with patch(
             "konvu_telemetry.fleet_telemetry._timestamp",
             side_effect=lambda value: (
@@ -2467,63 +2535,6 @@ class ServiceTests(unittest.TestCase):
             _comparable_forecast(session, [telemetry], True)
         self.assertEqual(session["projected_next_10_tasks_usd"], 20.0)
         self.assertEqual(session["forecast_basis"]["method"], "sparse_session_prompts")
-
-    def test_baseline_comparison_interpolates_without_unbounded_extrapolation(
-        self,
-    ) -> None:
-        baseline = {
-            "providers": {
-                "claude": [
-                    {
-                        "iterations": 5,
-                        "sessions": "invalid",
-                        "median_cost_usd": 5.0,
-                        "median_tokens": 50,
-                    },
-                    {
-                        "iterations": 10,
-                        "sessions": 8,
-                        "median_cost_usd": 10.0,
-                        "median_tokens": 100,
-                    },
-                    {
-                        "iterations": 30,
-                        "sessions": 6,
-                        "median_cost_usd": 40.0,
-                        "median_tokens": 400,
-                    },
-                    {
-                        "iterations": 100,
-                        "sessions": 4,
-                        "median_cost_usd": 180.0,
-                        "median_tokens": 1800,
-                    },
-                ],
-            },
-            "configurations": {},
-        }
-        interpolated = baseline_comparison("claude", 20, 500, baseline, cost_usd=25.0)
-        extrapolated = baseline_comparison(
-            "claude", 120, 2500, baseline, cost_usd=220.0
-        )
-        self.assertEqual(interpolated["iterations"], 20)
-        self.assertEqual(interpolated["median_tokens"], 250)
-        self.assertEqual(interpolated["median_cost_usd"], 25.0)
-        self.assertEqual(interpolated["cost_overhead_percent"], 0)
-        self.assertIsNone(extrapolated)
-
-    def test_baseline_text_reports_spend_when_priced_cost_is_available(self) -> None:
-        text = baseline_text(
-            {
-                "baseline": {
-                    "emoji": "🔴",
-                    "iterations": 325,
-                    "token_overhead_percent": 9,
-                    "cost_overhead_percent": 117,
-                }
-            }
-        )
-        self.assertEqual(text, "🔴 117% over your median")
 
     def test_task_series_preserves_zero_cost_prompt_boundaries(self) -> None:
         prices = {
@@ -2576,550 +2587,62 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual([row["cumulative_cost_usd"] for row in rows], [1.0, 1.0, 4.0])
         self.assertEqual([row["priced"] for row in rows], [True, False, True])
 
-    def test_configuration_baseline_matches_model_and_effort_only(self) -> None:
-        standard = UsageEvent(
-            "codex",
-            "session",
-            "one",
-            1,
-            "model",
-            Usage(1, 0, 0, 0, 0, 0, "standard"),
-            0,
-            False,
-            None,
-            "medium",
-        )
-        fast = UsageEvent(
-            "codex",
-            "session",
-            "two",
-            2,
-            "model",
-            Usage(1, 0, 0, 0, 0, 0, "fast"),
-            0,
-            False,
-            None,
-            "medium",
-        )
-        self.assertIsNone(single_configuration([standard, fast]))
-        self.assertEqual(single_model_effort([standard, fast]), ("model", "medium"))
-        series = [(1.0, 1)] * 10
-        samples = [
-            ("model", "medium", series),
-            ("model", "medium", series),
-            ("model", "medium", series),
-            ("model", "medium", series),
-            ("model", "medium", series),
-            (None, None, series),
+    def test_paid_active_session_is_marked_hot_without_persistent_alert_state(
+        self,
+    ) -> None:
+        session: dict[str, object] = {
+            "id": "session",
+            "provider": "claude",
+            "usage_mode": "exhausted",
+            "projected_next_10_tasks_usd": ALERT_FORECAST_USD,
+            "cost_status": "complete",
+            "last_activity_at": datetime.fromtimestamp(100, timezone.utc).isoformat(),
+        }
+        apply_session_hot_state([session], 100)
+        self.assertEqual(session["notification"], {"hot": True})
+
+    def test_included_or_untrustworthy_sessions_are_not_marked_hot(self) -> None:
+        base = {
+            "projected_next_10_tasks_usd": ALERT_FORECAST_USD + 1,
+            "cost_status": "complete",
+            "last_activity_at": datetime.fromtimestamp(100, timezone.utc).isoformat(),
+        }
+        sessions = [
+            {**base, "usage_mode": "included"},
+            {**base, "usage_mode": "exhausted", "cost_status": "partial"},
+            {
+                **base,
+                "usage_mode": "exhausted",
+                "forecast_basis": {"coverage": "historical_fallback"},
+            },
+            {
+                **base,
+                "usage_mode": "exhausted",
+                "last_activity_at": datetime.fromtimestamp(0, timezone.utc).isoformat(),
+            },
         ]
-        with (
-            patch(
-                "konvu_telemetry.analytics.historical_task_series",
-                side_effect=lambda provider, _since, _prices: iter(
-                    samples if provider == "codex" else []
-                ),
-            ),
-            patch(
-                "konvu_telemetry.analytics.claude_compact_next_ten_costs",
-                return_value=[],
+        apply_session_hot_state(sessions, 2_000)
+        self.assertEqual(
+            [session["notification"] for session in sessions],
+            [{"hot": False}] * 4,
+        )
+
+    def test_baselines_only_store_the_sparse_forecast_fallback(self) -> None:
+        samples = [[(1.0, 1)] * 10]
+        with patch(
+            "konvu_telemetry.analytics.historical_task_series",
+            side_effect=lambda provider, _since, _prices: iter(
+                samples if provider == "codex" else []
             ),
         ):
             baseline = build_baselines(0, {})
-        matched = baseline_comparison(
-            "codex",
-            10,
-            10,
-            baseline,
-            model="model",
-            effort="medium",
-            cost_usd=10,
-            comparison_scope="model_effort",
-        )
-        provider = baseline_comparison(
-            "codex",
-            10,
-            10,
-            baseline,
-            model="model",
-            effort="medium",
-            cost_usd=10,
-            comparison_scope="provider",
-        )
-        unavailable_match = baseline_comparison(
-            "codex",
-            10,
-            10,
-            baseline,
-            model="other-model",
-            effort="medium",
-            cost_usd=10,
-            comparison_scope="model_effort",
-        )
-        extrapolated_match = baseline_comparison(
-            "codex",
-            20,
-            20,
-            baseline,
-            model="model",
-            effort="medium",
-            cost_usd=20,
-            comparison_scope="model_effort",
-        )
-        self.assertEqual(matched["scope"], "model_effort")
-        self.assertEqual(provider["scope"], "provider")
-        self.assertIsNone(unavailable_match)
-        self.assertIsNone(extrapolated_match)
         self.assertEqual(
             baseline["forecasts"]["provider_median_next_10"]["codex"],
-            {"median_next_10_usd": 10.0, "sessions": 6},
+            {"median_next_10_usd": 10.0, "sessions": 1},
         )
-
-    def test_snapshot_keeps_short_post_compact_model_effort_baseline(self) -> None:
-        session_id = "00000000-0000-0000-0000-000000000001"
-        records = [
-            {
-                "timestamp": "2026-01-01T00:00:00Z",
-                "sessionId": session_id,
-                "type": "system",
-                "subtype": "compact_boundary",
-            },
-            {
-                "timestamp": "2026-01-01T00:00:01Z",
-                "sessionId": session_id,
-                "message": {"role": "user", "content": "question"},
-            },
-            {
-                "timestamp": "2026-01-01T00:00:02Z",
-                "sessionId": session_id,
-                "effort": "medium",
-                "message": {
-                    "id": "message",
-                    "role": "assistant",
-                    "model": "model",
-                    "usage": {
-                        "input_tokens": 1,
-                        "output_tokens": 0,
-                        "speed": "fast",
-                    },
-                },
-            },
-        ]
-        prices = {
-            "model": {
-                "input": 1,
-                "output": 1,
-                "cache_write": 1,
-                "cache_read": 1,
-                "web_search": 0,
-                "fast_multiplier": 1,
-            }
-        }
-        with tempfile.TemporaryDirectory() as directory:
-            transcript = Path(directory) / f"{session_id}.jsonl"
-            transcript.write_text("\n".join(json.dumps(record) for record in records))
-            with (
-                patch(
-                    "konvu_telemetry.snapshot.live_transcripts",
-                    return_value=[transcript],
-                ),
-                patch(
-                    "konvu_telemetry.snapshot.live_codex_transcripts", return_value=[]
-                ),
-                patch("konvu_telemetry.snapshot.load_pricing", return_value=prices),
-                patch(
-                    "konvu_telemetry.snapshot.load_baselines",
-                    return_value={"providers": {}, "configurations": {}},
-                ),
-                patch(
-                    "konvu_telemetry.snapshot.baseline_comparison",
-                    side_effect=lambda *_args, comparison_scope="auto", **_kwargs: {
-                        "scope": comparison_scope
-                    },
-                ),
-                patch("konvu_telemetry.snapshot.pinned_sessions", return_value=[]),
-                patch("konvu_telemetry.snapshot.enrich_snapshot"),
-                patch("konvu_telemetry.snapshot.locate_compactions"),
-                patch("konvu_telemetry.snapshot.apply_notification_tracking"),
-            ):
-                snapshot = build_snapshot(1767225602.0)
-        session = snapshot["sessions"][0]
-        self.assertTrue(session["since_compact"])
-        self.assertEqual(session["speed"], "fast")
         self.assertEqual(
-            session["comparison_configuration"],
-            {"model": "model", "effort": "medium"},
-        )
-        self.assertEqual(session["baseline"]["scope"], "model_effort")
-        self.assertEqual(session["baselines"]["provider"]["scope"], "provider")
-        self.assertEqual(
-            session["baselines"]["model_effort"]["scope"],
-            "model_effort",
-        )
-
-    def test_sessions_without_a_forecast_never_alert(self) -> None:
-        baseline = {
-            "providers": {
-                "claude": [
-                    {
-                        "iterations": 10,
-                        "sessions": 4,
-                        "median_cost_usd": 10.0,
-                        "median_tokens": 100,
-                    },
-                    {
-                        "iterations": 30,
-                        "sessions": 4,
-                        "median_cost_usd": 40.0,
-                        "median_tokens": 400,
-                    },
-                ]
-            },
-            "configurations": {},
-        }
-        sessions = [
-            {
-                "id": str(count),
-                "provider": "claude",
-                "total_cost_usd": cost,
-                "cost_status": "complete",
-                "baselines": {
-                    "provider": baseline_comparison(
-                        "claude", count, tokens, baseline, cost_usd=cost
-                    )
-                },
-            }
-            for count, tokens, cost in ((20, 500, 25.0), (21, 530, 26.5))
-        ]
-        with tempfile.TemporaryDirectory() as directory:
-            with patch(
-                "konvu_telemetry.analytics.notification_state_path",
-                return_value=Path(directory) / "notifications.json",
-            ):
-                apply_notification_tracking(sessions, 100.0)
-        self.assertEqual(
-            [session["notification"]["hot"] for session in sessions], [False, False]
-        )
-
-    def test_partial_cost_session_does_not_trigger_hot_alert(self) -> None:
-        sessions = [self.forecast_session(40.0)]
-        sessions[0]["cost_status"] = "partial"
-        with tempfile.TemporaryDirectory() as directory:
-            state_path = Path(directory) / "notifications.json"
-            with patch(
-                "konvu_telemetry.analytics.notification_state_path",
-                return_value=state_path,
-            ):
-                apply_notification_tracking(sessions, 100.0)
-        self.assertEqual(sessions[0]["notification"], {"sequence": 0, "hot": False})
-
-    def alert_state_path(self, directory: str) -> Path:
-        return Path(directory) / "notifications.json"
-
-    def forecast_session(
-        self, forecast: float, active_at: float = 100.0
-    ) -> dict[str, object]:
-        return {
-            "id": "session",
-            "provider": "claude",
-            "total_cost_usd": 10.0,
-            "projected_next_10_tasks_usd": forecast,
-            "cost_status": "complete",
-            "last_activity_at": datetime.fromtimestamp(
-                active_at, timezone.utc
-            ).isoformat(),
-        }
-
-    def track(self, session: dict[str, object], now: float, state_path: Path) -> int:
-        with patch(
-            "konvu_telemetry.analytics.notification_state_path",
-            return_value=state_path,
-        ):
-            apply_notification_tracking([session], now)
-        return int(session["notification"]["sequence"])
-
-    def track_active(
-        self, session: dict[str, object], now: float, state_path: Path
-    ) -> int:
-        """Track a session still spending, so its activity keeps pace with the clock."""
-        session["last_activity_at"] = datetime.fromtimestamp(
-            now, timezone.utc
-        ).isoformat()
-        return self.track(session, now, state_path)
-
-    def test_forecast_at_or_below_threshold_does_not_alert(self) -> None:
-        session = self.forecast_session(ALERT_FORECAST_USD)
-        with tempfile.TemporaryDirectory() as directory:
-            sequence = self.track(session, 100.0, self.alert_state_path(directory))
-        self.assertEqual(sequence, 0)
-        self.assertFalse(session["notification"]["hot"])
-
-    def test_forecast_above_threshold_alerts_without_any_baseline(self) -> None:
-        session = self.forecast_session(ALERT_FORECAST_USD + 0.01)
-        with tempfile.TemporaryDirectory() as directory:
-            sequence = self.track(session, 100.0, self.alert_state_path(directory))
-        self.assertEqual(sequence, 1)
-        self.assertTrue(session["notification"]["hot"])
-
-    def test_spend_below_the_median_still_alerts_on_a_high_forecast(self) -> None:
-        session = self.forecast_session(40.0)
-        session["baselines"] = {"provider": {"cost_overhead_percent": -80}}
-        with tempfile.TemporaryDirectory() as directory:
-            sequence = self.track(session, 100.0, self.alert_state_path(directory))
-        self.assertEqual(sequence, 1)
-        self.assertEqual(session["notification"]["overhead_percent"], -80)
-
-    def test_session_idle_past_the_live_window_does_not_alert(self) -> None:
-        session = self.forecast_session(40.0)
-        with tempfile.TemporaryDirectory() as directory:
-            sequence = self.track(
-                session, 100.0 + 21 * 60, self.alert_state_path(directory)
-            )
-        self.assertEqual(sequence, 0)
-        self.assertFalse(session["notification"]["hot"])
-
-    def test_session_without_recorded_activity_does_not_alert(self) -> None:
-        session = self.forecast_session(40.0)
-        del session["last_activity_at"]
-        with tempfile.TemporaryDirectory() as directory:
-            sequence = self.track(session, 100.0, self.alert_state_path(directory))
-        self.assertEqual(sequence, 0)
-
-    def test_sustained_forecast_renotifies_only_after_five_minutes(self) -> None:
-        session = self.forecast_session(12.0)
-        with tempfile.TemporaryDirectory() as directory:
-            path = self.alert_state_path(directory)
-            self.assertEqual(self.track_active(session, 100.0, path), 1)
-            self.assertEqual(self.track_active(session, 100.0 + 4 * 60, path), 1)
-            self.assertEqual(self.track_active(session, 100.0 + 5 * 60, path), 2)
-
-    def test_forecast_brought_down_stops_renotifying_until_it_recovers(self) -> None:
-        session = self.forecast_session(12.0)
-        with tempfile.TemporaryDirectory() as directory:
-            path = self.alert_state_path(directory)
-            self.assertEqual(self.track_active(session, 100.0, path), 1)
-            session["projected_next_10_tasks_usd"] = 6.0
-            self.assertEqual(self.track_active(session, 100.0 + 10 * 60, path), 1)
-            session["projected_next_10_tasks_usd"] = 12.0
-            self.assertEqual(self.track_active(session, 100.0 + 20 * 60, path), 2)
-
-    def test_cooling_below_threshold_rearms_the_next_crossing(self) -> None:
-        session = self.forecast_session(12.0)
-        with tempfile.TemporaryDirectory() as directory:
-            path = self.alert_state_path(directory)
-            self.assertEqual(self.track_active(session, 100.0, path), 1)
-            session["projected_next_10_tasks_usd"] = 1.0
-            self.assertEqual(self.track_active(session, 100.0 + 60, path), 1)
-            # Re-arming forgets the $12 peak, so $5 alerts once the repeat floor passes.
-            session["projected_next_10_tasks_usd"] = 5.0
-            self.assertEqual(self.track_active(session, 100.0 + 5 * 60, path), 2)
-
-    def test_forecast_oscillating_across_the_threshold_respects_the_repeat_floor(
-        self,
-    ) -> None:
-        session = self.forecast_session(5.0)
-        with tempfile.TemporaryDirectory() as directory:
-            path = self.alert_state_path(directory)
-            self.assertEqual(self.track_active(session, 100.0, path), 1)
-            for step, forecast in enumerate((3.9, 5.0, 3.9, 5.0), start=1):
-                session["projected_next_10_tasks_usd"] = forecast
-                sequence = self.track_active(session, 100.0 + step * 30, path)
-                self.assertEqual(sequence, 1)
-
-    def test_forecast_borrowed_from_a_median_does_not_alert(self) -> None:
-        session = self.forecast_session(40.0)
-        session["forecast_basis"] = {"coverage": "historical_fallback"}
-        with tempfile.TemporaryDirectory() as directory:
-            sequence = self.track(session, 100.0, self.alert_state_path(directory))
-        self.assertEqual(sequence, 0)
-        self.assertFalse(session["notification"]["hot"])
-
-    def test_future_activity_stamp_does_not_keep_a_session_live(self) -> None:
-        session = self.forecast_session(40.0, active_at=100.0 + 10 * 60)
-        with tempfile.TemporaryDirectory() as directory:
-            sequence = self.track(session, 100.0, self.alert_state_path(directory))
-        self.assertEqual(sequence, 0)
-
-    def test_state_written_before_this_rule_alerts_afresh(self) -> None:
-        session = self.forecast_session(12.0)
-        with tempfile.TemporaryDirectory() as directory:
-            path = self.alert_state_path(directory)
-            path.write_text(
-                json.dumps(
-                    {
-                        "claude:session": {
-                            "sequence": 3,
-                            "hot": True,
-                            "last_notified_at": 100.0,
-                            "last_cost_usd": 9.0,
-                            "last_overhead_percent": 250,
-                        }
-                    }
-                )
-            )
-            # The recorded clock still binds, so the upgrade cannot alert immediately.
-            self.assertEqual(self.track_active(session, 100.0 + 60, path), 3)
-            self.assertEqual(self.track_active(session, 100.0 + 5 * 60, path), 4)
-
-    def test_quota_alerts_cross_threshold_then_renotify_only_when_rising(self) -> None:
-        sessions = [{"id": "session", "provider": "codex"}]
-        account_quotas = {
-            "codex": {
-                "windows": [
-                    {
-                        "limit_id": "default",
-                        "session_id": "session",
-                        "window_minutes": 300,
-                        "used_percent": 80.0,
-                    },
-                    {
-                        "limit_id": "default",
-                        "session_id": "session",
-                        "window_minutes": 10080,
-                        "used_percent": 90.0,
-                    },
-                ]
-            }
-        }
-        with tempfile.TemporaryDirectory() as directory:
-            state_path = Path(directory) / "notifications.json"
-            with patch(
-                "konvu_telemetry.analytics.notification_state_path",
-                return_value=state_path,
-            ):
-                apply_notification_tracking(sessions, 100.0, account_quotas)
-                self.assertEqual(
-                    account_quotas["codex"]["notifications"],
-                    [
-                        {
-                            "sequence": 1,
-                            "hot": True,
-                            "window": "5-hour",
-                            "used_percent": 80,
-                            "session_id": "session",
-                        },
-                        {
-                            "sequence": 1,
-                            "hot": True,
-                            "window": "weekly",
-                            "used_percent": 90,
-                            "session_id": "session",
-                        },
-                    ],
-                )
-                account_quotas["codex"]["windows"][0]["used_percent"] = 81.0
-                apply_notification_tracking(sessions, 100.0 + 9 * 60, account_quotas)
-                self.assertEqual(
-                    account_quotas["codex"]["notifications"][0]["sequence"], 1
-                )
-                apply_notification_tracking(sessions, 100.0 + 10 * 60, account_quotas)
-                self.assertEqual(
-                    account_quotas["codex"]["notifications"][0]["sequence"], 2
-                )
-                account_quotas["codex"]["windows"][0]["used_percent"] = 20.0
-                apply_notification_tracking(sessions, 100.0 + 11 * 60, account_quotas)
-                self.assertEqual(
-                    account_quotas["codex"]["notifications"],
-                    [
-                        {
-                            "sequence": 1,
-                            "hot": True,
-                            "window": "weekly",
-                            "used_percent": 90,
-                            "session_id": "session",
-                        }
-                    ],
-                )
-                account_quotas["codex"]["windows"][0]["used_percent"] = 80.0
-                apply_notification_tracking(sessions, 100.0 + 12 * 60, account_quotas)
-        self.assertEqual(account_quotas["codex"]["notifications"][0]["sequence"], 3)
-
-    def test_quota_usage_text_marks_windows_at_the_alert_threshold(self) -> None:
-        self.assertEqual(
-            quota_usage_text(
-                {
-                    "rate_limits": {
-                        "five_hour": {"utilization": 0.8},
-                        "seven_day": {"utilization": 0.9},
-                    }
-                }
-            ),
-            "🔥 ⏳ 80% 5-hour limit · 🔥 📅 90% weekly limit",
-        )
-
-    def test_quota_alerts_again_after_a_window_resets_above_threshold(self) -> None:
-        sessions = [{"id": "session", "provider": "codex"}]
-        account_quotas = {
-            "codex": {
-                "windows": [
-                    {
-                        "limit_id": "default",
-                        "session_id": "session",
-                        "window_minutes": 300,
-                        "used_percent": 80.0,
-                        "resets_at": "2026-01-01T05:00:00+00:00",
-                    }
-                ]
-            }
-        }
-        with tempfile.TemporaryDirectory() as directory:
-            state_path = Path(directory) / "notifications.json"
-            with patch(
-                "konvu_telemetry.analytics.notification_state_path",
-                return_value=state_path,
-            ):
-                apply_notification_tracking(sessions, 100.0, account_quotas)
-                account_quotas["codex"]["windows"][0].update(
-                    {
-                        "used_percent": 80.0,
-                        "resets_at": "2026-01-01T10:00:00+00:00",
-                    }
-                )
-                apply_notification_tracking(sessions, 101.0, account_quotas)
-        self.assertEqual(account_quotas["codex"]["notifications"][0]["sequence"], 2)
-
-    def test_claude_statusline_quotas_reach_the_dashboard(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            quota_path = Path(directory) / "claude-quotas.json"
-            with patch(
-                "konvu_telemetry.display.claude_quota_path", return_value=quota_path
-            ):
-                record_claude_quotas(
-                    {
-                        "rate_limits": {
-                            "five_hour": {"utilization": 0.8},
-                            "seven_day": {"used_percentage": 90},
-                        }
-                    },
-                    "session",
-                )
-            snapshot = {"sessions": [{"id": "session", "provider": "claude"}]}
-            with patch(
-                "konvu_telemetry.fleet_telemetry.claude_quota_path",
-                return_value=quota_path,
-            ):
-                enrich_snapshot(snapshot, [], [], time.time())
-        quotas = snapshot["account_quotas"]["claude"]
-        self.assertEqual(quotas["source"], "claude_statusline")
-        self.assertEqual(
-            quotas["windows"],
-            [
-                {
-                    "limit_id": "default",
-                    "session_id": "session",
-                    "window_minutes": 300,
-                    "used_percent": 80.0,
-                    "remaining_percent": 20.0,
-                    "resets_at": None,
-                },
-                {
-                    "limit_id": "default",
-                    "session_id": "session",
-                    "window_minutes": 10080,
-                    "used_percent": 90,
-                    "remaining_percent": 10,
-                    "resets_at": None,
-                },
-            ],
+            set(baseline),
+            {"schema_version", "generated_at", "lookback_days", "forecasts"},
         )
 
 

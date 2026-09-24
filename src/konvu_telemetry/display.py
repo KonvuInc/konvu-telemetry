@@ -8,16 +8,10 @@ import math
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
-from .config import (
-    ALERT_QUOTA_5H_PERCENT,
-    ALERT_QUOTA_WEEKLY_PERCENT,
-    ALLOWED_PROVIDERS,
-    CLAUDE_DESKTOP_ENTRYPOINT,
-    DASHBOARD_PORT,
-)
+from .config import ALLOWED_PROVIDERS, CLAUDE_DESKTOP_ENTRYPOINT, DASHBOARD_PORT
 from .parsers import (
     claude_hook_transcript,
     codex_client_in_file,
@@ -25,13 +19,7 @@ from .parsers import (
     codex_turn_tool_calls,
 )
 from .service import load_health
-from .storage import (
-    claude_quota_path,
-    session_path,
-    snapshot_path,
-    valid_session_id,
-    write_private_json,
-)
+from .storage import snapshot_path, valid_session_id
 
 # Desktop clients hide hook system messages, so the box has to ride in as model context instead.
 PROMPT_BOX_INSTRUCTION = (
@@ -40,61 +28,6 @@ PROMPT_BOX_INSTRUCTION = (
     "Write them as ordinary italic text, not as a code block or a quote."
 )
 SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
-
-
-def record_claude_quotas(payload: dict[str, object], session_id: str) -> None:
-    """Persist fresh Claude quota windows reported to the status-line hook."""
-    if not valid_session_id(session_id):
-        return
-    rate_limits = payload.get("rate_limits")
-    if not isinstance(rate_limits, dict):
-        return
-    windows: list[dict[str, object]] = []
-    for name, minutes in (("five_hour", 5 * 60), ("seven_day", 7 * 24 * 60)):
-        raw_window = rate_limits.get(name)
-        if not isinstance(raw_window, dict):
-            continue
-        value = next(
-            (
-                raw_window.get(key)
-                for key in ("utilization", "used_percentage", "used_pct")
-                if isinstance(raw_window.get(key), (int, float))
-            ),
-            None,
-        )
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            continue
-        used_percent = value * 100 if 0 <= value <= 1 else value
-        if not math.isfinite(used_percent) or used_percent < 0:
-            continue
-        used_percent = min(100.0, used_percent)
-        resets_at = next(
-            (
-                raw_window.get(key)
-                for key in ("resets_at", "reset_at")
-                if isinstance(raw_window.get(key), str)
-            ),
-            None,
-        )
-        windows.append(
-            {
-                "limit_id": "default",
-                "session_id": session_id,
-                "window_minutes": minutes,
-                "used_percent": used_percent,
-                "remaining_percent": 100 - used_percent,
-                "resets_at": resets_at,
-            }
-        )
-    if windows:
-        write_private_json(
-            claude_quota_path(),
-            {
-                "observed_at": datetime.now(timezone.utc).isoformat(),
-                "source": "claude_statusline",
-                "windows": windows,
-            },
-        )
 
 
 def money(value: object) -> str:
@@ -144,65 +77,18 @@ def relative_age(value: object) -> str:
     return f"{seconds // 3600}h ago"
 
 
-def baseline_text(session: dict[str, object]) -> str:
-    comparison = session.get("baseline")
-    if not isinstance(comparison, dict):
-        return ""
-    emoji = (
-        comparison.get("emoji") if isinstance(comparison.get("emoji"), str) else "⚪"
-    )
-    overhead = comparison.get("cost_overhead_percent")
-    if not isinstance(overhead, int):
-        overhead = comparison.get("token_overhead_percent")
-    iterations = comparison.get("iterations")
-    if not isinstance(overhead, int) or not isinstance(iterations, int):
-        return "⚪ baseline unavailable"
-    direction = "below" if overhead < 0 else "over"
-    return f"{emoji} {abs(overhead)}% {direction} your median"
-
-
-def quota_usage_text(payload: dict[str, object]) -> str:
-    """Render Claude's provider-reported five-hour and weekly quota usage."""
-    rate_limits = payload.get("rate_limits")
-    if not isinstance(rate_limits, dict):
-        return ""
-
-    def percentage(window_name: str) -> int | None:
-        window = rate_limits.get(window_name)
-        if not isinstance(window, dict):
-            return None
-        value = next(
-            (
-                window.get(key)
-                for key in ("utilization", "used_percentage", "used_pct")
-                if isinstance(window.get(key), (int, float))
-            ),
-            None,
-        )
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return None
-        percentage = value * 100 if 0 <= value <= 1 else value
-        return round(min(100, percentage)) if math.isfinite(percentage) else None
-
-    five_hour = percentage("five_hour")
-    weekly = percentage("seven_day")
-    parts: list[str] = []
-    if five_hour is not None:
-        hot = "🔥 " if five_hour >= ALERT_QUOTA_5H_PERCENT else ""
-        parts.append(f"{hot}⏳ {five_hour}% 5-hour limit")
-    if weekly is not None:
-        hot = "🔥 " if weekly >= ALERT_QUOTA_WEEKLY_PERCENT else ""
-        parts.append(f"{hot}📅 {weekly}% weekly limit")
-    return " · ".join(parts)
-
-
-def recorded_quota_usage_text(provider: str) -> str:
-    """Read the collector's latest quota windows for a provider hook."""
+def recorded_snapshot() -> dict[str, object] | None:
+    """Read the collector's canonical snapshot."""
     try:
         snapshot = json.loads(snapshot_path().read_text())
     except (OSError, json.JSONDecodeError):
-        return ""
-    accounts = snapshot.get("account_quotas") if isinstance(snapshot, dict) else None
+        return None
+    return snapshot if isinstance(snapshot, dict) else None
+
+
+def quota_usage_text(snapshot: dict[str, object], provider: str) -> str:
+    """Render the latest recorded quota windows for one provider."""
+    accounts = snapshot.get("account_quotas")
     account = accounts.get(provider) if isinstance(accounts, dict) else None
     windows = account.get("windows") if isinstance(account, dict) else None
     parts: list[str] = []
@@ -211,17 +97,39 @@ def recorded_quota_usage_text(provider: str) -> str:
             continue
         minutes = window.get("window_minutes")
         used = window.get("used_percent")
-        if not isinstance(minutes, (int, float)) or not isinstance(used, (int, float)):
+        period = window.get("period")
+        if not isinstance(used, (int, float)):
             continue
         label = (
             "5-hour"
-            if minutes == 300
+            if period == "five_hour" or minutes == 300
             else "weekly"
-            if minutes == 10_080
+            if period == "weekly" or minutes == 10_080
+            else "monthly"
+            if period == "monthly"
             else f"{round(minutes / 60)}-hour"
+            if isinstance(minutes, (int, float))
+            else "account"
         )
-        parts.append(f"{round(min(100, max(0, used)))}% {label} limit")
-    return " · ".join(parts)
+        emoji = (
+            "⏳"
+            if label == "5-hour"
+            else "📅"
+            if label == "weekly"
+            else "🌙"
+            if label == "monthly"
+            else ""
+        )
+        parts.append(f"{emoji} {round(min(100, max(0, used)))}% {label} limit".lstrip())
+    text = " · ".join(parts)
+    stale = isinstance(account, dict) and account.get("status") == "stale"
+    return f"Last known · {text}" if text and stale else text
+
+
+def recorded_quota_usage_text(provider: str) -> str:
+    """Read the collector's latest quota windows for a provider hook."""
+    snapshot = recorded_snapshot()
+    return quota_usage_text(snapshot, provider) if snapshot is not None else ""
 
 
 def subagent_usage_text(session: dict[str, object]) -> str:
@@ -230,7 +138,6 @@ def subagent_usage_text(session: dict[str, object]) -> str:
     live = session.get("active_subagents")
     handed = session.get("subagent_entry_context_tokens")
     context = session.get("context_tokens")
-    spend = session.get("subagent_cost_usd")
     if not isinstance(total, int) or total == 0:
         return ""
     shared_percentage = None
@@ -241,7 +148,8 @@ def subagent_usage_text(session: dict[str, object]) -> str:
         if shared_percentage is not None
         else tokens(handed)
     )
-    return f"🤖 {live or 0} live / {total} total · {shared_text} · {money(spend)} spent"
+    spend_text = f"{money(session.get('subagent_cost_usd'))} API-equivalent"
+    return f"🤖 {live or 0} live / {total} total · {shared_text} · {spend_text}"
 
 
 def dashboard_line() -> str:
@@ -267,24 +175,77 @@ def context_usage_text(session: dict[str, object]) -> str:
     return f"{tokens(context)} context"
 
 
+def quota_attribution_text(session: dict[str, object]) -> str:
+    """Render the current session's explicitly estimated subscription share."""
+    attribution = session.get("quota_attribution")
+    windows = attribution.get("windows") if isinstance(attribution, dict) else None
+    provider = session.get("provider")
+    target_period = "weekly" if provider == "codex" else "five_hour"
+    parts: list[str] = []
+    for window in windows if isinstance(windows, list) else []:
+        if not isinstance(window, dict):
+            continue
+        period = window.get("period")
+        estimate = window.get("estimated_percent")
+        if period != target_period or not isinstance(estimate, (int, float)):
+            continue
+        label = "5-hour" if period == "five_hour" else period
+        hot = (provider == "claude" and period == "five_hour" and estimate > 20) or (
+            provider == "codex" and period == "weekly" and estimate > 10
+        )
+        parts.append(
+            f"~{float(estimate):.1f}% of {label} limit" + (" 🔥" if hot else "")
+        )
+    return " · ".join(parts)
+
+
+def quota_forecast_text(session: dict[str, object]) -> str:
+    """Render a calibrated next-ten subscription-limit estimate when available."""
+    attribution = session.get("quota_attribution")
+    windows = attribution.get("windows") if isinstance(attribution, dict) else None
+    rows = (
+        [row for row in windows if isinstance(row, dict)]
+        if isinstance(windows, list)
+        else []
+    )
+    for period in ("five_hour", "weekly"):
+        for window in rows:
+            forecast = window.get("projected_next_10_percent")
+            if window.get("period") == period and isinstance(forecast, (int, float)):
+                label = "5-hour" if period == "five_hour" else "weekly"
+                return (
+                    f"~{float(forecast):.1f}% of {label} limit in the next 10 prompts"
+                )
+    return ""
+
+
 def usage_rows(
     session: dict[str, object],
     quota_text: str,
     context_percent: float | None = None,
 ) -> list[str]:
     """Build the usage summary every surface shows, unframed; each surface wraps it itself."""
+    usage_mode = session.get("usage_mode")
     complete = session.get("cost_status") == "complete"
     forecast = session.get("projected_next_10_tasks_usd")
     forecast_text = (
-        f"{money(forecast)} for the next 10 prompts"
+        f"{money(forecast)} API-equivalent for the next 10 prompts"
         if complete and isinstance(forecast, (int, float))
         else "forecast unavailable"
     )
-    total_cost = session.get("total_cost_usd")
+    total_cost = (
+        session.get("total_cost_usd")
+        if usage_mode == "api_billed"
+        else session.get("out_of_plan_spend_usd")
+        if session.get("out_of_plan_spend_status") is not None
+        else None
+    )
     total_text = (
-        money(total_cost)
+        f"{money(total_cost)} API-equivalent"
+        if complete and isinstance(total_cost, (int, float))
+        else "— spent beyond plan"
         if complete
-        else f"known minimum {money(total_cost)}"
+        else f"known minimum {money(total_cost)} API-equivalent"
         if session.get("cost_status") == "partial"
         else "cost unavailable"
     )
@@ -293,14 +254,30 @@ def usage_rows(
         if context_percent is not None
         else context_usage_text(session)
     )
-    rows = [f"💸 {total_text} total · {forecast_text}"]
+    money_visible = usage_mode in {"api_billed", "exhausted"}
+    quota_stale = session.get("quota_status") == "stale"
+    included_label = "🟡 Last known: included" if quota_stale else "🟢 Included"
+    money_label = "🟡 Last known plan status · " if quota_stale else "💸 "
+    rows = (
+        [f"{money_label}{total_text} total · {forecast_text}"]
+        if money_visible
+        else [f"{included_label} · {quota_forecast_text(session)}".rstrip(" ·")]
+        if usage_mode == "included"
+        else ["⚪ Subscription limit unavailable"]
+    )
     subagents = subagent_usage_text(session)
-    if subagents:
+    if subagents and money_visible:
         rows.append(subagents)
-    rows.append(f"🧠 {context_text}" + (f" · {quota_text}" if quota_text else ""))
-    norm = baseline_text(session)
-    if norm:
-        rows.append(norm)
+    context_row = f"🧠 {context_text}"
+    if usage_mode == "included":
+        if quota_text:
+            rows.append(quota_text)
+        attribution = quota_attribution_text(session)
+        if attribution:
+            context_row += f" · 🎯 Responsible for {attribution}"
+    elif quota_text:
+        context_row += f" · {quota_text}"
+    rows.append(context_row)
     rows.append(dashboard_line())
     return rows
 
@@ -331,14 +308,15 @@ def statusline() -> None:
     ):
         print("Konvu live usage: collector starting")
         return
-    record_claude_quotas(payload, session_id)
     session = refreshed_session("claude", session_id)
     if session is None:
         print("Konvu live usage: collector starting")
         return
-    # The hook payload's context percentage is fresher than the collector's snapshot.
+    # Claude's context is live, but its rate-limit payload can lag the provider API.
     rows = usage_rows(
-        session, quota_usage_text(payload), payload_context_percent(payload)
+        session,
+        recorded_quota_usage_text("claude"),
+        payload_context_percent(payload),
     )
     for row in rows:
         print(row)
@@ -480,16 +458,18 @@ def codex_prompt_hook() -> None:
 
 
 def refreshed_session(provider: str, session_id: str) -> dict[str, object] | None:
-    """Read one session document the collector rendered, whatever its age."""
+    """Read one session from the collector's canonical fleet snapshot."""
     if provider not in ALLOWED_PROVIDERS or not valid_session_id(session_id):
         return None
-    path = session_path(provider, session_id)
-    try:
-        payload = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError, ValueError):
+    snapshot = recorded_snapshot()
+    if snapshot is None:
         return None
-    return (
-        {str(key): value for key, value in payload.items()}
-        if isinstance(payload, dict)
-        else None
-    )
+    sessions = snapshot.get("sessions")
+    for payload in sessions if isinstance(sessions, list) else []:
+        if (
+            isinstance(payload, dict)
+            and payload.get("provider") == provider
+            and payload.get("id") == session_id
+        ):
+            return {str(key): value for key, value in payload.items()}
+    return None
