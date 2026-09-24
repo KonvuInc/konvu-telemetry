@@ -111,7 +111,16 @@ def quota_usage_text(snapshot: dict[str, object], provider: str) -> str:
             if isinstance(minutes, (int, float))
             else "account"
         )
-        parts.append(f"{round(min(100, max(0, used)))}% {label} limit")
+        emoji = (
+            "⏳"
+            if label == "5-hour"
+            else "📅"
+            if label == "weekly"
+            else "🌙"
+            if label == "monthly"
+            else ""
+        )
+        parts.append(f"{emoji} {round(min(100, max(0, used)))}% {label} limit".lstrip())
     text = " · ".join(parts)
     stale = isinstance(account, dict) and account.get("status") == "stale"
     return f"Last known · {text}" if text and stale else text
@@ -204,7 +213,9 @@ def quota_forecast_text(session: dict[str, object]) -> str:
             forecast = window.get("projected_next_10_percent")
             if window.get("period") == period and isinstance(forecast, (int, float)):
                 label = "5-hour" if period == "five_hour" else "weekly"
-                return f"next 10: ~{float(forecast):.1f}% of {label} limit"
+                return (
+                    f"~{float(forecast):.1f}% of {label} limit in the next 10 prompts"
+                )
     return ""
 
 
@@ -263,7 +274,7 @@ def usage_rows(
             rows.append(quota_text)
         attribution = quota_attribution_text(session)
         if attribution:
-            context_row += f" · Responsible for {attribution}"
+            context_row += f" · 🎯 Responsible for {attribution}"
     elif quota_text:
         context_row += f" · {quota_text}"
     rows.append(context_row)

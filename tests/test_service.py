@@ -42,6 +42,7 @@ from konvu_telemetry.display import (
     dashboard_line,
     last_prompt_used_a_tool,
     payload_context_percent,
+    quota_usage_text,
     refreshed_session,
     statusline,
     usage_box_lines,
@@ -1853,7 +1854,13 @@ class ServiceTests(unittest.TestCase):
             **self.shared_row_session(),
             "usage_mode": "included",
             "quota_attribution": {
-                "windows": [{"period": "five_hour", "estimated_percent": 1.25}]
+                "windows": [
+                    {
+                        "period": "five_hour",
+                        "estimated_percent": 1.25,
+                        "projected_next_10_percent": 3.0,
+                    }
+                ]
             },
         }
         with health_patch({"status": "stale"}):
@@ -1861,12 +1868,29 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(
             rows[:3],
             [
-                "🟢 Included",
+                "🟢 Included · ~3.0% of 5-hour limit in the next 10 prompts",
                 "20% 5-hour limit",
-                "🧠 50% context · Responsible for ~1.2% of 5-hour limit",
+                "🧠 50% context · 🎯 Responsible for ~1.2% of 5-hour limit",
             ],
         )
         self.assertNotIn("$", "\n".join(rows))
+
+    def test_quota_usage_text_distinguishes_each_window(self) -> None:
+        snapshot = {
+            "account_quotas": {
+                "claude": {
+                    "windows": [
+                        {"period": "five_hour", "used_percent": 6},
+                        {"period": "weekly", "used_percent": 54},
+                        {"period": "monthly", "used_percent": 100},
+                    ]
+                }
+            }
+        }
+        self.assertEqual(
+            quota_usage_text(snapshot, "claude"),
+            "⏳ 6% 5-hour limit · 📅 54% weekly limit · 🌙 100% monthly limit",
+        )
 
     def test_hot_subscription_share_gets_a_fire_marker(self) -> None:
         for provider, period, estimate in (
