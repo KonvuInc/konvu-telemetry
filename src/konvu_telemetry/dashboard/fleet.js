@@ -555,7 +555,7 @@ function spendVisual(s, scale) {
     const window = quotaWindowName(s);
     const line = finite(ahead)
       ? "Next 10 prompts: +" + ahead.toFixed(ahead >= 10 ? 0 : 1) + "% of " + window + " limit"
-      : "Next 10 prompts: " + quotaReadiness(s).label.toLowerCase();
+      : "";
     return (
       '<div class="spending included-copy"><div class="included-copy-text"><strong>' +
       (included ? "Included in your plan" : "Subscription status unavailable") + "</strong>" +
@@ -607,10 +607,7 @@ function responsibilityCell(s) {
     return shareBar(share, "of all money spent", money(mine) + " of " + money(total) + " spent beyond plan");
   }
   const share = shareOf(s);
-  if (!finite(share)) {
-    const state = quotaReadiness(s);
-    return '<span class="tiny" title="' + esc(state.why) + '">' + esc(state.label) + "</span>";
-  }
+  if (!finite(share)) return '<span class="tiny">—</span>';
   const window = quotaWindowName(s);
   return shareBar(share, "of your " + window + " limit", "This session is responsible for " + share.toFixed(1) + "% of the " + window + " limit");
 }
@@ -692,19 +689,6 @@ function groupHeading(group) {
 const avg = (values) => (values.length ? values.reduce((a, b) => a + b, 0) / values.length : null);
 const shareOf = (s) => quotaShare(s, s.provider === "codex" ? "weekly" : "five_hour");
 const quotaWindowName = (s) => (s.provider === "codex" ? "weekly" : "5-hour");
-/* The collector reports "observing" while it still has too little history to
-   attribute usage. Saying so beats a bare dash that reads like a bug, and it
-   keeps the share cell and the forecast line telling the same story. */
-function quotaReadiness(s) {
-  const attribution = s.quota_attribution;
-  if (attribution?.state === "observing")
-    return { ready: false, label: "Measuring", why: "Not enough history yet to attribute this session's usage." };
-  if (!Array.isArray(attribution?.windows) || !attribution.windows.length)
-    return { ready: false, label: "Not recorded", why: "The collector has not reported quota attribution for this session." };
-  // Windows exist but the field we wanted is absent — every caller still needs
-  // a label, so there is no branch here that returns without one.
-  return { ready: true, label: "Not estimated yet", why: "This window has no estimate for that figure yet." };
-}
 function shareAhead(s) {
   const period = s.provider === "codex" ? "weekly" : "five_hour";
   const row = s.quota_attribution?.windows?.find((w) => w?.period === period && finite(w.projected_next_10_percent));
