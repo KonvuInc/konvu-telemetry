@@ -30,11 +30,10 @@ brew upgrade konvu-telemetry
 konvu-telemetry setup
 ```
 
-To remove it, clean up the service and integrations before removing the Homebrew package:
+To remove the service, integrations, local telemetry data, and Homebrew package:
 
 ```sh
 konvu-telemetry uninstall
-brew uninstall konvu-telemetry
 ```
 
 ## What it does
