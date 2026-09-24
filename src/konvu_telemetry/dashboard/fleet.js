@@ -1781,7 +1781,9 @@ function browserAlerts(payload) {
       const threshold = [100, 80, 50].find((value) => window.used_percent >= value);
       if (!threshold) continue;
       const period = window.period || duration(window.window_minutes * 60);
-      const key = "konvu-quota-alert-" + provider + "-" + period + "-" + (window.resets_at || "unknown");
+      const reset = Date.parse(window.resets_at);
+      const resetKey = finite(reset) ? Math.floor(reset / 60000) : "unknown";
+      const key = "konvu-quota-alert-" + provider + "-" + period + "-" + resetKey;
       if (Number(localStorage.getItem(key) || 0) >= threshold) continue;
       localStorage.setItem(key, String(threshold));
       const notification = new Notification(
