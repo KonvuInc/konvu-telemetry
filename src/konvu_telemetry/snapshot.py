@@ -34,6 +34,12 @@ from .config import (
     ROLLING_WINDOW_SECONDS,
     SESSION_FILE_RETENTION_SECONDS,
 )
+from .codex_credit_rates import (
+    CODEX_CREDIT_EQUIVALENT_SOURCE,
+    CODEX_CREDIT_RATE_CARD,
+    codex_credit_equivalent,
+    codex_credit_equivalent_status,
+)
 from .fleet_telemetry import enrich_snapshot
 from .live import CodexLiveFile, IncrementalLiveState
 from .models import UsageEvent
@@ -630,29 +636,51 @@ def build_snapshot(
         events.sort(key=lambda event: event.timestamp)
         codex_costs = [event_cost(event, prices) for event in events]
         known_costs = [cost for cost in codex_costs if cost is not None]
+        codex_credit_equivalents = [codex_credit_equivalent(event) for event in events]
+        known_credit_equivalents = [
+            credits for credits in codex_credit_equivalents if credits is not None
+        ]
         child_events = codex_subagent_events.get(session_id, [])
         child_costs = [event_cost(event, prices) for event in child_events]
         known_child_costs = [cost for cost in child_costs if cost is not None]
+        child_credit_equivalents = [
+            codex_credit_equivalent(event) for event in child_events
+        ]
+        known_child_credit_equivalents = [
+            credits for credits in child_credit_equivalents if credits is not None
+        ]
         child_entries = codex_subagent_entries.get(session_id, [])
         costs_by_task: dict[float, float] = defaultdict(float)
+        credit_equivalents_by_task: dict[float, float] = defaultdict(float)
         unpriced_tasks: set[float] = set()
+        unrated_credit_tasks: set[float] = set()
         starts = codex_task_boundaries.get(session_id, [])
-        for event, cost in zip(events, codex_costs):
+        for event, cost, credits in zip(events, codex_costs, codex_credit_equivalents):
             task_index = bisect_right(starts, event.timestamp) - 1
             if cost is None:
                 if task_index >= 0 and requires_pricing(event):
                     unpriced_tasks.add(starts[task_index])
-                continue
-            if task_index >= 0:
+            elif task_index >= 0:
                 costs_by_task[starts[task_index]] += cost
-        for event, cost in zip(child_events, child_costs):
+            if credits is None:
+                if task_index >= 0 and requires_pricing(event):
+                    unrated_credit_tasks.add(starts[task_index])
+            elif task_index >= 0:
+                credit_equivalents_by_task[starts[task_index]] += credits
+        for event, cost, credits in zip(
+            child_events, child_costs, child_credit_equivalents
+        ):
             task_index = bisect_right(starts, event.timestamp) - 1
             if cost is None:
                 if task_index >= 0 and requires_pricing(event):
                     unpriced_tasks.add(starts[task_index])
-                continue
-            if task_index >= 0:
+            elif task_index >= 0:
                 costs_by_task[starts[task_index]] += cost
+            if credits is None:
+                if task_index >= 0 and requires_pricing(event):
+                    unrated_credit_tasks.add(starts[task_index])
+            elif task_index >= 0:
+                credit_equivalents_by_task[starts[task_index]] += credits
         task_costs = [costs_by_task.get(start, 0.0) for start in starts]
         task_priced = [start not in unpriced_tasks for start in starts]
         iteration_costs = [
@@ -664,9 +692,26 @@ def build_snapshot(
             if start not in unpriced_tasks
         ]
         last_task_cost = iteration_costs[-1] if iteration_costs else None
+        task_credits = [
+            credit_equivalents_by_task.get(start, 0.0)
+            if start not in unrated_credit_tasks
+            else None
+            for start in starts
+        ]
+        complete_task_credits = [
+            credit_equivalents_by_task.get(start, 0.0)
+            for start in starts
+            if start not in unrated_credit_tasks
+        ]
+        last_task_credits = task_credits[-1] if task_credits else None
         next_10_forecast = (
             next_ten_forecast(complete_task_costs, "codex")
             if len(complete_task_costs) >= FORECAST_MIN_SAMPLES
+            else None
+        )
+        next_10_credit_forecast = (
+            next_ten_forecast(complete_task_credits, "codex")
+            if len(complete_task_credits) >= FORECAST_MIN_SAMPLES
             else None
         )
         task_count = len(starts)
@@ -674,6 +719,9 @@ def build_snapshot(
         last_event = max(all_events, key=lambda event: event.timestamp)
         total_tokens = sum(event.usage.total_tokens for event in all_events)
         total_cost_status, unpriced_event_count = cost_status(all_events, prices)
+        credit_equivalent_status, unrated_credit_equivalent_event_count = (
+            codex_credit_equivalent_status(all_events)
+        )
         last_task_start = starts[-1] if starts else None
         baseline_configuration = single_model_effort(events)
         baseline_model, baseline_effort = (
@@ -731,11 +779,29 @@ def build_snapshot(
                 "total_cost_usd": round(sum(known_costs) + sum(known_child_costs), 6),
                 "cost_status": total_cost_status,
                 "unpriced_event_count": unpriced_event_count,
+                "total_credit_equivalent": round(
+                    sum(known_credit_equivalents) + sum(known_child_credit_equivalents),
+                    6,
+                ),
+                "credit_equivalent_status": credit_equivalent_status,
+                "credit_equivalent_rate_card": CODEX_CREDIT_RATE_CARD,
+                "credit_equivalent_source": CODEX_CREDIT_EQUIVALENT_SOURCE,
+                "unrated_credit_equivalent_event_count": (
+                    unrated_credit_equivalent_event_count
+                ),
                 "last_task_cost_usd": round(last_task_cost, 6)
                 if isinstance(last_task_cost, (int, float))
                 else None,
+                "last_task_credit_equivalent": round(last_task_credits, 6)
+                if isinstance(last_task_credits, (int, float))
+                else None,
                 "projected_next_10_tasks_usd": round(next_10_forecast, 6)
                 if isinstance(next_10_forecast, (int, float))
+                else None,
+                "projected_next_10_tasks_credit_equivalent": round(
+                    next_10_credit_forecast, 6
+                )
+                if isinstance(next_10_credit_forecast, (int, float))
                 else None,
                 "iterations": iteration_series(
                     starts, iteration_costs, all_events, task_priced
@@ -760,6 +826,9 @@ def build_snapshot(
                     context for _, _, context, _, _ in child_entries
                 ),
                 "subagent_cost_usd": round(sum(known_child_costs), 6),
+                "subagent_credit_equivalent": round(
+                    sum(known_child_credit_equivalents), 6
+                ),
                 "subagents": [
                     {
                         "id": agent_id,

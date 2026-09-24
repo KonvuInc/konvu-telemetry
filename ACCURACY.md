@@ -8,6 +8,8 @@ Each recorded model call is priced from the bundled LiteLLM snapshot using new i
 
 The snapshot source and SHA-256 are recorded in `NOTICE`. The scheduled pricing workflow validates required models, updates the snapshot and checksum together, and opens a reviewable pull request.
 
+For supported Codex model calls, Konvu also calculates subscription-credit equivalents from OpenAI's published per-million-token rates. These values show how many credits the recorded tokens correspond to if credit billing applies; they do not claim that the call was charged, because included limits and flexible-plan controls are account state reported separately under `account_quotas`. Konvu does not convert credits to dollars because purchase prices can differ by plan or agreement.
+
 ## Prompts, subagents, and context
 
 Prompt boundaries come from explicit provider records. Subagent calls are deduplicated by message identity and included in the parent session total. Their spend is attributed to the parent prompt that spawned them when the provider records that relationship; otherwise timestamps are used and the per-prompt attribution is approximate.
