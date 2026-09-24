@@ -16,8 +16,9 @@ class SessionUsage(TypedDict):
 
 
 MIN_FORECAST_SAMPLES = 3
-MIN_FORECAST_PERCENT = 5.0
+MIN_FORECAST_PERCENT = 3.0
 MAX_FORECAST_RATE_SPREAD = 3.0
+STATE_VERSION = 2
 
 
 def _number(value: object) -> float | None:
@@ -31,11 +32,15 @@ def _load_state() -> dict[str, object]:
     try:
         state = json.loads(quota_attribution_path().read_text())
     except (OSError, json.JSONDecodeError):
-        return {"version": 1, "providers": {}}
-    if not isinstance(state, dict) or state.get("version") != 1:
-        return {"version": 1, "providers": {}}
+        return {"version": STATE_VERSION, "providers": {}}
+    if not isinstance(state, dict) or state.get("version") != STATE_VERSION:
+        return {"version": STATE_VERSION, "providers": {}}
     providers = state.get("providers")
-    return state if isinstance(providers, dict) else {"version": 1, "providers": {}}
+    return (
+        state
+        if isinstance(providers, dict)
+        else {"version": STATE_VERSION, "providers": {}}
+    )
 
 
 def _session_usage(session: dict[str, object]) -> SessionUsage | None:
@@ -126,22 +131,19 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
         if not isinstance(provider_state, dict):
             providers[provider] = provider_state = {"sessions": {}, "windows": {}}
         previous_sessions = provider_state.setdefault("sessions", {})
-        pending = provider_state.setdefault("pending", {})
         windows_state = provider_state.setdefault("windows", {})
-        if (
-            not isinstance(previous_sessions, dict)
-            or not isinstance(pending, dict)
-            or not isinstance(windows_state, dict)
+        if not isinstance(previous_sessions, dict) or not isinstance(
+            windows_state, dict
         ):
             providers[provider] = provider_state = {
                 "sessions": {},
-                "pending": {},
                 "windows": {},
             }
             previous_sessions = provider_state["sessions"]
-            pending = provider_state["pending"]
             windows_state = provider_state["windows"]
+        provider_state.pop("pending", None)
         current: dict[str, SessionUsage] = {}
+        interval_weights: dict[str, float] = {}
         for session in session_rows:
             if session.get("provider") != provider or not isinstance(
                 session.get("id"), str
@@ -162,32 +164,13 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
                     if usage["credits"] is not None and old_credits is not None
                     else None
                 )
-                existing = pending.get(key)
-                total = existing if isinstance(existing, dict) else {}
-                total["tokens"] = (_number(total.get("tokens")) or 0.0) + token_delta
-                if credit_delta is not None:
-                    total["credits"] = (
-                        _number(total.get("credits")) or 0.0
-                    ) + credit_delta
-                pending[key] = total
+                weight = _weight(
+                    provider,
+                    {"tokens": token_delta, "credits": credit_delta},
+                )
+                if weight > 0:
+                    interval_weights[key] = weight
         provider_state["sessions"] = current
-        interval_weights = {
-            session_id: _weight(
-                provider,
-                {
-                    "tokens": _number(value.get("tokens")) or 0.0,
-                    "credits": _number(value.get("credits")),
-                },
-            )
-            for session_id, value in pending.items()
-            if isinstance(value, dict)
-        }
-        interval_weights = {
-            session_id: weight
-            for session_id, weight in interval_weights.items()
-            if weight > 0
-        }
-        total_weight = sum(interval_weights.values())
         for raw_window in raw_windows:
             if not isinstance(raw_window, dict):
                 continue
@@ -197,25 +180,38 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
                 continue
             old_window = windows_state.get(window_key)
             if not isinstance(old_window, dict):
-                windows_state[window_key] = {"used_percent": used, "allocations": {}}
+                windows_state[window_key] = {
+                    "used_percent": used,
+                    "allocations": {},
+                    "pending": {},
+                }
                 continue
             old_window.pop("rates", None)
             previous_used = _number(old_window.get("used_percent"))
             if previous_used is None:
                 old_window["used_percent"] = used
+                old_window["pending"] = {}
                 continue
             if used < previous_used:
                 # A reset starts a fresh provider window; old shares must not leak into it.
                 old_window["used_percent"] = used
                 old_window["allocations"] = {}
                 old_window["calibration_samples"] = []
+                old_window["pending"] = {}
                 continue
+            pending = old_window.setdefault("pending", {})
+            if not isinstance(pending, dict):
+                old_window["pending"] = pending = {}
+            for session_id, weight in interval_weights.items():
+                pending[session_id] = (_number(pending.get(session_id)) or 0.0) + weight
             if used == previous_used:
                 continue
             increase = used - previous_used
             allocations = old_window.setdefault("allocations", {})
+            total_weight = sum(_number(weight) or 0.0 for weight in pending.values())
             if isinstance(allocations, dict) and total_weight > 0:
-                for session_id, weight in interval_weights.items():
+                for session_id, raw_weight in pending.items():
+                    weight = _number(raw_weight) or 0.0
                     allocations[session_id] = (
                         _number(allocations.get(session_id)) or 0.0
                     ) + increase * weight / total_weight
@@ -223,9 +219,8 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
                 if isinstance(samples, list):
                     samples.append({"percent": increase, "weight": total_weight})
                     old_window["calibration_samples"] = samples[-8:]
+            old_window["pending"] = {}
             old_window["used_percent"] = used
-        # One interval is allocated independently to every provider window.
-        provider_state["pending"] = {}
         for session in session_rows:
             if session.get("provider") != provider or not isinstance(
                 session.get("id"), str
@@ -239,23 +234,53 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
                 stored = (
                     windows_state.get(window_key) if window_key is not None else None
                 )
-                allocations = (
-                    stored.get("allocations") if isinstance(stored, dict) else None
-                )
-                share = (
+                used_percent = _number(raw_window.get("used_percent"))
+                if not isinstance(stored, dict) or used_percent is None:
+                    continue
+                allocations = stored.get("allocations")
+                confirmed_share = (
                     _number(allocations.get(session["id"]))
                     if isinstance(allocations, dict)
                     else None
                 )
-                if share is not None:
+                calibration = _calibration_rate(stored)
+                pending = stored.get("pending")
+                pending_weight = (
+                    _number(pending.get(session["id"]))
+                    if isinstance(pending, dict)
+                    else None
+                )
+                provisional_share = 0.0
+                if (
+                    calibration is not None
+                    and pending_weight is not None
+                    and isinstance(pending, dict)
+                ):
+                    confirmed_total = (
+                        sum(_number(value) or 0.0 for value in allocations.values())
+                        if isinstance(allocations, dict)
+                        else 0.0
+                    )
+                    pending_total = sum(
+                        _number(value) or 0.0 for value in pending.values()
+                    )
+                    provisional_total = calibration * pending_total
+                    headroom = max(0.0, used_percent - confirmed_total)
+                    scale = (
+                        min(1.0, headroom / provisional_total)
+                        if provisional_total > 0
+                        else 0.0
+                    )
+                    provisional_share = calibration * pending_weight * scale
+                share = (confirmed_share or 0.0) + provisional_share
+                forecast_weight = _forecast_weight(provider, session)
+                if share > 0 or (
+                    forecast_weight is not None and calibration is not None
+                ):
                     estimate: dict[str, object] = {
                         "period": raw_window.get("period"),
                         "estimated_percent": round(share, 2),
                     }
-                    forecast_weight = _forecast_weight(provider, session)
-                    calibration = (
-                        _calibration_rate(stored) if isinstance(stored, dict) else None
-                    )
                     if forecast_weight is not None and calibration is not None:
                         estimate["projected_next_10_percent"] = round(
                             calibration * forecast_weight, 2
