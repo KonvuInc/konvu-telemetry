@@ -289,6 +289,20 @@ def quota_attribution_text(session: dict[str, object]) -> str:
     return " · ".join(parts)
 
 
+def quota_forecast_text(session: dict[str, object]) -> str:
+    """Render a calibrated next-ten subscription-limit estimate when available."""
+    attribution = session.get("quota_attribution")
+    windows = attribution.get("windows") if isinstance(attribution, dict) else None
+    rows = [row for row in windows if isinstance(row, dict)] if isinstance(windows, list) else []
+    for period in ("five_hour", "weekly"):
+        for window in rows:
+            forecast = window.get("projected_next_10_percent")
+            if window.get("period") == period and isinstance(forecast, (int, float)):
+                label = "5-hour" if period == "five_hour" else "weekly"
+                return f"next 10: ~{float(forecast):.1f}% of {label} limit"
+    return ""
+
+
 def usage_rows(
     session: dict[str, object],
     quota_text: str,
@@ -320,7 +334,9 @@ def usage_rows(
     rows = (
         [f"💸 {total_text} total · {forecast_text}"]
         if money_visible
-        else [f"🟢 Included · {quota_text or 'subscription limits available'}"]
+        else [
+            f"🟢 Included · {quota_forecast_text(session)}".rstrip(" ·")
+        ]
         if usage_mode == "included"
         else ["⚪ Subscription limit unavailable"]
     )
@@ -329,9 +345,11 @@ def usage_rows(
         rows.append(subagents)
     context_row = f"🧠 {context_text}"
     if usage_mode == "included":
+        if quota_text:
+            rows.append(quota_text)
         attribution = quota_attribution_text(session)
         if attribution:
-            context_row += f" · Responsible for {attribution.removeprefix('~')}"
+            context_row += f" · Responsible for {attribution}"
     elif quota_text:
         context_row += f" · {quota_text}"
     rows.append(context_row)

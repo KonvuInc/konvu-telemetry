@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from statistics import median
 from datetime import datetime
 from typing import TypedDict
 
@@ -50,6 +51,12 @@ def _weight(provider: str, usage: SessionUsage) -> float:
     if provider == "codex" and usage["credits"] is not None:
         return usage["credits"]
     return usage["tokens"]
+
+
+def _forecast_weight(provider: str, session: dict[str, object]) -> float | None:
+    if provider == "codex":
+        return _number(session.get("projected_next_10_tasks_credit_equivalent"))
+    return _number(session.get("projected_next_10_usage_tokens"))
 
 
 def _window_key(window: dict[str, object]) -> str | None:
@@ -163,6 +170,10 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
             if isinstance(allocations, dict) and total_weight > 0:
                 for session_id, weight in interval_weights.items():
                     allocations[session_id] = (_number(allocations.get(session_id)) or 0.0) + increase * weight / total_weight
+                rates = old_window.setdefault("rates", [])
+                if isinstance(rates, list):
+                    rates.append(increase / total_weight)
+                    old_window["rates"] = rates[-8:]
             old_window["used_percent"] = used
         # One interval is allocated independently to every provider window.
         provider_state["pending"] = {}
@@ -178,7 +189,27 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
                 allocations = stored.get("allocations") if isinstance(stored, dict) else None
                 share = _number(allocations.get(session["id"])) if isinstance(allocations, dict) else None
                 if share is not None:
-                    estimates.append({"period": raw_window.get("period"), "estimated_percent": round(share, 2)})
+                    estimate: dict[str, object] = {
+                        "period": raw_window.get("period"),
+                        "estimated_percent": round(share, 2),
+                    }
+                    rates = stored.get("rates") if isinstance(stored, dict) else None
+                    forecast_weight = _forecast_weight(provider, session)
+                    calibration = (
+                        [
+                            value
+                            for rate in rates
+                            for value in [_number(rate)]
+                            if value is not None and value > 0
+                        ]
+                        if isinstance(rates, list)
+                        else []
+                    )
+                    if forecast_weight is not None and calibration:
+                        estimate["projected_next_10_percent"] = round(
+                            median(calibration) * forecast_weight, 2
+                        )
+                    estimates.append(estimate)
             session["quota_attribution"] = {"state": "observing" if not estimates else "estimated", "windows": estimates}
     write_private_json(quota_attribution_path(), state)
 

@@ -95,6 +95,9 @@ def iteration_series(
                 "context_tokens": context_event.usage.context_tokens
                 if context_event
                 else 0,
+                "usage_tokens": sum(
+                    event.usage.total_tokens for event in iteration_events
+                ),
                 "tool_calls": sum(event.tool_calls for event in iteration_events),
                 "model": model,
                 "reasoning_effort": effort,

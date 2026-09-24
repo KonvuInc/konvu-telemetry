@@ -1871,10 +1871,11 @@ class ServiceTests(unittest.TestCase):
         with health_patch({"status": "stale"}):
             rows = usage_rows(session, "20% 5-hour limit")
         self.assertEqual(
-            rows[:2],
+            rows[:3],
             [
-                "🟢 Included · 20% 5-hour limit",
-                "🧠 50% context · Responsible for 1.2% of 5-hour limit",
+                "🟢 Included",
+                "20% 5-hour limit",
+                "🧠 50% context · Responsible for ~1.2% of 5-hour limit",
             ],
         )
         self.assertNotIn("$", "\n".join(rows))
@@ -2467,6 +2468,7 @@ class ServiceTests(unittest.TestCase):
                 {
                     "started_at": f"2026-01-01T00:00:0{index}Z",
                     "cost_usd": float(index + 1),
+                    "usage_tokens": float((index + 1) * 100),
                     "priced": True,
                     "speed": "standard",
                 }
@@ -2486,6 +2488,7 @@ class ServiceTests(unittest.TestCase):
         ):
             _comparable_forecast(session, [telemetry], True)
             self.assertEqual(session["projected_next_10_tasks_usd"], 20.0)
+            self.assertEqual(session["projected_next_10_usage_tokens"], 2000.0)
             self.assertEqual(session["forecast_basis"]["sample_count"], 3)
             telemetry.configurations.append((3.0, "other-model", "medium"))
             _comparable_forecast(session, [telemetry], True, (12.5, 7))

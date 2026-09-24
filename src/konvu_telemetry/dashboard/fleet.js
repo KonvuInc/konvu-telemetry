@@ -80,8 +80,16 @@ const quotaShare = (s, period = "five_hour") => {
 };
 const quotaShareText = (s) => {
   const share = quotaShare(s);
-  if (finite(share)) return "~" + share.toFixed(share >= 10 ? 0 : 1) + "% of 5-hour burn";
-  return s.quota_attribution?.state === "observing" ? "observing session share" : "subscription usage unavailable";
+  return finite(share) ? "Responsible for ~" + share.toFixed(share >= 10 ? 0 : 1) + "% of 5-hour limit" : "";
+};
+const quotaForecastText = (s) => {
+  const windows = s.quota_attribution?.windows;
+  if (!Array.isArray(windows)) return "";
+  for (const period of ["five_hour", "weekly"]) {
+    const row = windows.find((window) => window?.period === period && finite(window.projected_next_10_percent));
+    if (row) return "Next 10: ~" + row.projected_next_10_percent.toFixed(row.projected_next_10_percent >= 10 ? 0 : 1) + "% of " + (period === "five_hour" ? "5-hour" : "weekly") + " limit";
+  }
+  return "";
 };
 const context = (s) =>
   nonnegative(s.context_tokens) && finite(s.context_window_tokens) && s.context_window_tokens > 0
@@ -459,8 +467,11 @@ function burningCashIcon(next) {
 function spendVisual(s, scale) {
   const spent = cost(s),
     next = forecast(s);
-  if (s.usage_mode === "included" || s.usage_mode === "unknown")
-    return '<div class="spending"><strong>' + (s.usage_mode === "included" ? "Included" : "Subscription status unavailable") + '</strong><small>' + esc(quotaShareText(s)) + "</small></div>";
+  if (s.usage_mode === "included" || s.usage_mode === "unknown") {
+    const included = s.usage_mode === "included";
+    const details = [quotaForecastText(s), quotaShareText(s)].filter(Boolean).map(esc).join(" · ");
+    return '<div class="spending"><strong>' + (included ? "Included" : "Subscription status unavailable") + '</strong>' + (details ? "<small>" + details + "</small>" : "") + "</div>";
+  }
   const values =
       '<div class="spend-values"><strong>' +
       money(spent) +
@@ -1604,7 +1615,7 @@ function renderInspector() {
     scroll = $("#inspector-body").scrollTop;
   const included = !showsMoney(s);
   const stats = included
-    ? '<div class="inspector-stats"><div><span>Subscription</span><strong>' + (s.usage_mode === "included" ? "Included" : "Unknown") + '</strong><small>' + esc(quotaShareText(s)) + '</small></div><div><span>Context</span><strong>' + (pct !== null ? Math.round(pct) + "%" : "—") + "</strong><small>" + tokens(s.context_tokens) + " / " + tokens(s.context_window_tokens) + "</small></div><div><span>Prompts</span><strong>" + count(s) + "</strong><small>recorded locally</small></div></div>"
+    ? '<div class="inspector-stats"><div><span>Subscription</span><strong>' + (s.usage_mode === "included" ? "Included" : "Unknown") + '</strong>' + ([quotaForecastText(s), quotaShareText(s)].filter(Boolean).map(esc).join(" · ") ? '<small>' + [quotaForecastText(s), quotaShareText(s)].filter(Boolean).map(esc).join(" · ") + '</small>' : '') + '</div><div><span>Context</span><strong>' + (pct !== null ? Math.round(pct) + "%" : "—") + "</strong><small>" + tokens(s.context_tokens) + " / " + tokens(s.context_window_tokens) + "</small></div><div><span>Prompts</span><strong>" + count(s) + "</strong><small>recorded locally</small></div></div>"
     : '<div class="inspector-stats"><div><span>Recorded spend</span><strong>' + money(cost(s)) + "</strong><small>" + count(s) + " prompts</small></div><div><span>" + (last?.completed === false ? "Current prompt" : "Last prompt") + "</span><strong>" + money(last?.priced === false ? null : last?.cost_usd) + "</strong><small>" + (last?.completed === false ? "still accumulating" : "recorded cost") + "</small></div><div><span>Next 10 prompts</span><strong>" + additional(forecast(s)) + "</strong><small>additional estimate</small></div><div><span>Context</span><strong>" + (pct !== null ? Math.round(pct) + "%" : "—") + "</strong><small>" + tokens(s.context_tokens) + " / " + tokens(s.context_window_tokens) + "</small></div></div>";
   $("#inspector-body").innerHTML =
     '<span class="eyebrow">' +
