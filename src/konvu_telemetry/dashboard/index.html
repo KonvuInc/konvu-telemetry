@@ -42,7 +42,6 @@
         </div>
       </div>
     </header>
-    <div id="account-strip" hidden></div>
     <main>
       <div class="fleet-toolbar">
         <div>
@@ -59,24 +58,12 @@
             ><button data-provider="claude" aria-pressed="false"><img src="/claude.png" alt="" />Claude</button
             ><button data-provider="codex" aria-pressed="false"><img src="/codex.png" alt="" />Codex</button>
           </div>
-          <button id="view-switch" class="view-switch">View as graph</button>
         </div>
       </div>
+      <section id="account-strip" aria-label="Subscription limits" hidden></section>
       <div id="ledger-toolbar" class="ledger-toolbar">
-        <div class="ledger-layout-note">
-          <span
-            >Solid purple is spent; lavender hatching is the next 10 prompts. Bars share a dollar scale, rounded up from the largest visible session plus
-            forecast.</span
-          >
-        </div>
         <div id="ledger-controls" class="ledger-controls" role="group" aria-label="Ledger filters">
-          <label class="comparison-control"
-            >Compare
-            <select id="baseline-mode" aria-label="Comparison baseline">
-              <option value="provider">General usage median</option>
-              <option value="matched">Same model × effort</option>
-            </select></label
-          ><label class="sort-control"
+          <label class="sort-control"
             >Sort
             <select id="sort" aria-label="Sort sessions">
               <option value="activity">Last activity</option>
@@ -86,6 +73,7 @@
           >
         </div>
       </div>
+      <section id="out-of-plan" aria-label="Sessions outside your subscription"></section>
       <div id="fleet"></div>
     </main>
     <div id="graph-tooltip" role="tooltip" hidden></div>

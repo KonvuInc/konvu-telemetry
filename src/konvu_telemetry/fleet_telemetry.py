@@ -785,6 +785,6 @@ def enrich_snapshot(
             fresh = provider_quotas.get(provider)
             if isinstance(fresh, dict):
                 account_quotas[provider] = fresh
-            else:
+            elif provider != "claude" or provider not in account_quotas:
                 account_quotas.pop(provider, None)
     snapshot["account_quotas"] = account_quotas

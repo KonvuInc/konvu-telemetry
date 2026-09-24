@@ -13,6 +13,7 @@ const COLORS = {
   red: "#A60808",
 };
 const BURNING_FORECAST_USD = 10;
+const previewMode = new URLSearchParams(location.search).get("preview") === "subscription";
 const state = {
   payload: null,
   view: "ledger",
@@ -472,8 +473,8 @@ function spendVisual(s, scale) {
     next = forecast(s);
   if (s.usage_mode === "included" || s.usage_mode === "unknown") {
     const included = s.usage_mode === "included";
-    const details = [quotaForecastText(s), quotaShareText(s)].filter(Boolean).map(esc).join(" · ");
-    return '<div class="spending"><strong>' + (included ? "Included" : "Subscription status unavailable") + '</strong>' + (details ? "<small>" + details + "</small>" : "") + "</div>";
+    const forecast = quotaForecastText(s);
+    return '<div class="spending included-copy"><strong>' + (included ? "Included in your plan" : "Subscription status unavailable") + '</strong>' + (forecast ? "<small>" + esc(forecast) + "</small>" : "") + "</div>";
   }
   const values =
       '<div class="spend-values"><strong>' +
@@ -495,16 +496,9 @@ function spendVisual(s, scale) {
         "</div>";
   return '<div class="spending">' + values + visual + "</div>";
 }
-function medianCell(s, comparison) {
-  const ratio = comparison.ratio;
-  if (ratio === null) return '<div class="median-cell missing" title="' + esc(comparison.detail) + '">—<small>' + esc(comparison.label) + "</small></div>";
-  return (
-    '<div class="median-cell" title="' +
-    esc(comparison.detail) +
-    '"><strong>' +
-    ratio.toLocaleString("en-US", { maximumFractionDigits: 2 }) +
-    "×</strong><small>$ spent</small></div>"
-  );
+function responsibilityCell(s) {
+  const text = quotaShareText(s);
+  return text ? '<div class="responsibility-cell">' + esc(text) + "</div>" : '<span class="tiny">—</span>';
 }
 function subagentCell(s) {
   const total = Number.isInteger(s.subagent_total) && s.subagent_total >= 0 ? s.subagent_total : "—";
@@ -522,14 +516,11 @@ function subagentCell(s) {
   );
 }
 function ledger(rows) {
-  const scale = ledgerDollarScale(rows);
   return (
-    '<div class="table-shell"><table class="session-ledger compact-ledger layout-1"><thead><tr><th>Session</th><th>Spent <span>/ next 10 prompts</span></th><th>Vs. median</th><th>Context</th><th>Subagents</th><th>Activity <span>/ age</span></th></tr></thead><tbody>' +
+    '<div class="table-shell"><table class="session-ledger compact-ledger layout-1"><thead><tr><th>Session</th><th>Plan <span>/ next 10 prompts</span></th><th>Share of limit</th><th>Context</th><th>Subagents</th><th>Activity <span>/ age</span></th></tr></thead><tbody>' +
     rows
       .map((s) => {
-        const comparison = spendComparison(s),
-          next = forecast(s),
-          burning = s.notification?.hot === true;
+        const burning = s.notification?.hot === true;
         return (
           '<tr class="' +
           (burning ? "burning-row" : "") +
@@ -538,9 +529,9 @@ function ledger(rows) {
           '"><td><div class="indexed-title">' +
           titleCell(s) +
           "</div></td><td>" +
-          spendVisual(s, scale) +
+          spendVisual(s, 1) +
           "</td><td>" +
-          medianCell(s, comparison) +
+          responsibilityCell(s) +
           "</td><td>" +
           donut(s) +
           "</td><td>" +
@@ -1094,44 +1085,46 @@ function fleetGraph(rows) {
 }
 function saveUrl() {
   const q = new URLSearchParams();
-  if (state.view === "graph") q.set("view", "graph");
+  if (previewMode) q.set("preview", "subscription");
   if (state.provider !== "all") q.set("tool", state.provider);
   if (state.sort !== "forecast") q.set("sort", state.sort);
-  if (state.baselineMode !== "provider") q.set("compare", state.baselineMode);
   if (state.selected) q.set("session", state.selected);
   history.replaceState(null, "", location.pathname + (q.size ? "?" + q : "") + location.hash);
 }
 function initialUrl() {
   const q = new URLSearchParams(location.search);
-  state.view = q.get("view") === "graph" ? "graph" : "ledger";
   state.provider = ["claude", "codex"].includes(q.get("tool")) ? q.get("tool") : "all";
   state.sort = ["activity", "spent", "forecast"].includes(q.get("sort")) ? q.get("sort") : "forecast";
-  state.baselineMode = q.get("compare") === "matched" ? "matched" : "provider";
   state.selected = q.get("session");
   $("#sort").value = state.sort;
   saveUrl();
 }
 function renderAccounts() {
   const quotas = state.payload?.account_quotas;
-  let html = "";
+  const wanted = { claude: ["five_hour", "weekly"], codex: ["weekly", "monthly"] };
+  const cards = [];
   for (const provider of ["codex", "claude"]) {
     const q = quotas?.[provider];
-    for (const w of Array.isArray(q?.windows) ? q.windows : []) {
-      if (!finite(w.used_percent)) continue;
-      if (!finite(w.window_minutes) && !["five_hour", "weekly", "monthly"].includes(w.period)) continue;
-      const period = w.period === "five_hour" ? "5-hour" : w.period === "weekly" ? "weekly" : w.period === "monthly" ? "monthly" : duration(w.window_minutes * 60);
-      html +=
-        "<span>" +
-        providerName(provider) +
-        " · " +
-        period +
-        " <b>" +
-        Math.max(0, Math.min(100, w.used_percent)).toFixed(0) +
-        "% used</b></span>";
-    }
+    const windows = Array.isArray(q?.windows) ? q.windows : [];
+    const meters = wanted[provider]
+      .map((period) => windows.find((window) => window?.period === period))
+      .filter((window) => window && finite(window.used_percent))
+      .map((window) => {
+        const label = window.period === "five_hour" ? "5-hour" : window.period;
+        const used = Math.max(0, Math.min(100, window.used_percent));
+        return '<div class="quota-meter"><div><span>' + label + ' limit</span><b>' + used.toFixed(0) + '% used</b></div><i><em style="width:' + used + '%"></em></i></div>';
+      })
+      .join("");
+    if (meters) cards.push('<article class="account-card"><h2><img src="/' + provider + '.png" alt="">' + providerName(provider) + '</h2>' + meters + '</article>');
   }
-  $("#account-strip").innerHTML = html;
-  $("#account-strip").hidden = !html;
+  $("#account-strip").innerHTML = cards.join("");
+  $("#account-strip").hidden = !cards.length;
+}
+function renderOutOfPlan(rows) {
+  const paid = rows.filter(showsMoney);
+  $("#out-of-plan").innerHTML = paid.length
+    ? '<div class="attention-heading"><div><h2>Outside your plan</h2><p>These sessions are recording paid usage.</p></div></div><div class="attention-cards">' + paid.map((s) => '<article class="attention-card" data-session="' + esc(keyOf(s)) + '"><div>' + titleCell(s) + '</div><div class="attention-cost"><strong>' + money(cost(s)) + ' spent</strong>' + (forecast(s) !== null ? '<span>' + additional(forecast(s)) + ' over the next 10 prompts</span>' : '') + '</div></article>').join("") + "</div>"
+    : "";
 }
 function render() {
   if (axisDragging) return;
@@ -1143,17 +1136,14 @@ function render() {
   $("#live-count").textContent = rows.length;
   renderFreshness(stale);
   document.querySelectorAll("[data-provider]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.provider === state.provider)));
-  $("#baseline-mode").value = state.baselineMode;
-  $("#ledger-toolbar").hidden = state.view === "graph";
-  $("#view-switch").innerHTML = state.view === "graph" ? viewIcon("ledger") + "<span>View as ledger</span>" : viewIcon("graph") + "<span>View as graph</span>";
-  $("#fleet").innerHTML = rows.length
-    ? state.view === "graph"
-      ? fleetGraph(rows)
-      : ledger(rows)
+  const inPlan = rows.filter((session) => !showsMoney(session));
+  $("#fleet").innerHTML = inPlan.length
+    ? ledger(inPlan)
     : '<div class="empty"><h3>No live sessions</h3><p>No activity in the last ' + liveWindowLabel() +
       (state.provider !== "all" ? " for " + providerName(state.provider) : "") +
       ". New sessions appear automatically.</p></div>";
   renderAccounts();
+  renderOutOfPlan(rows);
   renderInspector();
 }
 function renderFreshness(stale) {
@@ -1181,7 +1171,6 @@ function bindEvents() {
     },
     true,
   );
-  bindGraphControls();
   document.addEventListener("click", (event) => {
     const target = event.target;
     if (!(target instanceof Element)) return;
@@ -1201,25 +1190,12 @@ function bindEvents() {
       document.querySelector('[data-chart="' + state.chart + '"]')?.focus();
     }
   });
-  $("#view-switch").addEventListener("click", () => {
-    state.view = state.view === "ledger" ? "graph" : "ledger";
-    saveUrl();
-    render();
-  });
   $("#close").addEventListener("click", closeSession);
   $("#backdrop").addEventListener("click", closeSession);
   $("#sort").addEventListener("change", (event) => {
     state.sort = event.target.value;
     saveUrl();
     render();
-  });
-  document.addEventListener("change", (event) => {
-    if (event.target.id === "baseline-mode") {
-      state.baselineMode = event.target.value;
-      saveUrl();
-      render();
-      $("#baseline-mode")?.focus();
-    }
   });
   document.addEventListener("keydown", (event) => {
     if (state.selected) {
@@ -1253,13 +1229,13 @@ async function refresh(triggerCollector = false) {
   state.refreshInFlight = true;
   renderFreshness(state.error || !state.payload || elapsed(state.payload?.generated_at) > 120000);
   try {
-    if (triggerCollector) {
+    if (triggerCollector && !previewMode) {
       const refreshResponse = await fetch("/api/refresh", { method: "POST", cache: "no-store" });
       if (!refreshResponse.ok) throw new Error("Collector refresh failed");
     }
-    const health = refreshHealth();
+    const health = previewMode ? Promise.resolve(false) : refreshHealth();
     const headers = state.snapshotEtag ? { "If-None-Match": state.snapshotEtag } : {};
-    const response = await fetch("/api/live-sessions", { cache: "no-store", headers });
+    const response = await fetch(previewMode ? "/subscription-preview.json" : "/api/live-sessions", { cache: "no-store", headers });
     await health;
     if (response.status === 304) {
       state.error = false;
@@ -1267,11 +1243,17 @@ async function refresh(triggerCollector = false) {
       if (!response.ok) throw new Error("Collector request failed");
       const payload = await response.json();
       if (!payload || !Array.isArray(payload.sessions) || !finite(Date.parse(payload.generated_at))) throw new Error("Invalid snapshot");
+      if (previewMode) {
+        payload.generated_at = new Date().toISOString();
+        payload.sessions.forEach((session, index) => {
+          session.last_activity_at = new Date(Date.now() - index * 45000).toISOString();
+        });
+      }
       state.snapshotEtag = response.headers.get("ETag");
       state.payload = payload;
       if (state.selected) await loadSessionDetails(state.selected);
       state.error = false;
-      browserAlerts(payload);
+      if (!previewMode) browserAlerts(payload);
     }
   } catch {
     state.error = true;
@@ -1281,7 +1263,6 @@ async function refresh(triggerCollector = false) {
   const active = document.activeElement,
     key = active?.dataset?.session,
     chart = active?.dataset?.chart,
-    baseline = active?.id === "baseline-mode",
     axis = active?.dataset?.axis;
   render();
   if (key) {
@@ -1289,10 +1270,10 @@ async function refresh(triggerCollector = false) {
       .find((b) => b.dataset.session === key && b.matches("button,g"))
       ?.focus({ preventScroll: true });
   } else if (chart) document.querySelector('[data-chart="' + chart + '"]')?.focus({ preventScroll: true });
-  else if (baseline) $("#baseline-mode")?.focus({ preventScroll: true });
   else if (axis) document.querySelector('[data-axis="' + axis + '"]')?.focus({ preventScroll: true });
 }
 async function refreshHealth() {
+  if (previewMode) return false;
   try {
     const response = await fetch("/healthz", { cache: "no-store" });
     const health = await response.json();
@@ -1651,6 +1632,7 @@ function renderInspector() {
   if (!wasOpen) $("#close").focus();
 }
 async function loadSessionDetails(id) {
+  if (previewMode) return;
   const session = allRows().find((row) => keyOf(row) === id || row.id === id);
   if (!session) return;
   const request = ++state.detailRequest;
@@ -1684,7 +1666,7 @@ function closeSession() {
   saveUrl();
   renderInspector();
   if (state.lastOpener?.isConnected) state.lastOpener.focus();
-  else $("#view-switch")?.focus();
+  else document.querySelector('[data-provider="all"]')?.focus();
 }
 
 const notificationUi = { busy: false, testSent: false };

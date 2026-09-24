@@ -216,12 +216,13 @@ class ProviderLimitsTests(unittest.TestCase):
             keychain.return_value = '{"claudeAiOauth":{"accessToken":"token"}}'
             self.assertEqual(read_claude_access_token(), "token")
 
-    def test_provider_results_replace_local_estimates_and_fail_closed(self) -> None:
+    def test_provider_results_replace_local_estimates_without_erasing_fallback(self) -> None:
         snapshot: dict[str, object] = {"sessions": []}
         fresh = {"source": "provider_api", "windows": [{"used_percent": 7.0}]}
+        local = {"source": "claude_statusline", "windows": [{"used_percent": 3.0}]}
         with patch(
             "konvu_telemetry.fleet_telemetry._claude_quota_snapshot",
-            return_value={"source": "claude_statusline", "windows": []},
+            return_value=local,
         ):
             enrich_snapshot(
                 snapshot,
@@ -231,6 +232,14 @@ class ProviderLimitsTests(unittest.TestCase):
                 {"claude": fresh, "codex": None},
             )
         self.assertEqual(snapshot["account_quotas"], {"claude": fresh})
+
+        snapshot = {"sessions": []}
+        with patch(
+            "konvu_telemetry.fleet_telemetry._claude_quota_snapshot",
+            return_value=local,
+        ):
+            enrich_snapshot(snapshot, [], [], 100.0, {"claude": None, "codex": None})
+        self.assertEqual(snapshot["account_quotas"]["claude"], local)
 
 
 if __name__ == "__main__":

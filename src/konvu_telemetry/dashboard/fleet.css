@@ -135,20 +135,56 @@ p {
   --slate: var(--orange);
 }
 #account-strip {
-  display: flex;
-  gap: 22px;
-  padding: 9px 32px;
-  background: var(--wash);
-  border-bottom: 1px solid var(--line);
-  font-size: 9px;
-  color: var(--mist);
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin: 0 0 24px;
 }
 #account-strip[hidden] {
   display: none;
 }
-#account-strip b {
-  margin-left: 7px;
-  color: var(--ink);
+.account-card {
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 15px 16px;
+  background: var(--wash);
+}
+.account-card h2 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  margin-bottom: 14px;
+}
+.account-card h2 img {
+  width: 17px;
+  height: 17px;
+}
+.quota-meter + .quota-meter {
+  margin-top: 12px;
+}
+.quota-meter > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--mist);
+  font-size: 10px;
+  margin-bottom: 5px;
+}
+.quota-meter b { color: var(--ink); }
+.quota-meter > i {
+  display: block;
+  height: 7px;
+  overflow: hidden;
+  background: var(--soft);
+  border-radius: 4px;
+}
+.quota-meter > i > em {
+  display: block;
+  height: 100%;
+  background: var(--purple);
+  border-radius: inherit;
+}
 }
 main {
   max-width: 1460px;
@@ -352,6 +388,47 @@ select {
 .spending {
   max-width: 305px;
 }
+.included-copy strong {
+  color: var(--green);
+  display: block;
+  font-size: 11px;
+  font-weight: 500;
+}
+.included-copy small {
+  display: block;
+  color: var(--mist);
+  font-size: 9px;
+  margin-top: 4px;
+}
+.responsibility-cell {
+  color: var(--ink);
+  font-size: 10px;
+  line-height: 1.35;
+}
+.attention-heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  margin: 28px 0 10px;
+}
+.attention-heading h2 { font-size: 13px; color: var(--orange); }
+.attention-heading p { color: var(--mist); font-size: 10px; margin-top: 3px; }
+.attention-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(310px, 1fr)); gap: 10px; }
+.attention-card {
+  align-items: center;
+  background: #db5f3708;
+  border: 1px solid #db5f3733;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  padding: 14px;
+}
+.attention-card:hover { background: #db5f3710; }
+.attention-cost { display: flex; flex: none; flex-direction: column; gap: 3px; text-align: right; }
+.attention-cost strong { color: var(--orange); font-size: 12px; }
+.attention-cost span { color: var(--mist); font-size: 9px; }
 .spend-values {
   display: flex;
   align-items: baseline;
@@ -2634,4 +2711,9 @@ select {
   .cash-alert .bonfire-tongue {
     animation: none;
   }
+}
+@media (max-width: 700px) {
+  #account-strip { grid-template-columns: 1fr; }
+  .attention-card { align-items: start; flex-direction: column; }
+  .attention-cost { text-align: left; }
 }
