@@ -26,7 +26,7 @@ Konvu Telemetry is one Python package with a single resident process. The proces
 2. `service.py` owns the collector loop, health record, and localhost HTTP server.
 3. `live.py` and `fleet_telemetry.py` incrementally read appended transcript bytes and retain bounded metadata for active files.
 4. `parsers.py` converts provider records into the provider-neutral types in `models.py`.
-5. `pricing.py` applies the bundled local price table and marks missing prices explicitly.
+5. `pricing.py` applies the bundled local price table; `codex_credit_rates.py` calculates Codex credit equivalents from its published rate table. Both mark missing rates explicitly.
 6. `analytics.py` derives prompt series, personal baselines, forecasts, compaction state, and alert decisions. Expired valid baselines remain usable while one background refresh rebuilds them.
 7. `snapshot.py` writes a bounded dashboard summary plus detailed per-session documents. Unchanged detail documents are not rewritten.
 8. `display.py` builds one set of usage rows from a per-session document and reads `service.load_health()` for the closing dashboard line, then frames them for the Codex `Stop` hook and both providers' desktop `UserPromptSubmit` context, or prints them flat for the Claude status line.

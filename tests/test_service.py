@@ -508,6 +508,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(exported["reasoning_effort"], "high")
         self.assertEqual(exported["speed"], "standard")
         self.assertTrue(exported["usage_complete"])
+        self.assertIsNone(exported["estimated_credit_equivalent"])
 
     def test_missing_billable_usage_is_not_reported_as_a_complete_cost(self) -> None:
         event = assistant_event(
