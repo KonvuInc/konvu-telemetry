@@ -22,7 +22,7 @@ from .config import (
     LIVE_ACTIVITY_SECONDS,
 )
 from .live import IncrementalLiveState
-from .provider_limits import ProviderLimitPoller
+from .provider_limits import ProviderLimitPoller, stored_provider_quotas
 from .snapshot import build_snapshot, write_snapshot
 from .storage import (
     health_path,
@@ -201,7 +201,9 @@ def collect_forever(
     """Refresh local session files until the operating system stops the service."""
     global _DASHBOARD_DATA_AVAILABLE
     coordinator = refresh_coordinator or RefreshCoordinator()
-    quota_poller = provider_limit_poller or ProviderLimitPoller()
+    quota_poller = provider_limit_poller or ProviderLimitPoller(
+        initial_snapshots=stored_provider_quotas()
+    )
     while True:
         coordinator.start_collection()
         started_at = time.time()

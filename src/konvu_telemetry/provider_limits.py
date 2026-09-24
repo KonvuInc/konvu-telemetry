@@ -19,6 +19,8 @@ from typing import Callable, Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from .storage import snapshot_path
+
 
 CLAUDE_USAGE_ENDPOINT = "https://api.anthropic.com/api/oauth/usage"
 CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
@@ -62,6 +64,23 @@ class FetchResult:
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, *args: object, **kwargs: object) -> None:
         return None
+
+
+def stored_provider_quotas() -> dict[str, object]:
+    """Read only authoritative provider quotas from the canonical snapshot."""
+    try:
+        snapshot = json.loads(snapshot_path().read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    accounts = snapshot.get("account_quotas") if isinstance(snapshot, dict) else None
+    if not isinstance(accounts, dict):
+        return {}
+    return {
+        provider: account
+        for provider in ("claude", "codex")
+        if isinstance((account := accounts.get(provider)), dict)
+        and account.get("source") == "provider_api"
+    }
 
 
 def _iso_now(now: float) -> str:
@@ -511,12 +530,13 @@ def fetch_codex_limits(now: float | None = None) -> FetchResult:
 
 
 class ProviderLimitPoller:
-    """Poll independently per provider and expose only the latest fresh result."""
+    """Poll each provider while safely retaining the latest authoritative result."""
 
     def __init__(
         self,
         claude_fetcher: Callable[[float | None], FetchResult] = fetch_claude_limits,
         codex_fetcher: Callable[[float | None], FetchResult] = fetch_codex_limits,
+        initial_snapshots: dict[str, object] | None = None,
     ) -> None:
         self._fetchers = {"claude": claude_fetcher, "codex": codex_fetcher}
         self._next_at = {"claude": 0.0, "codex": 0.0}
@@ -524,6 +544,21 @@ class ProviderLimitPoller:
         self._snapshots: dict[str, dict[str, object] | None] = {}
         self._last_success_at: dict[str, float] = {}
         self._failure_reasons: dict[str, FailureReason | None] = {}
+        for provider in self._fetchers:
+            initial = (
+                initial_snapshots.get(provider)
+                if isinstance(initial_snapshots, dict)
+                else None
+            )
+            if not isinstance(initial, dict) or initial.get("source") != "provider_api":
+                continue
+            observed = _iso_reset(initial.get("observed_at"))
+            if observed is None:
+                continue
+            self._snapshots[provider] = initial
+            self._last_success_at[provider] = datetime.fromisoformat(
+                observed
+            ).timestamp()
 
     def _visible_snapshot(self, provider: str, now: float) -> dict[str, object]:
         snapshot = self._snapshots.get(provider)

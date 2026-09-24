@@ -18,6 +18,7 @@ from konvu_telemetry.provider_limits import (
     decode_codex_usage,
     fetch_claude_limits,
     read_claude_access_token,
+    stored_provider_quotas,
 )
 from konvu_telemetry.fleet_telemetry import enrich_snapshot
 
@@ -182,6 +183,48 @@ class ProviderLimitsTests(unittest.TestCase):
             },
         )
         self.assertEqual(claude.call_count, 2)
+
+    def test_poller_retains_canonical_snapshot_when_first_fetch_fails(self) -> None:
+        poller = ProviderLimitPoller(
+            Mock(return_value=FetchResult(None, failure="network_error")),
+            Mock(return_value=FetchResult(None, unavailable=True)),
+            initial_snapshots={
+                "claude": {
+                    "source": "provider_api",
+                    "observed_at": "1970-01-01T00:01:40+00:00",
+                    "windows": [{"used_percent": 7.0}],
+                }
+            },
+        )
+
+        claude = poller.refresh(220)["claude"]
+        self.assertEqual(claude["status"], "stale")
+        self.assertEqual(claude["windows"], [{"used_percent": 7.0}])
+
+    @patch("konvu_telemetry.provider_limits.snapshot_path")
+    def test_stored_quotas_accept_only_provider_api_results(
+        self, mocked_path: Mock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "live-sessions.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "account_quotas": {
+                            "claude": {
+                                "source": "provider_api",
+                                "windows": [],
+                            },
+                            "codex": {"source": "local_fallback", "windows": []},
+                        }
+                    }
+                )
+            )
+            mocked_path.return_value = path
+            self.assertEqual(
+                stored_provider_quotas(),
+                {"claude": {"source": "provider_api", "windows": []}},
+            )
 
     def test_poller_clears_confirmed_unavailability(self) -> None:
         claude = Mock(
