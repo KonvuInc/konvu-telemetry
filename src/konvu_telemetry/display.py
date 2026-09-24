@@ -89,7 +89,7 @@ def record_claude_quotas(payload: dict[str, object], session_id: str) -> None:
         )
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             continue
-        used_percent = value * 100 if 0 <= value <= 1 else value
+        used_percent = float(value)
         if not math.isfinite(used_percent) or used_percent < 0:
             continue
         used_percent = min(100.0, used_percent)
@@ -206,8 +206,12 @@ def quota_usage_text(payload: dict[str, object]) -> str:
         )
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return None
-        percentage = value * 100 if 0 <= value <= 1 else value
-        return round(min(100, percentage)) if math.isfinite(percentage) else None
+        percentage = float(value)
+        return (
+            round(min(100, percentage))
+            if math.isfinite(percentage) and percentage >= 0
+            else None
+        )
 
     five_hour = percentage("five_hour")
     weekly = percentage("seven_day")
@@ -236,13 +240,20 @@ def recorded_quota_usage_text(provider: str) -> str:
             continue
         minutes = window.get("window_minutes")
         used = window.get("used_percent")
-        if not isinstance(minutes, (int, float)) or not isinstance(used, (int, float)):
+        if (
+            isinstance(minutes, bool)
+            or isinstance(used, bool)
+            or not isinstance(minutes, (int, float))
+            or not isinstance(used, (int, float))
+            or not math.isfinite(float(minutes))
+            or not math.isfinite(float(used))
+        ):
             continue
         label = (
             "5-hour"
-            if minutes == 300
+            if abs(minutes - 300) <= 5
             else "weekly"
-            if minutes == 10_080
+            if abs(minutes - 10_080) <= 60
             else f"{round(minutes / 60)}-hour"
         )
         parts.append(f"{round(min(100, max(0, used)))}% {label} limit")

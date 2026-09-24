@@ -1792,10 +1792,6 @@ function browserAlerts(payload) {
       );
       notification.onclick = () => {
         window.focus();
-        const session = (payload.sessions || []).find(
-          (item) => item?.provider === provider && item?.id === alert.session_id
-        );
-        if (session) openSession(keyOf(session));
         notification.close();
       };
     }

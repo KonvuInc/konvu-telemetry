@@ -10,13 +10,14 @@ from pathlib import Path
 from typing import Literal
 
 from .config import (
+    ACTIVITY_CLOCK_SKEW_SECONDS,
     FILE_CACHE_LIMIT,
     FORECAST_MIN_SAMPLES,
     FORECAST_WINDOW,
     MAX_PARSED_RECORD_BYTES,
 )
 from .live import IncrementalLiveState
-from .storage import claude_quota_path
+from .storage import claude_quota_path, codex_account_scope
 
 
 Provider = Literal["claude", "codex"]
@@ -123,6 +124,7 @@ def is_claude_prompt(record: dict[str, object]) -> bool:
 
 
 def _quota_windows(raw: dict[str, object], observed: float) -> list[dict[str, object]]:
+    """Read Codex's provider-native percentage-point quota windows."""
     windows: list[dict[str, object]] = []
     limit_id = raw.get("limit_id")
     for name in ("primary", "secondary"):
@@ -134,30 +136,36 @@ def _quota_windows(raw: dict[str, object], observed: float) -> list[dict[str, ob
         reset = _number(window.get("resets_at"))
         if used is None or minutes is None or minutes <= 0:
             continue
-        used_percent = used * 100 if 0 <= used <= 1 else used
-        windows.append(
-            {
-                "limit_id": limit_id if isinstance(limit_id, str) else "default",
-                "window_minutes": minutes,
-                "used_percent": min(100.0, used_percent),
-                "remaining_percent": max(0.0, 100.0 - used_percent),
-                "resets_at": _iso(reset),
-                "observed_at": _iso(observed),
-            }
-        )
+        used_percent = min(100.0, used)
+        parsed: dict[str, object] = {
+            "limit_id": limit_id if isinstance(limit_id, str) else "default",
+            "window_minutes": minutes,
+            "used_percent": used_percent,
+            "remaining_percent": max(0.0, 100.0 - used_percent),
+            "resets_at": _iso(reset),
+            "observed_at": _iso(observed),
+        }
+        for key in ("limit_name", "normal_model_slug"):
+            value = raw.get(key)
+            if isinstance(value, str) and value:
+                parsed[key] = value
+        windows.append(parsed)
     return windows
 
 
 def _quota_status(raw: dict[str, object]) -> dict[str, object]:
     """Preserve provider state needed to distinguish included usage from paid usage."""
     status: dict[str, object] = {}
-    for key in ("plan_type", "rate_limit_reached_type"):
+    for key in ("plan_type", "rate_limit_reached_type", "account_id"):
         value = raw.get(key)
         if isinstance(value, str):
             status[key] = value
     spend_control_reached = raw.get("spend_control_reached")
     if isinstance(spend_control_reached, bool):
         status["spend_control_reached"] = spend_control_reached
+    ordinary_usage_allowed = raw.get("ordinary_usage_allowed")
+    if isinstance(ordinary_usage_allowed, bool):
+        status["ordinary_usage_allowed"] = ordinary_usage_allowed
     credits = raw.get("credits")
     if isinstance(credits, dict):
         for source, target in (
@@ -180,7 +188,12 @@ def _claude_quota_snapshot(now: float) -> dict[str, object] | None:
         return None
     observed_at = raw.get("observed_at")
     observed = _timestamp(observed_at)
-    if observed is None or now - observed > ACTIVITY_FRESHNESS_SECONDS:
+    if (
+        observed is None
+        or not -ACTIVITY_CLOCK_SKEW_SECONDS
+        <= now - observed
+        <= ACTIVITY_FRESHNESS_SECONDS
+    ):
         return None
     raw_windows = raw.get("windows")
     if not isinstance(raw_windows, list):
@@ -402,8 +415,6 @@ def _read_telemetry(
                         previous = result.quotas.get(key)
                         if previous is None or timestamp >= previous[0]:
                             windows = _quota_windows(quotas, timestamp)
-                            for window in windows:
-                                window["session_id"] = result.session_id
                             result.quotas[key] = (
                                 timestamp,
                                 windows,
@@ -705,7 +716,7 @@ def enrich_snapshot(
 ) -> None:
     """Add explicit transcript telemetry without changing cost accounting."""
     grouped: dict[tuple[str, str], list[TranscriptTelemetry]] = {}
-    quotas: dict[str, tuple[float, list[dict[str, object]], dict[str, object]]] = {}
+    quota_rows: list[TranscriptTelemetry] = []
     sources: tuple[tuple[Provider, list[Path]], ...] = (
         ("claude", claude_paths),
         ("codex", codex_paths),
@@ -721,9 +732,8 @@ def enrich_snapshot(
             row = parse_telemetry(path, provider)
             if row.session_id is not None and not row.is_subagent:
                 grouped.setdefault((provider, row.session_id), []).append(row)
-            for limit_id, observation in row.quotas.items():
-                if limit_id not in quotas or observation[0] > quotas[limit_id][0]:
-                    quotas[limit_id] = observation
+            if row.quotas:
+                quota_rows.append(row)
     sessions = snapshot.get("sessions")
     for session in sessions if isinstance(sessions, list) else []:
         if not isinstance(session, dict):
@@ -768,6 +778,41 @@ def enrich_snapshot(
                     start = _timestamp(iteration.get("started_at"))
                     if start in task_tools:
                         iteration["tool_calls"] = task_tools[start]
+    account_scope = codex_account_scope()
+    if (
+        account_scope is not None
+        and account_scope[1] - now > ACTIVITY_CLOCK_SKEW_SECONDS
+    ):
+        account_scope = None
+    eligible_quota_rows = [
+        row
+        for row in quota_rows
+        if account_scope is None
+        or max(observation[0] for observation in row.quotas.values())
+        >= account_scope[1]
+    ]
+    quotas: dict[str, tuple[float, list[dict[str, object]], dict[str, object]]] = {}
+    if account_scope is not None:
+        for row in eligible_quota_rows:
+            for limit_id, observation in row.quotas.items():
+                if observation[0] < account_scope[1]:
+                    continue
+                if limit_id not in quotas or observation[0] > quotas[limit_id][0]:
+                    quotas[limit_id] = observation
+    else:
+        quota_row = max(
+            eligible_quota_rows,
+            key=lambda row: max(observation[0] for observation in row.quotas.values()),
+            default=None,
+        )
+        quotas = dict(quota_row.quotas) if quota_row is not None else {}
+    quotas = {
+        limit_id: observation
+        for limit_id, observation in quotas.items()
+        if -ACTIVITY_CLOCK_SKEW_SECONDS
+        <= now - observation[0]
+        <= ACTIVITY_FRESHNESS_SECONDS
+    }
     main_keys = [key for key in ("codex", "default") if key in quotas]
     main_limit_key = (
         max(
@@ -783,20 +828,22 @@ def enrich_snapshot(
     for alias in main_keys:
         if alias != main_limit_key:
             quotas.pop(alias)
-    observed = max((row[0] for row in quotas.values()), default=None)
+    observed = max((observation[0] for observation in quotas.values()), default=None)
     main_quota = quotas.get(main_limit_key) if main_limit_key is not None else None
     main_status = main_quota[2] if main_quota is not None else {}
+    if account_scope is not None:
+        main_status = {**main_status, "account_scope": account_scope[0]}
     main_observed = main_quota[0] if main_quota is not None else observed
-    account_quotas: dict[str, object] = {
-        "codex": {
+    account_quotas: dict[str, object] = {}
+    if quotas:
+        account_quotas["codex"] = {
             **main_status,
             "observed_at": _iso(main_observed),
             "source": "local_transcript",
             "windows": [
                 window for limit_id in sorted(quotas) for window in quotas[limit_id][1]
             ],
-        },
-    }
+        }
     claude_quotas = _claude_quota_snapshot(now)
     if claude_quotas is not None:
         account_quotas["claude"] = claude_quotas

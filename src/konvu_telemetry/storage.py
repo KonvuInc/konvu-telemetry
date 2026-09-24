@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from functools import wraps
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -175,6 +176,31 @@ def tracking_queue_path() -> Path:
 
 def claude_quota_path() -> Path:
     return home_dir() / "claude-quotas.json"
+
+
+def codex_account_scope() -> tuple[str, float] | None:
+    """Return a private stable scope and auth-file timestamp for the active Codex account."""
+    root = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).expanduser()
+    auth_path = root / "auth.json"
+    try:
+        before = auth_path.stat()
+        raw = json.loads(auth_path.read_text(encoding="utf-8"))
+        after = auth_path.stat()
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if (before.st_dev, before.st_ino, before.st_mtime_ns, before.st_size) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_mtime_ns,
+        after.st_size,
+    ):
+        return None
+    tokens = raw.get("tokens") if isinstance(raw, dict) else None
+    account_id = tokens.get("account_id") if isinstance(tokens, dict) else None
+    if not isinstance(account_id, str) or not account_id:
+        return None
+    scope = hashlib.sha256(account_id.encode()).hexdigest()
+    return scope, after.st_mtime
 
 
 def session_path(provider: str, session_id: str) -> Path:
