@@ -80,6 +80,44 @@ class QuotaAttributionTests(unittest.TestCase):
             stored = next(iter(allocations.values()))["allocations"]
             self.assertEqual(stored, {"a": 5.0, "b": 1.0})
 
+    def test_each_window_gets_the_same_interval_and_a_reset_clears_its_ledger(self) -> None:
+        def snapshot_with_windows(
+            five_hour: float, weekly: float, rows: list[dict[str, object]]
+        ) -> dict[str, object]:
+            data = snapshot(five_hour, rows)
+            data["account_quotas"]["claude"]["windows"].append(
+                {
+                    "limit_id": "default",
+                    "period": "weekly",
+                    "used_percent": weekly,
+                    "resets_at": "2026-01-07T00:00:00+00:00",
+                }
+            )
+            return data
+
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ, {"KONVU_LIVE_USAGE_HOME": directory}
+        ):
+            apply_quota_attribution(
+                snapshot_with_windows(20, 30, [session("a", 100), session("b", 100)])
+            )
+            second = snapshot_with_windows(24, 34, [session("a", 160), session("b", 120)])
+            apply_quota_attribution(second)
+            self.assertEqual(
+                second["sessions"][0]["quota_attribution"]["windows"],
+                [
+                    {"period": "five_hour", "estimated_percent": 3.0},
+                    {"period": "weekly", "estimated_percent": 3.0},
+                ],
+            )
+            apply_quota_attribution(snapshot_with_windows(1, 36, [session("a", 200)]))
+            ledger = json.loads(quota_attribution_path().read_text())
+            windows = ledger["providers"]["claude"]["windows"]
+            five_hour_ledger = next(
+                value for key, value in windows.items() if ":five_hour:" in key
+            )
+            self.assertEqual(five_hour_ledger["allocations"], {})
+
 
 if __name__ == "__main__":
     unittest.main()
