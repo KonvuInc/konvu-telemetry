@@ -684,9 +684,12 @@ def uninstall_homebrew_package() -> bool:
         return False
     if executable.name != CONSOLE_COMMAND:
         return False
+    environment = dict(os.environ)
+    environment["HOMEBREW_NO_AUTOREMOVE"] = "1"
     subprocess.run(
         [str(brew), "uninstall", "--formula", CONSOLE_COMMAND],
         check=True,
+        env=environment,
     )
     return True
 

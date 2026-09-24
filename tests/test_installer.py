@@ -398,6 +398,10 @@ class InstallerTests(unittest.TestCase):
                 run.call_args_list[1].args[0],
                 [str(brew), "uninstall", "--formula", installer.CONSOLE_COMMAND],
             )
+            self.assertEqual(
+                run.call_args_list[1].kwargs["env"]["HOMEBREW_NO_AUTOREMOVE"],
+                "1",
+            )
 
     def test_homebrew_executable_rejects_a_writable_install(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
