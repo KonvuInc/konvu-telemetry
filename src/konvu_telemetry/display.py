@@ -240,18 +240,7 @@ def subagent_usage_text(session: dict[str, object]) -> str:
         if shared_percentage is not None
         else tokens(handed)
     )
-    if (
-        session.get("provider") == "codex"
-        and session.get("billing_mode") == "chatgpt_subscription"
-    ):
-        credits = session.get("subagent_credits")
-        spend_text = (
-            f"{float(credits):,.1f} credits equivalent"
-            if isinstance(credits, (int, float))
-            else "credit estimate unavailable"
-        )
-    else:
-        spend_text = f"{money(session.get('subagent_cost_usd'))} API-equivalent"
+    spend_text = f"{money(session.get('subagent_cost_usd'))} API-equivalent"
     return f"🤖 {live or 0} live / {total} total · {shared_text} · {spend_text}"
 
 
@@ -301,42 +290,21 @@ def usage_rows(
     context_percent: float | None = None,
 ) -> list[str]:
     """Build the usage summary every surface shows, unframed; each surface wraps it itself."""
-    if (
-        session.get("provider") == "codex"
-        and session.get("billing_mode") == "chatgpt_subscription"
-    ):
-        complete = session.get("credit_status") == "complete"
-        forecast = session.get("projected_next_10_tasks_credits")
-        forecast_text = (
-            f"{float(forecast):,.1f} credits for the next 10 prompts"
-            if complete and isinstance(forecast, (int, float))
-            else "forecast unavailable"
-        )
-        total = session.get("total_credits")
-        total_text = (
-            f"{float(total):,.1f} credits equivalent"
-            if complete and isinstance(total, (int, float))
-            else f"known minimum {float(total):,.1f} credits equivalent"
-            if session.get("credit_status") == "partial"
-            and isinstance(total, (int, float))
-            else "credit estimate unavailable"
-        )
-    else:
-        complete = session.get("cost_status") == "complete"
-        forecast = session.get("projected_next_10_tasks_usd")
-        forecast_text = (
-            f"{money(forecast)} API-equivalent for the next 10 prompts"
-            if complete and isinstance(forecast, (int, float))
-            else "forecast unavailable"
-        )
-        total_cost = session.get("total_cost_usd")
-        total_text = (
-            f"{money(total_cost)} API-equivalent"
-            if complete
-            else f"known minimum {money(total_cost)} API-equivalent"
-            if session.get("cost_status") == "partial"
-            else "cost unavailable"
-        )
+    complete = session.get("cost_status") == "complete"
+    forecast = session.get("projected_next_10_tasks_usd")
+    forecast_text = (
+        f"{money(forecast)} API-equivalent for the next 10 prompts"
+        if complete and isinstance(forecast, (int, float))
+        else "forecast unavailable"
+    )
+    total_cost = session.get("total_cost_usd")
+    total_text = (
+        f"{money(total_cost)} API-equivalent"
+        if complete
+        else f"known minimum {money(total_cost)} API-equivalent"
+        if session.get("cost_status") == "partial"
+        else "cost unavailable"
+    )
     context_text = (
         f"{context_percent:.0f}% context"
         if context_percent is not None

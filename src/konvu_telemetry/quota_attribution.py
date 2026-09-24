@@ -41,7 +41,7 @@ def _session_usage(session: dict[str, object]) -> SessionUsage | None:
     tokens = 0.0
     if isinstance(token_usage, dict):
         tokens = sum(_number(token_usage.get(key)) or 0.0 for key in token_usage)
-    credits = _number(session.get("total_credits"))
+    credits = _number(session.get("total_credit_equivalent"))
     return {"tokens": tokens, "credits": credits}
 
 
@@ -184,9 +184,6 @@ def apply_usage_modes(snapshot: dict[str, object]) -> None:
         if not isinstance(session, dict):
             continue
         provider = session.get("provider")
-        if provider == "codex" and session.get("billing_mode") == "api_key":
-            session["usage_mode"] = "api_billed"
-            continue
         account = quotas.get(provider) if isinstance(quotas, dict) else None
         windows = account.get("windows") if isinstance(account, dict) else None
         exhausted = isinstance(account, dict) and (

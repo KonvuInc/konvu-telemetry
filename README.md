@@ -40,7 +40,7 @@ brew uninstall konvu-telemetry
 ## What it does
 
 - Tracks Claude Code, Claude Code Desktop, Codex CLI, and Codex Desktop sessions from their local transcripts.
-- Estimates API-equivalent spend from bundled model pricing, plus subscription-credit equivalents and live quota state for ChatGPT-authenticated Codex sessions.
+- Estimates spend from bundled model pricing and records subscription-credit equivalents for supported Codex models.
 - Runs only on your Mac and serves the dashboard only at `127.0.0.1`.
 - Uses browser notifications only when you enable them in the local dashboard. An active session alerts once its next ten prompts are forecast above $4, then repeats at most every five minutes and only while the forecast has not come down.
 

@@ -15,7 +15,6 @@ from .config import (
     FORECAST_WINDOW,
     MAX_PARSED_RECORD_BYTES,
 )
-from .codex_billing import codex_account
 from .live import IncrementalLiveState
 from .storage import claude_quota_path
 
@@ -703,7 +702,6 @@ def enrich_snapshot(
             for limit_id, observation in row.quotas.items():
                 if limit_id not in quotas or observation[0] > quotas[limit_id][0]:
                     quotas[limit_id] = observation
-    account = codex_account()
     sessions = snapshot.get("sessions")
     for session in sessions if isinstance(sessions, list) else []:
         if not isinstance(session, dict):
@@ -718,8 +716,6 @@ def enrich_snapshot(
             continue
         if not isinstance(session_id, str):
             continue
-        if session_provider == "codex":
-            session.update(account)
         rows = grouped.get((session_provider, session_id), [])
         if not rows:
             continue
@@ -764,7 +760,6 @@ def enrich_snapshot(
         "windows": [
             window for limit_id in sorted(quotas) for window in quotas[limit_id][1]
         ],
-        **account,
     }
     account_quotas: dict[str, object] = {
         "codex": transcript_codex_quota,

@@ -508,6 +508,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(exported["reasoning_effort"], "high")
         self.assertEqual(exported["speed"], "standard")
         self.assertTrue(exported["usage_complete"])
+        self.assertIsNone(exported["estimated_credit_equivalent"])
 
     def test_missing_billable_usage_is_not_reported_as_a_complete_cost(self) -> None:
         event = assistant_event(
@@ -1860,28 +1861,6 @@ class ServiceTests(unittest.TestCase):
             ],
         )
 
-    def test_chatgpt_codex_usage_rows_show_credit_equivalents(self) -> None:
-        session = {
-            **self.shared_row_session(),
-            "provider": "codex",
-            "billing_mode": "chatgpt_subscription",
-            "usage_mode": "exhausted",
-            "credit_status": "complete",
-            "total_credits": 12.25,
-            "projected_next_10_tasks_credits": 5.5,
-            "subagent_credits": 1.25,
-        }
-        with health_patch({"status": "stale"}):
-            rows = usage_rows(session, "25% weekly limit")
-        self.assertEqual(
-            rows[:3],
-            [
-                "💸 12.2 credits equivalent total · 5.5 credits for the next 10 prompts",
-                "🤖 1 live / 2 total · 90% context shared · 1.2 credits equivalent",
-                "🧠 50% context · 25% weekly limit",
-            ],
-        )
-
     def test_included_usage_rows_hide_monetary_estimates(self) -> None:
         session = {
             **self.shared_row_session(),
@@ -3176,36 +3155,6 @@ class ServiceTests(unittest.TestCase):
                     "resets_at": None,
                 },
             ],
-        )
-
-    def test_codex_billing_mode_is_attached_without_fetching_usage(self) -> None:
-        account = {
-            "billing_mode": "chatgpt_subscription",
-            "plan_type": "plus",
-            "plan_label": "Plus",
-        }
-        snapshot = {
-            "sessions": [
-                {
-                    "id": "older",
-                    "provider": "codex",
-                    "last_activity_at": "2026-01-01T00:00:00+00:00",
-                },
-                {
-                    "id": "latest",
-                    "provider": "codex",
-                    "last_activity_at": "2026-01-02T00:00:00+00:00",
-                },
-            ]
-        }
-        with (
-            patch(
-                "konvu_telemetry.fleet_telemetry.codex_account", return_value=account
-            ),
-        ):
-            enrich_snapshot(snapshot, [], [], time.time())
-        self.assertEqual(
-            snapshot["sessions"][0]["billing_mode"], "chatgpt_subscription"
         )
 
 

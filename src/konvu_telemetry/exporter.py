@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from .codex_billing import CODEX_CREDIT_SOURCE, codex_credits
+from .codex_credit_rates import (
+    CODEX_CREDIT_EQUIVALENT_SOURCE,
+    CODEX_CREDIT_RATE_CARD,
+    codex_credit_equivalent,
+)
 from .models import UsageEvent
 from .parsers import codex_events_in_file, events_in_file
 from .pricing import event_cost, load_pricing
@@ -38,7 +42,7 @@ def normalized_event(
         },
         "context_window_tokens": event.context_window_tokens,
         "estimated_cost_usd": event_cost(event, prices),
-        "estimated_credits": codex_credits(event),
+        "estimated_credit_equivalent": codex_credit_equivalent(event),
         "tool_calls": event.tool_calls,
         "is_subagent": event.is_subagent,
         "agent_id": event.agent_id,
@@ -77,7 +81,8 @@ def write_normalized_events() -> None:
         destination,
         {
             "schema_version": 3,
-            "codex_credit_source": CODEX_CREDIT_SOURCE,
+            "codex_credit_equivalent_source": CODEX_CREDIT_EQUIVALENT_SOURCE,
+            "codex_credit_rate_card": CODEX_CREDIT_RATE_CARD,
             "events": events,
         },
     )
