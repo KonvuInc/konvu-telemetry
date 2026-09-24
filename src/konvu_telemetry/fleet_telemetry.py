@@ -163,7 +163,19 @@ def _claude_quota_snapshot(now: float) -> dict[str, object] | None:
     raw_windows = raw.get("windows")
     if not isinstance(raw_windows, list):
         return None
-    windows = [window for window in raw_windows if isinstance(window, dict)]
+    windows = []
+    for raw_window in raw_windows:
+        if not isinstance(raw_window, dict):
+            continue
+        minutes = _number(raw_window.get("window_minutes"))
+        period = (
+            "five_hour"
+            if minutes == 300
+            else "weekly"
+            if minutes == 7 * 24 * 60
+            else raw_window.get("period")
+        )
+        windows.append({**raw_window, "period": period})
     if not windows:
         return None
     return {

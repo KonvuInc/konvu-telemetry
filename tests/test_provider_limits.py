@@ -19,7 +19,8 @@ from konvu_telemetry.provider_limits import (
     fetch_claude_limits,
     read_claude_access_token,
 )
-from konvu_telemetry.fleet_telemetry import enrich_snapshot
+from konvu_telemetry.fleet_telemetry import _claude_quota_snapshot, enrich_snapshot
+from konvu_telemetry.storage import claude_quota_path
 
 
 class FakeResponse:
@@ -240,6 +241,27 @@ class ProviderLimitsTests(unittest.TestCase):
         ):
             enrich_snapshot(snapshot, [], [], 100.0, {"claude": None, "codex": None})
         self.assertEqual(snapshot["account_quotas"]["claude"], local)
+
+    def test_claude_statusline_windows_get_stable_period_labels(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ, {"KONVU_LIVE_USAGE_HOME": directory}
+        ):
+            claude_quota_path().write_text(
+                json.dumps(
+                    {
+                        "observed_at": "1970-01-01T00:01:40+00:00",
+                        "windows": [
+                            {"window_minutes": 300, "used_percent": 2},
+                            {"window_minutes": 10080, "used_percent": 51},
+                        ],
+                    }
+                )
+            )
+            result = _claude_quota_snapshot(100.0)
+        self.assertEqual(
+            [window["period"] for window in result["windows"]],
+            ["five_hour", "weekly"],
+        )
 
 
 if __name__ == "__main__":

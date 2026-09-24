@@ -3157,6 +3157,7 @@ class ServiceTests(unittest.TestCase):
             [
                 {
                     "limit_id": "default",
+                    "period": "five_hour",
                     "session_id": "session",
                     "window_minutes": 300,
                     "used_percent": 80.0,
@@ -3165,6 +3166,7 @@ class ServiceTests(unittest.TestCase):
                 },
                 {
                     "limit_id": "default",
+                    "period": "weekly",
                     "session_id": "session",
                     "window_minutes": 10080,
                     "used_percent": 90,
