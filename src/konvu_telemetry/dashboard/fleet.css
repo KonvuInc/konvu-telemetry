@@ -161,11 +161,10 @@ p {
 .outside-plan-copy > span { color: var(--orange); font-weight: 500; }
 .outside-plan-copy > b, .outside-plan-copy > strong { color: var(--ink); font-weight: 500; }
 .outside-plan-copy > em { color: var(--mist); font-style: normal; }
-}
 main {
   max-width: 1460px;
   margin: auto;
-  padding: 30px 32px;
+  padding: 34px clamp(36px, 4vw, 64px) 52px;
 }
 .fleet-toolbar {
   display: flex;
@@ -304,7 +303,7 @@ select {
 }
 .session-ledger th:first-child {
   width: 35%;
-  padding-left: 0;
+  padding-left: 14px;
 }
 .session-ledger th:nth-child(2) {
   width: 32%;
@@ -322,7 +321,11 @@ select {
   vertical-align: middle;
 }
 .session-ledger td:first-child {
-  padding-left: 0;
+  padding-left: 14px;
+}
+.session-ledger th:last-child,
+.session-ledger td:last-child {
+  padding-right: 14px;
 }
 .session-ledger tbody tr {
   cursor: pointer;
@@ -681,7 +684,7 @@ select {
     display: none;
   }
   main {
-    padding: 22px 16px;
+    padding: 24px 20px 40px;
   }
   .fleet-toolbar {
     display: block;
