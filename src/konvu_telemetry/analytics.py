@@ -309,6 +309,8 @@ def _provider_notification_mode(
         "spend_control_reached",
         "has_credits",
         "credits_unlimited",
+        "spend_limit",
+        "reached_limit_id",
     ):
         if key in quotas:
             record[key] = quotas[key]
@@ -331,6 +333,18 @@ def _provider_notification_mode(
         record["mode"] = "quota"
         record["confirmed_mode"] = "quota"
         return "quota", record
+
+    spend_limit = quotas.get("spend_limit")
+    spend_used = (
+        quota_percentage(spend_limit.get("used_percent"))
+        if isinstance(spend_limit, dict)
+        else None
+    )
+    if provider == "claude" and spend_used is not None and spend_used >= 100:
+        record["mode"] = "money"
+        record["confirmed_mode"] = "money"
+        record["reason"] = "spend_limit_reached"
+        return "money", record
 
     if provider == "claude" and valid:
         mode = (

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -134,14 +135,13 @@ def _quota_windows(raw: dict[str, object], observed: float) -> list[dict[str, ob
         used = _number(window.get("used_percent"))
         minutes = _number(window.get("window_minutes"))
         reset = _number(window.get("resets_at"))
-        if used is None or minutes is None or minutes <= 0:
+        if used is None or used > 100 or minutes is None or minutes <= 0:
             continue
-        used_percent = min(100.0, used)
         parsed: dict[str, object] = {
             "limit_id": limit_id if isinstance(limit_id, str) else "default",
             "window_minutes": minutes,
-            "used_percent": used_percent,
-            "remaining_percent": max(0.0, 100.0 - used_percent),
+            "used_percent": used,
+            "remaining_percent": 100.0 - used,
             "resets_at": _iso(reset),
             "observed_at": _iso(observed),
         }
@@ -156,10 +156,13 @@ def _quota_windows(raw: dict[str, object], observed: float) -> list[dict[str, ob
 def _quota_status(raw: dict[str, object]) -> dict[str, object]:
     """Preserve provider state needed to distinguish included usage from paid usage."""
     status: dict[str, object] = {}
-    for key in ("plan_type", "rate_limit_reached_type", "account_id"):
+    for key in ("plan_type", "rate_limit_reached_type"):
         value = raw.get(key)
         if isinstance(value, str):
             status[key] = value
+    account_id = raw.get("account_id")
+    if isinstance(account_id, str) and account_id:
+        status["account_scope"] = hashlib.sha256(account_id.encode()).hexdigest()
     spend_control_reached = raw.get("spend_control_reached")
     if isinstance(spend_control_reached, bool):
         status["spend_control_reached"] = spend_control_reached
@@ -179,33 +182,66 @@ def _quota_status(raw: dict[str, object]) -> dict[str, object]:
 
 
 def _claude_quota_snapshot(now: float) -> dict[str, object] | None:
-    """Read recent provider-reported Claude quota data from the status-line hook."""
+    """Read Claude quota values whose provider state demonstrably changed recently."""
     try:
         raw = json.loads(claude_quota_path().read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None
     if not isinstance(raw, dict):
         return None
-    observed_at = raw.get("observed_at")
-    observed = _timestamp(observed_at)
-    if (
-        observed is None
-        or not -ACTIVITY_CLOCK_SKEW_SECONDS
-        <= now - observed
-        <= ACTIVITY_FRESHNESS_SECONDS
-    ):
-        return None
+    fallback_observed_at = raw.get("observed_at")
     raw_windows = raw.get("windows")
     if not isinstance(raw_windows, list):
         return None
-    windows = [window for window in raw_windows if isinstance(window, dict)]
-    if not windows:
+    windows = []
+    for window in raw_windows:
+        if not isinstance(window, dict):
+            continue
+        observed_at = window.get("observed_at", fallback_observed_at)
+        observed = _timestamp(observed_at)
+        used = _number(window.get("used_percent"))
+        if (
+            observed is not None
+            and used is not None
+            and used <= 100
+            and -ACTIVITY_CLOCK_SKEW_SECONDS
+            <= now - observed
+            <= ACTIVITY_FRESHNESS_SECONDS
+        ):
+            windows.append(window)
+    raw_spend = raw.get("spend_limit")
+    spend_limit = None
+    if isinstance(raw_spend, dict):
+        observed_at = raw_spend.get("observed_at", fallback_observed_at)
+        observed = _timestamp(observed_at)
+        used = _number(raw_spend.get("used_percent"))
+        if (
+            observed is not None
+            and used is not None
+            and used <= 100
+            and -ACTIVITY_CLOCK_SKEW_SECONDS
+            <= now - observed
+            <= ACTIVITY_FRESHNESS_SECONDS
+        ):
+            spend_limit = raw_spend
+    if not windows and spend_limit is None:
         return None
-    return {
-        "observed_at": observed_at,
+    observations = [
+        window.get("observed_at", fallback_observed_at) for window in windows
+    ]
+    if spend_limit is not None:
+        observations.append(spend_limit.get("observed_at", fallback_observed_at))
+    result: dict[str, object] = {
+        "observed_at": max(
+            (value for value in observations if isinstance(value, str)),
+            default=fallback_observed_at,
+        ),
         "source": "claude_statusline",
         "windows": windows,
     }
+    if spend_limit is not None:
+        result["spend_limit"] = spend_limit
+    return result
 
 
 def _read_telemetry(
@@ -778,34 +814,30 @@ def enrich_snapshot(
                     start = _timestamp(iteration.get("started_at"))
                     if start in task_tools:
                         iteration["tool_calls"] = task_tools[start]
-    account_scope = codex_account_scope()
+    account_scope = codex_account_scope(now)
     if (
         account_scope is not None
         and account_scope[1] - now > ACTIVITY_CLOCK_SKEW_SECONDS
     ):
         account_scope = None
-    eligible_quota_rows = [
-        row
-        for row in quota_rows
-        if account_scope is None
-        or max(observation[0] for observation in row.quotas.values())
-        >= account_scope[1]
-    ]
     quotas: dict[str, tuple[float, list[dict[str, object]], dict[str, object]]] = {}
     if account_scope is not None:
-        for row in eligible_quota_rows:
+        active_scope, account_epoch = account_scope
+        for row in quota_rows:
             for limit_id, observation in row.quotas.items():
-                if observation[0] < account_scope[1]:
+                observed_scope = observation[2].get("account_scope")
+                explicitly_matches = observed_scope == active_scope
+                started_after_login = (
+                    observed_scope is None
+                    and row.first_timestamp is not None
+                    and row.first_timestamp >= account_epoch
+                )
+                if observation[0] < account_epoch or not (
+                    explicitly_matches or started_after_login
+                ):
                     continue
                 if limit_id not in quotas or observation[0] > quotas[limit_id][0]:
                     quotas[limit_id] = observation
-    else:
-        quota_row = max(
-            eligible_quota_rows,
-            key=lambda row: max(observation[0] for observation in row.quotas.values()),
-            default=None,
-        )
-        quotas = dict(quota_row.quotas) if quota_row is not None else {}
     quotas = {
         limit_id: observation
         for limit_id, observation in quotas.items()
@@ -831,9 +863,31 @@ def enrich_snapshot(
     observed = max((observation[0] for observation in quotas.values()), default=None)
     main_quota = quotas.get(main_limit_key) if main_limit_key is not None else None
     main_status = main_quota[2] if main_quota is not None else {}
+    denied_limit = max(
+        (
+            (limit_id, observation)
+            for limit_id, observation in quotas.items()
+            if observation[2].get("ordinary_usage_allowed") is False
+            or isinstance(observation[2].get("rate_limit_reached_type"), str)
+            and bool(observation[2]["rate_limit_reached_type"])
+        ),
+        key=lambda item: item[1][0],
+        default=None,
+    )
+    if denied_limit is not None:
+        main_status = {
+            **main_status,
+            **denied_limit[1][2],
+            "reached_limit_id": denied_limit[0],
+        }
+    raw_account_id = main_status.pop("account_id", None)
+    if isinstance(raw_account_id, str) and raw_account_id:
+        main_status["account_scope"] = hashlib.sha256(
+            raw_account_id.encode()
+        ).hexdigest()
     if account_scope is not None:
         main_status = {**main_status, "account_scope": account_scope[0]}
-    main_observed = main_quota[0] if main_quota is not None else observed
+    main_observed = observed
     account_quotas: dict[str, object] = {}
     if quotas:
         account_quotas["codex"] = {

@@ -27,8 +27,8 @@ from .storage import (
     claude_quota_path,
     session_path,
     snapshot_path,
+    update_private_json,
     valid_session_id,
-    write_private_json,
 )
 
 # Desktop clients hide hook system messages, so the box has to ride in as model context instead.
@@ -67,8 +67,38 @@ def _quota_reset_at(value: object) -> str | None:
         return None
 
 
+def _quota_percentage(value: object) -> float | None:
+    """Return provider percentage points only when they are valid."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    percentage = float(value)
+    return percentage if math.isfinite(percentage) and 0 <= percentage <= 100 else None
+
+
+def _quota_observation_is_newer(
+    candidate: dict[str, object], previous: dict[str, object]
+) -> bool:
+    """Order Claude snapshots using reset epochs and monotonic usage evidence."""
+    candidate_reset = _quota_reset_at(candidate.get("resets_at"))
+    previous_reset = _quota_reset_at(previous.get("resets_at"))
+    if candidate_reset is not None and previous_reset is not None:
+        if candidate_reset != previous_reset:
+            return candidate_reset > previous_reset
+    elif candidate_reset is not None:
+        return True
+    elif previous_reset is not None:
+        return False
+    candidate_used = _quota_percentage(candidate.get("used_percent"))
+    previous_used = _quota_percentage(previous.get("used_percent"))
+    return (
+        candidate_used is not None
+        and previous_used is not None
+        and candidate_used > previous_used
+    )
+
+
 def record_claude_quotas(payload: dict[str, object], session_id: str) -> None:
-    """Persist fresh Claude quota windows reported to the status-line hook."""
+    """Persist Claude quota changes without refreshing replayed status-line data."""
     if not valid_session_id(session_id):
         return
     rate_limits = payload.get("rate_limits")
@@ -87,12 +117,9 @@ def record_claude_quotas(payload: dict[str, object], session_id: str) -> None:
             ),
             None,
         )
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        used_percent = _quota_percentage(value)
+        if used_percent is None:
             continue
-        used_percent = float(value)
-        if not math.isfinite(used_percent) or used_percent < 0:
-            continue
-        used_percent = min(100.0, used_percent)
         resets_at = next(
             (
                 normalized
@@ -104,22 +131,95 @@ def record_claude_quotas(payload: dict[str, object], session_id: str) -> None:
         windows.append(
             {
                 "limit_id": "default",
-                "session_id": session_id,
                 "window_minutes": minutes,
                 "used_percent": used_percent,
                 "remaining_percent": 100 - used_percent,
                 "resets_at": resets_at,
             }
         )
-    if windows:
-        write_private_json(
-            claude_quota_path(),
-            {
-                "observed_at": datetime.now(timezone.utc).isoformat(),
-                "source": "claude_statusline",
-                "windows": windows,
-            },
+    spend_limit = rate_limits.get("spend_limit")
+    spend: dict[str, object] | None = None
+    if isinstance(spend_limit, dict):
+        value = next(
+            (
+                spend_limit.get(key)
+                for key in ("utilization", "used_percentage", "used_pct")
+                if isinstance(spend_limit.get(key), (int, float))
+            ),
+            None,
         )
+        used_percent = _quota_percentage(value)
+        if used_percent is not None:
+            spend = {
+                "used_percent": used_percent,
+                "remaining_percent": 100 - used_percent,
+                "resets_at": next(
+                    (
+                        normalized
+                        for key in ("resets_at", "reset_at")
+                        if (normalized := _quota_reset_at(spend_limit.get(key)))
+                        is not None
+                    ),
+                    None,
+                ),
+            }
+    if not windows and spend is None:
+        return
+    observed_at = datetime.now(timezone.utc).isoformat()
+
+    def merge(current: object) -> object:
+        existing = current if isinstance(current, dict) else {}
+        raw_existing_windows = existing.get("windows")
+        existing_windows: dict[float, dict[str, object]] = {}
+        for window in (
+            raw_existing_windows if isinstance(raw_existing_windows, list) else []
+        ):
+            if not isinstance(window, dict):
+                continue
+            minutes = window.get("window_minutes")
+            if isinstance(minutes, bool) or not isinstance(minutes, (int, float)):
+                continue
+            existing_windows[float(minutes)] = dict(window)
+        fallback_observed_at = existing.get("observed_at")
+        for window in existing_windows.values():
+            window.setdefault("observed_at", fallback_observed_at)
+        for window in windows:
+            minutes = window.get("window_minutes")
+            if isinstance(minutes, bool) or not isinstance(minutes, (int, float)):
+                continue
+            window_key = float(minutes)
+            previous = existing_windows.get(window_key)
+            if previous is None or _quota_observation_is_newer(window, previous):
+                existing_windows[window_key] = {
+                    **window,
+                    "observed_at": observed_at,
+                }
+        previous_spend = existing.get("spend_limit")
+        merged_spend = (
+            dict(previous_spend) if isinstance(previous_spend, dict) else None
+        )
+        if merged_spend is not None:
+            merged_spend.setdefault("observed_at", fallback_observed_at)
+        if spend is not None and (
+            merged_spend is None or _quota_observation_is_newer(spend, merged_spend)
+        ):
+            merged_spend = {**spend, "observed_at": observed_at}
+        observations = [item.get("observed_at") for item in existing_windows.values()]
+        if merged_spend is not None:
+            observations.append(merged_spend.get("observed_at"))
+        result: dict[str, object] = {
+            "observed_at": max(
+                (value for value in observations if isinstance(value, str)),
+                default=observed_at,
+            ),
+            "source": "claude_statusline",
+            "windows": [existing_windows[key] for key in sorted(existing_windows)],
+        }
+        if merged_spend is not None:
+            result["spend_limit"] = merged_spend
+        return result
+
+    update_private_json(claude_quota_path(), merge)
 
 
 def money(value: object) -> str:
@@ -204,14 +304,8 @@ def quota_usage_text(payload: dict[str, object]) -> str:
             ),
             None,
         )
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return None
-        percentage = float(value)
-        return (
-            round(min(100, percentage))
-            if math.isfinite(percentage) and percentage >= 0
-            else None
-        )
+        percentage = _quota_percentage(value)
+        return round(percentage) if percentage is not None else None
 
     five_hour = percentage("five_hour")
     weekly = percentage("seven_day")
@@ -247,6 +341,7 @@ def recorded_quota_usage_text(provider: str) -> str:
             or not isinstance(used, (int, float))
             or not math.isfinite(float(minutes))
             or not math.isfinite(float(used))
+            or not 0 <= float(used) <= 100
         ):
             continue
         label = (
@@ -256,7 +351,7 @@ def recorded_quota_usage_text(provider: str) -> str:
             if abs(minutes - 10_080) <= 60
             else f"{round(minutes / 60)}-hour"
         )
-        parts.append(f"{round(min(100, max(0, used)))}% {label} limit")
+        parts.append(f"{round(used)}% {label} limit")
     return " · ".join(parts)
 
 

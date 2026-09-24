@@ -22,6 +22,10 @@ Personal baselines cumulatively sum the median cost and token traffic at each pr
 
 Hot-session alerts are driven by the next-ten forecast alone: a session alerts when it was active within the last twenty minutes, its cost is fully priced, and that forecast exceeds $4. Medians drive no alert; both the general provider median and the model-and-effort median remain dashboard comparisons only.
 
+Quota notifications use provider-native semantics rather than pretending the two providers expose identical data. Codex supplies percentage windows plus explicit account, workspace, credit, spend-control, and model-limit denial states. Claude's status line supplies account windows and, for gateway users, a spend-limit window; it does not supply Codex-style denial states or a provider measurement timestamp. Replayed Claude values therefore refresh only when usage increases or the reset epoch advances, and malformed percentages outside 0–100 are rejected.
+
+Codex rollout events do not normally carry authoritative account identity. Konvu hashes the active local Codex account ID and accepts unidentified rollout quotas only from sessions created after that account's local login epoch. After an account switch, quota notifications remain unavailable until a new session records data; this fails closed instead of assigning an older session to the new account.
+
 Run `konvu-telemetry backtest-next-ten` against local Claude history to inspect rolling forecast error. Run `python3 scripts/benchmark.py` for a synthetic performance receipt that never reads real transcripts.
 
 ## Known limits
@@ -30,3 +34,4 @@ Run `konvu-telemetry backtest-next-ten` against local Claude history to inspect 
 - API-equivalent prices can differ from subscriptions, credits, negotiated rates, taxes, and provider invoices.
 - Per-prompt Codex subagent attribution is timestamp-based when no spawn timestamp is recorded.
 - Forecasts describe recent local behavior; they are not guarantees and are hidden when evidence is insufficient.
+- A provider can omit quota fields or measurement identity. Konvu reports that state as unavailable instead of inferring a reset, recovery, or account match.

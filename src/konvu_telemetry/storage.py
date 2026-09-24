@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import fcntl
 from functools import wraps
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 from threading import Lock
+import time
 from typing import Callable, Iterator, TypeVar, cast
 
 from .config import ALLOWED_PROVIDERS, FILE_CACHE_LIMIT, SESSION_ID_PATTERN
@@ -106,6 +109,31 @@ def write_private_json_if_changed(path: Path, value: object) -> bool:
     return True
 
 
+def update_private_json(path: Path, update: Callable[[object], object]) -> object:
+    """Atomically read, update, and replace private JSON state."""
+    ensure_private_directory(path.parent)
+    lock_path = path.with_name(f"{path.name}.lock")
+    with lock_path.open("a") as lock:
+        try:
+            lock_path.chmod(0o600)
+        except OSError:
+            pass
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            with _WRITE_LOCK:
+                try:
+                    current = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, UnicodeError, json.JSONDecodeError):
+                    current = None
+                value = update(current)
+                _write_private_bytes(
+                    path, json.dumps(value, separators=(",", ":")).encode()
+                )
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+    return value
+
+
 def _write_private_bytes(path: Path, payload: bytes) -> None:
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
@@ -178,8 +206,12 @@ def claude_quota_path() -> Path:
     return home_dir() / "claude-quotas.json"
 
 
-def codex_account_scope() -> tuple[str, float] | None:
-    """Return a private stable scope and auth-file timestamp for the active Codex account."""
+def codex_account_state_path() -> Path:
+    return home_dir() / "codex-account-state.json"
+
+
+def codex_account_scope(now: float | None = None) -> tuple[str, float] | None:
+    """Return the active Codex account scope and the start of its local login epoch."""
     root = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).expanduser()
     auth_path = root / "auth.json"
     try:
@@ -200,7 +232,34 @@ def codex_account_scope() -> tuple[str, float] | None:
     if not isinstance(account_id, str) or not account_id:
         return None
     scope = hashlib.sha256(account_id.encode()).hexdigest()
-    return scope, after.st_mtime
+    observed_at = time.time() if now is None else now
+    state_path = codex_account_state_path()
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        state = {}
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(state, dict):
+        return None
+    if isinstance(state, dict) and state.get("account_scope") == scope:
+        changed_at = state.get("changed_at")
+        if (
+            not isinstance(changed_at, bool)
+            and isinstance(changed_at, (int, float))
+            and math.isfinite(float(changed_at))
+            and float(changed_at) >= 0
+        ):
+            return scope, float(changed_at)
+    changed_at = after.st_mtime if not state else observed_at
+    try:
+        write_private_json(
+            state_path,
+            {"account_scope": scope, "changed_at": changed_at},
+        )
+    except OSError:
+        return None
+    return scope, changed_at
 
 
 def session_path(provider: str, session_id: str) -> Path:

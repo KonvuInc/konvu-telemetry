@@ -570,6 +570,26 @@ class ServiceTests(unittest.TestCase):
                 )
                 self.assertEqual(windows[0]["used_percent"], provider_value)
 
+    def test_provider_percentages_above_one_hundred_are_rejected(self) -> None:
+        self.assertEqual(
+            _quota_windows(
+                {
+                    "primary": {
+                        "used_percent": 101.0,
+                        "window_minutes": 300,
+                    }
+                },
+                0,
+            ),
+            [],
+        )
+        self.assertEqual(
+            quota_usage_text(
+                {"rate_limits": {"five_hour": {"used_percentage": 101.0}}}
+            ),
+            "",
+        )
+
     def test_real_codex_rollout_payload_preserves_provider_units_and_states(
         self,
     ) -> None:
@@ -639,7 +659,9 @@ class ServiceTests(unittest.TestCase):
                 }
             ),
             {
-                "account_id": "account-123",
+                "account_scope": (
+                    "725a2fd11a2b525124e641d23463f9e4e6fab9019b83b16b34367d2b3c83e373"
+                ),
                 "ordinary_usage_allowed": False,
                 "plan_type": "team",
                 "rate_limit_reached_type": "rate_limit_reached",
@@ -681,9 +703,17 @@ class ServiceTests(unittest.TestCase):
             }
         )
         snapshot: dict[str, object] = {"sessions": []}
-        with patch(
-            "konvu_telemetry.fleet_telemetry.parse_telemetry",
-            side_effect=(stale, fresh),
+        stale.first_timestamp = 0.0
+        fresh.first_timestamp = 0.0
+        with (
+            patch(
+                "konvu_telemetry.fleet_telemetry.parse_telemetry",
+                side_effect=(stale, fresh),
+            ),
+            patch(
+                "konvu_telemetry.fleet_telemetry.codex_account_scope",
+                return_value=("private-scope", 0.0),
+            ),
         ):
             enrich_snapshot(snapshot, [], [Path("stale"), Path("fresh")], 1_000.0)
         quotas = snapshot["account_quotas"]
@@ -713,8 +743,15 @@ class ServiceTests(unittest.TestCase):
             }
         )
         snapshot: dict[str, object] = {"sessions": []}
-        with patch(
-            "konvu_telemetry.fleet_telemetry.parse_telemetry", return_value=stale
+        stale.first_timestamp = 0.0
+        with (
+            patch(
+                "konvu_telemetry.fleet_telemetry.parse_telemetry", return_value=stale
+            ),
+            patch(
+                "konvu_telemetry.fleet_telemetry.codex_account_scope",
+                return_value=("private-scope", 0.0),
+            ),
         ):
             enrich_snapshot(snapshot, [], [Path("stale")], 401.0)
         self.assertNotIn("codex", snapshot["account_quotas"])
@@ -751,14 +788,25 @@ class ServiceTests(unittest.TestCase):
             }
         )
         snapshot: dict[str, object] = {"sessions": []}
-        with patch(
-            "konvu_telemetry.fleet_telemetry.parse_telemetry",
-            side_effect=(older, newest),
+        older.first_timestamp = 90.0
+        newest.first_timestamp = 90.0
+        with (
+            patch(
+                "konvu_telemetry.fleet_telemetry.parse_telemetry",
+                side_effect=(older, newest),
+            ),
+            patch(
+                "konvu_telemetry.fleet_telemetry.codex_account_scope",
+                return_value=("private-scope", 90.0),
+            ),
         ):
             enrich_snapshot(snapshot, [], [Path("older"), Path("newest")], 100.0)
         codex = snapshot["account_quotas"]["codex"]
-        self.assertEqual(codex["account_id"], "account-123")
-        self.assertEqual([window["limit_id"] for window in codex["windows"]], ["codex"])
+        self.assertEqual(codex["account_scope"], "private-scope")
+        self.assertEqual(
+            [window["limit_id"] for window in codex["windows"]],
+            ["codex", "codex_other"],
+        )
 
     def test_codex_account_scope_keeps_model_limits_without_crossing_login(
         self,
@@ -796,6 +844,9 @@ class ServiceTests(unittest.TestCase):
             }
         )
         snapshot: dict[str, object] = {"sessions": []}
+        before_login.first_timestamp = 90.0
+        main.first_timestamp = 101.0
+        model.first_timestamp = 102.0
         with (
             patch(
                 "konvu_telemetry.fleet_telemetry.parse_telemetry",
@@ -823,12 +874,114 @@ class ServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             auth_path = Path(directory) / "auth.json"
             auth_path.write_text(json.dumps({"tokens": {"account_id": "account-123"}}))
-            with patch.dict(os.environ, {"CODEX_HOME": directory}):
+            with patch.dict(
+                os.environ,
+                {"CODEX_HOME": directory, "KONVU_LIVE_USAGE_HOME": directory},
+            ):
                 scope = codex_account_scope()
         self.assertIsNotNone(scope)
         assert scope is not None
         self.assertEqual(len(scope[0]), 64)
         self.assertNotIn("account-123", scope[0])
+
+    def test_codex_account_epoch_changes_only_when_the_account_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            auth_path = Path(directory) / "auth.json"
+            auth_path.write_text(json.dumps({"tokens": {"account_id": "first"}}))
+            os.utime(auth_path, (100.0, 100.0))
+            with patch.dict(
+                os.environ,
+                {"CODEX_HOME": directory, "KONVU_LIVE_USAGE_HOME": directory},
+            ):
+                first = codex_account_scope(200.0)
+                os.utime(auth_path, (150.0, 150.0))
+                refreshed = codex_account_scope(250.0)
+                auth_path.write_text(json.dumps({"tokens": {"account_id": "second"}}))
+                switched = codex_account_scope(300.0)
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(refreshed)
+        self.assertIsNotNone(switched)
+        assert first is not None and refreshed is not None and switched is not None
+        self.assertEqual(first[1], 100.0)
+        self.assertEqual(refreshed, first)
+        self.assertNotEqual(switched[0], first[0])
+        self.assertEqual(switched[1], 300.0)
+
+    def test_corrupt_codex_account_state_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            auth_path = Path(directory) / "auth.json"
+            auth_path.write_text(json.dumps({"tokens": {"account_id": "account"}}))
+            (Path(directory) / "codex-account-state.json").write_text("not json")
+            with patch.dict(
+                os.environ,
+                {"CODEX_HOME": directory, "KONVU_LIVE_USAGE_HOME": directory},
+            ):
+                self.assertIsNone(codex_account_scope(200.0))
+
+    def test_codex_account_change_requires_a_new_session(self) -> None:
+        old_session = TranscriptTelemetry(
+            first_timestamp=90.0,
+            quotas={
+                "codex": (
+                    110.0,
+                    [{"limit_id": "codex", "window_minutes": 300}],
+                    {},
+                )
+            },
+        )
+        snapshot: dict[str, object] = {"sessions": []}
+        with (
+            patch(
+                "konvu_telemetry.fleet_telemetry.parse_telemetry",
+                return_value=old_session,
+            ),
+            patch(
+                "konvu_telemetry.fleet_telemetry.codex_account_scope",
+                return_value=("new-account", 100.0),
+            ),
+        ):
+            enrich_snapshot(snapshot, [], [Path("old-session")], 110.0)
+        self.assertNotIn("codex", snapshot["account_quotas"])
+
+    def test_model_limit_rejection_survives_account_aggregation(self) -> None:
+        main = TranscriptTelemetry(
+            first_timestamp=90.0,
+            quotas={
+                "codex": (
+                    100.0,
+                    [
+                        {
+                            "limit_id": "codex",
+                            "window_minutes": 300,
+                            "used_percent": 20.0,
+                        }
+                    ],
+                    {},
+                ),
+                "premium": (
+                    101.0,
+                    [],
+                    {
+                        "rate_limit_reached_type": "rate_limit_reached",
+                    },
+                ),
+            },
+        )
+        snapshot: dict[str, object] = {"sessions": []}
+        with (
+            patch(
+                "konvu_telemetry.fleet_telemetry.parse_telemetry",
+                return_value=main,
+            ),
+            patch(
+                "konvu_telemetry.fleet_telemetry.codex_account_scope",
+                return_value=("private-scope", 90.0),
+            ),
+        ):
+            enrich_snapshot(snapshot, [], [Path("session")], 101.0)
+        codex = snapshot["account_quotas"]["codex"]
+        self.assertEqual(codex["rate_limit_reached_type"], "rate_limit_reached")
+        self.assertEqual(codex["reached_limit_id"], "premium")
 
     def test_claude_sdk_client_is_explicitly_attributed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -3974,9 +4127,15 @@ class ServiceTests(unittest.TestCase):
                     "session",
                 )
             snapshot = {"sessions": [{"id": "session", "provider": "claude"}]}
-            with patch(
-                "konvu_telemetry.fleet_telemetry.claude_quota_path",
-                return_value=quota_path,
+            with (
+                patch(
+                    "konvu_telemetry.fleet_telemetry.claude_quota_path",
+                    return_value=quota_path,
+                ),
+                patch(
+                    "konvu_telemetry.fleet_telemetry.codex_account_scope",
+                    return_value=None,
+                ),
             ):
                 enrich_snapshot(snapshot, [], [], time.time())
         quotas = snapshot["account_quotas"]["claude"]
@@ -3986,22 +4145,83 @@ class ServiceTests(unittest.TestCase):
             [
                 {
                     "limit_id": "default",
-                    "session_id": "session",
                     "window_minutes": 300,
                     "used_percent": 1.0,
                     "remaining_percent": 99.0,
                     "resets_at": "2025-01-01T00:00:00+00:00",
+                    "observed_at": quotas["windows"][0]["observed_at"],
                 },
                 {
                     "limit_id": "default",
-                    "session_id": "session",
                     "window_minutes": 10080,
                     "used_percent": 90,
                     "remaining_percent": 10,
                     "resets_at": None,
+                    "observed_at": quotas["windows"][1]["observed_at"],
                 },
             ],
         )
+
+    def test_claude_replayed_statusline_does_not_refresh_or_overwrite_quota(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            quota_path = Path(directory) / "claude-quotas.json"
+            payload = {
+                "rate_limits": {
+                    "five_hour": {
+                        "used_percentage": 50.0,
+                        "resets_at": 1_800_000_000,
+                    }
+                }
+            }
+            with patch(
+                "konvu_telemetry.display.claude_quota_path", return_value=quota_path
+            ):
+                record_claude_quotas(payload, "newer-session")
+                saved = json.loads(quota_path.read_text())
+                saved["observed_at"] = "1970-01-01T00:01:40+00:00"
+                saved["windows"][0]["observed_at"] = saved["observed_at"]
+                quota_path.write_text(json.dumps(saved))
+                payload["rate_limits"]["five_hour"]["used_percentage"] = 40.0
+                record_claude_quotas(payload, "stale-session")
+            replayed = json.loads(quota_path.read_text())
+        self.assertEqual(replayed["observed_at"], "1970-01-01T00:01:40+00:00")
+        self.assertEqual(replayed["windows"][0]["used_percent"], 50.0)
+
+    def test_claude_spend_limit_exhaustion_enables_money_alerts(self) -> None:
+        session = self.forecast_session(12.0)
+        account_quotas = {
+            "claude": {
+                "observed_at": "1970-01-01T00:01:40+00:00",
+                "windows": [],
+                "spend_limit": {"used_percent": 100.0},
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            with patch(
+                "konvu_telemetry.analytics.notification_state_path",
+                return_value=Path(directory) / "notifications.json",
+            ):
+                apply_notification_tracking([session], 100.0, account_quotas)
+        self.assertTrue(session["notification"]["hot"])
+
+    def test_claude_invalid_percentages_are_not_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            quota_path = Path(directory) / "claude-quotas.json"
+            with patch(
+                "konvu_telemetry.display.claude_quota_path", return_value=quota_path
+            ):
+                record_claude_quotas(
+                    {
+                        "rate_limits": {
+                            "five_hour": {"used_percentage": 101.0},
+                            "spend_limit": {"used_percentage": 1000.0},
+                        }
+                    },
+                    "session",
+                )
+            self.assertFalse(quota_path.exists())
 
     def test_stale_or_future_claude_quota_is_not_published(self) -> None:
         for observed_at in (
@@ -4026,9 +4246,15 @@ class ServiceTests(unittest.TestCase):
                         )
                     )
                     snapshot: dict[str, object] = {"sessions": []}
-                    with patch(
-                        "konvu_telemetry.fleet_telemetry.claude_quota_path",
-                        return_value=quota_path,
+                    with (
+                        patch(
+                            "konvu_telemetry.fleet_telemetry.claude_quota_path",
+                            return_value=quota_path,
+                        ),
+                        patch(
+                            "konvu_telemetry.fleet_telemetry.codex_account_scope",
+                            return_value=None,
+                        ),
                     ):
                         enrich_snapshot(snapshot, [], [], 401.0)
                 self.assertNotIn("claude", snapshot["account_quotas"])

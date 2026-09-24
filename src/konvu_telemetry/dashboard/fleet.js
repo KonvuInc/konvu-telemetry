@@ -1090,14 +1090,14 @@ function renderAccounts() {
   for (const provider of ["codex", "claude"]) {
     const q = quotas?.[provider];
     for (const w of Array.isArray(q?.windows) ? q.windows : []) {
-      if (!finite(w.used_percent) || !finite(w.window_minutes) || w.window_minutes <= 0) continue;
+      if (!finite(w.used_percent) || w.used_percent < 0 || w.used_percent > 100 || !finite(w.window_minutes) || w.window_minutes <= 0) continue;
       html +=
         "<span>" +
         providerName(provider) +
         " · " +
         duration(w.window_minutes * 60) +
         " <b>" +
-        Math.max(0, Math.min(100, 100 - w.used_percent)).toFixed(0) +
+        (100 - w.used_percent).toFixed(0) +
         "% left</b></span>";
     }
   }
