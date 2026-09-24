@@ -8,6 +8,7 @@ import plistlib
 import shlex
 import shutil
 import site
+import stat
 import subprocess
 import sys
 import sysconfig
@@ -248,13 +249,27 @@ def is_konvu_statusline(value: object) -> bool:
 
 def is_konvu_hook(value: object, command: str) -> bool:
     """Return whether a command is one specific Konvu hook entry."""
-    if not isinstance(value, str) or not is_konvu_command(value):
+    if not isinstance(value, str):
         return False
     try:
         arguments = shlex.split(value)
     except ValueError:
         return False
-    return arguments[1:] == [command]
+    if is_konvu_command(value):
+        return arguments[1:] == [command]
+    if len(arguments) != 3 or Path(arguments[0]).name != "sh" or arguments[1] != "-c":
+        return False
+    try:
+        wrapped = shlex.split(arguments[2])
+    except ValueError:
+        return False
+    return wrapped == [
+        str(launcher_path()),
+        command,
+        "2>/dev/null",
+        "||",
+        "true",
+    ]
 
 
 def write_claude_statusline_wrapper(command: str) -> None:
@@ -604,8 +619,71 @@ def remove_hook(path: Path, event: str, command: str, create_backup: bool) -> bo
         return False
     if create_backup:
         backup(path)
-    hooks[event] = kept
+    if kept:
+        hooks[event] = kept
+    else:
+        hooks.pop(event, None)
+        if not hooks:
+            document.pop("hooks", None)
     write_json(path, document)
+    return True
+
+
+def remove_owned_files() -> None:
+    """Delete telemetry data and configuration backups without touching transcripts."""
+    home = telemetry_home()
+    if home.is_symlink() or home.is_file():
+        home.unlink(missing_ok=True)
+    elif home.is_dir():
+        shutil.rmtree(home)
+    try:
+        home.parent.rmdir()
+    except OSError:
+        pass
+    for path in integration_paths():
+        for candidate in path.parent.glob(f"{path.name}.konvu-backup-*"):
+            candidate.unlink(missing_ok=True)
+
+
+def homebrew_executable() -> Path | None:
+    """Locate Homebrew without trusting the caller's PATH."""
+    for candidate in (Path("/opt/homebrew/bin/brew"), Path("/usr/local/bin/brew")):
+        try:
+            resolved = candidate.resolve(strict=True)
+            metadata = resolved.stat()
+        except OSError:
+            continue
+        if (
+            stat.S_ISREG(metadata.st_mode)
+            and metadata.st_uid in {0, os.getuid()}
+            and not metadata.st_mode & 0o022
+            and os.access(resolved, os.X_OK)
+        ):
+            return resolved
+    return None
+
+
+def uninstall_homebrew_package() -> bool:
+    """Remove the formula when this command is running from its Homebrew prefix."""
+    brew = homebrew_executable()
+    if brew is None:
+        return False
+    prefix_result = subprocess.run(
+        [str(brew), "--prefix", CONSOLE_COMMAND],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if prefix_result.returncode != 0 or not prefix_result.stdout.strip():
+        return False
+    prefix = Path(prefix_result.stdout.strip()).resolve()
+    executable = Path(sys.argv[0]).resolve()
+    if executable != prefix / "bin" / CONSOLE_COMMAND:
+        return False
+    subprocess.run(
+        [str(brew), "uninstall", "--formula", CONSOLE_COMMAND],
+        check=True,
+    )
     return True
 
 
@@ -664,12 +742,13 @@ def uninstall() -> dict[str, bool]:
             claude_statusline_state_path(),
         ):
             path.unlink(missing_ok=True)
-        return result
     except Exception:
         restore_installation(states, states[-1].contents is not None)
         for path in backups:
             path.unlink(missing_ok=True)
         raise
+    remove_owned_files()
+    return result
 
 
 def service_status() -> dict[str, object]:

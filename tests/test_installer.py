@@ -7,10 +7,28 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from konvu_telemetry import installer
+from konvu_telemetry import cli, installer
 
 
 class InstallerTests(unittest.TestCase):
+    def test_cli_uninstall_removes_package_after_local_cleanup(self) -> None:
+        calls: list[str] = []
+        with (
+            patch.object(
+                cli,
+                "uninstall",
+                side_effect=lambda: calls.append("local") or {},
+            ),
+            patch.object(
+                cli,
+                "uninstall_homebrew_package",
+                side_effect=lambda: calls.append("package") or True,
+            ),
+            patch("builtins.print"),
+        ):
+            cli.installer_main(["uninstall"])
+        self.assertEqual(calls, ["local", "package"])
+
     def test_console_launcher_skips_a_stale_py_path_injected_script(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -322,6 +340,75 @@ class InstallerTests(unittest.TestCase):
             installer.is_konvu_command(f"{installer.launcher_path()} codex-hook")
         )
 
+    def test_legacy_shell_wrapped_hook_is_removed_without_matching_lookalikes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            path = home / ".codex" / "hooks.json"
+            path.parent.mkdir()
+            with patch.object(installer.Path, "home", return_value=home):
+                launcher = installer.launcher_path()
+                owned = f"sh -c '{launcher} codex-prompt-hook 2>/dev/null || true'"
+                lookalike = f"sh -c '{launcher} codex-prompt-hook 2>/dev/null || false'"
+                path.write_text(
+                    json.dumps(
+                        {
+                            "hooks": {
+                                "UserPromptSubmit": [
+                                    {
+                                        "hooks": [
+                                            {"type": "command", "command": owned},
+                                            {"type": "command", "command": lookalike},
+                                        ]
+                                    }
+                                ]
+                            }
+                        }
+                    )
+                )
+                self.assertTrue(installer.remove_codex_prompt_hook(create_backup=False))
+            remaining = json.loads(path.read_text())["hooks"]["UserPromptSubmit"]
+            self.assertEqual(
+                remaining[0]["hooks"], [{"type": "command", "command": lookalike}]
+            )
+
+    def test_homebrew_uninstall_only_runs_for_the_brewed_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            brew = root / "bin" / "brew"
+            prefix = root / "Cellar" / "konvu-telemetry" / "1.0.0"
+            executable = prefix / "bin" / installer.CONSOLE_COMMAND
+            executable.parent.mkdir(parents=True)
+            executable.write_text("#!/bin/sh\n")
+            with (
+                patch.object(installer, "homebrew_executable", return_value=brew),
+                patch.object(installer.sys, "argv", [str(executable), "uninstall"]),
+                patch.object(installer.subprocess, "run") as run,
+            ):
+                run.side_effect = [
+                    subprocess.CompletedProcess([], 0, stdout=f"{prefix}\n"),
+                    subprocess.CompletedProcess([], 0),
+                ]
+                self.assertTrue(installer.uninstall_homebrew_package())
+            self.assertEqual(
+                run.call_args_list[1].args[0],
+                [str(brew), "uninstall", "--formula", installer.CONSOLE_COMMAND],
+            )
+
+    def test_homebrew_executable_rejects_a_writable_install(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            unsafe = Path(temporary) / "brew"
+            unsafe.write_text("#!/bin/sh\n")
+            unsafe.chmod(0o722)
+            with patch.object(
+                Path,
+                "resolve",
+                autospec=True,
+                return_value=unsafe,
+            ):
+                self.assertIsNone(installer.homebrew_executable())
+
     def test_private_launcher_uses_absolute_console_script(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
@@ -578,3 +665,6 @@ class InstallerTests(unittest.TestCase):
             )
             for path in owned_paths:
                 self.assertFalse(path.exists())
+            self.assertFalse((home / ".konvu").exists())
+            self.assertEqual(list(claude_path.parent.glob("*.konvu-backup-*")), [])
+            self.assertEqual(list(codex_path.parent.glob("*.konvu-backup-*")), [])
