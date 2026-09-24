@@ -99,17 +99,36 @@ class QuotaAttributionTests(unittest.TestCase):
             stored = next(iter(allocations.values()))["allocations"]
             self.assertEqual(stored, {"a": 5.0, "b": 1.0})
 
-    def test_projects_next_ten_only_after_observing_a_real_quota_increase(self) -> None:
+    def test_projects_next_ten_only_after_stable_calibration(self) -> None:
         with tempfile.TemporaryDirectory() as directory, patch.dict(
             os.environ, {"KONVU_LIVE_USAGE_HOME": directory}
         ):
             apply_quota_attribution(snapshot(20, [session("a", 100)]))
-            next_snapshot = snapshot(24, [session("a", 200)])
-            next_snapshot["sessions"][0]["projected_next_10_usage_tokens"] = 50
-            apply_quota_attribution(next_snapshot)
+            for used, tokens in ((22, 200), (24, 300)):
+                next_snapshot = snapshot(used, [session("a", tokens)])
+                next_snapshot["sessions"][0]["projected_next_10_usage_tokens"] = 50
+                apply_quota_attribution(next_snapshot)
+                window = next_snapshot["sessions"][0]["quota_attribution"]["windows"][0]
+                self.assertNotIn("projected_next_10_percent", window)
+
+            calibrated = snapshot(26, [session("a", 400)])
+            calibrated["sessions"][0]["projected_next_10_usage_tokens"] = 50
+            apply_quota_attribution(calibrated)
+            window = calibrated["sessions"][0]["quota_attribution"]["windows"][0]
+            self.assertEqual(window["estimated_percent"], 6.0)
+            self.assertEqual(window["projected_next_10_percent"], 1.0)
+
+    def test_unstable_calibration_does_not_produce_a_forecast(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ, {"KONVU_LIVE_USAGE_HOME": directory}
+        ):
+            apply_quota_attribution(snapshot(20, [session("a", 100)]))
+            for used, tokens in ((22, 110), (24, 210), (26, 310)):
+                next_snapshot = snapshot(used, [session("a", tokens)])
+                next_snapshot["sessions"][0]["projected_next_10_usage_tokens"] = 50
+                apply_quota_attribution(next_snapshot)
             window = next_snapshot["sessions"][0]["quota_attribution"]["windows"][0]
-            self.assertEqual(window["estimated_percent"], 4.0)
-            self.assertEqual(window["projected_next_10_percent"], 2.0)
+            self.assertNotIn("projected_next_10_percent", window)
 
     def test_each_window_gets_the_same_interval_and_a_reset_clears_its_ledger(self) -> None:
         def snapshot_with_windows(
@@ -148,6 +167,7 @@ class QuotaAttributionTests(unittest.TestCase):
                 value for key, value in windows.items() if ":five_hour:" in key
             )
             self.assertEqual(five_hour_ledger["allocations"], {})
+            self.assertEqual(five_hour_ledger["calibration_samples"], [])
 
     def test_exhausted_plan_spend_starts_when_the_cutoff_is_observed(self) -> None:
         with tempfile.TemporaryDirectory() as directory, patch.dict(

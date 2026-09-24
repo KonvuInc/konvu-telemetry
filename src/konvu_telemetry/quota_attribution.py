@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import math
-from statistics import median
 from datetime import datetime
 from typing import TypedDict
 
@@ -14,6 +13,11 @@ from .storage import quota_attribution_path, write_private_json
 class SessionUsage(TypedDict):
     tokens: float
     credits: float | None
+
+
+MIN_FORECAST_SAMPLES = 3
+MIN_FORECAST_PERCENT = 5.0
+MAX_FORECAST_RATE_SPREAD = 3.0
 
 
 def _number(value: object) -> float | None:
@@ -57,6 +61,29 @@ def _forecast_weight(provider: str, session: dict[str, object]) -> float | None:
     if provider == "codex":
         return _number(session.get("projected_next_10_tasks_credit_equivalent"))
     return _number(session.get("projected_next_10_usage_tokens"))
+
+
+def _calibration_rate(window: dict[str, object]) -> float | None:
+    raw_samples = window.get("calibration_samples")
+    if not isinstance(raw_samples, list):
+        return None
+    samples: list[tuple[float, float]] = []
+    for raw_sample in raw_samples:
+        if not isinstance(raw_sample, dict):
+            continue
+        percent = _number(raw_sample.get("percent"))
+        weight = _number(raw_sample.get("weight"))
+        if percent is not None and percent > 0 and weight is not None and weight > 0:
+            samples.append((percent, weight))
+    if len(samples) < MIN_FORECAST_SAMPLES:
+        return None
+    total_percent = sum(percent for percent, _ in samples)
+    if total_percent < MIN_FORECAST_PERCENT:
+        return None
+    rates = [percent / weight for percent, weight in samples]
+    if max(rates) / min(rates) > MAX_FORECAST_RATE_SPREAD:
+        return None
+    return total_percent / sum(weight for _, weight in samples)
 
 
 def _window_key(window: dict[str, object]) -> str | None:
@@ -154,6 +181,7 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
             if not isinstance(old_window, dict):
                 windows_state[window_key] = {"used_percent": used, "allocations": {}}
                 continue
+            old_window.pop("rates", None)
             previous_used = _number(old_window.get("used_percent"))
             if previous_used is None:
                 old_window["used_percent"] = used
@@ -162,6 +190,7 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
                 # A reset starts a fresh provider window; old shares must not leak into it.
                 old_window["used_percent"] = used
                 old_window["allocations"] = {}
+                old_window["calibration_samples"] = []
                 continue
             if used == previous_used:
                 continue
@@ -170,10 +199,10 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
             if isinstance(allocations, dict) and total_weight > 0:
                 for session_id, weight in interval_weights.items():
                     allocations[session_id] = (_number(allocations.get(session_id)) or 0.0) + increase * weight / total_weight
-                rates = old_window.setdefault("rates", [])
-                if isinstance(rates, list):
-                    rates.append(increase / total_weight)
-                    old_window["rates"] = rates[-8:]
+                samples = old_window.setdefault("calibration_samples", [])
+                if isinstance(samples, list):
+                    samples.append({"percent": increase, "weight": total_weight})
+                    old_window["calibration_samples"] = samples[-8:]
             old_window["used_percent"] = used
         # One interval is allocated independently to every provider window.
         provider_state["pending"] = {}
@@ -193,21 +222,11 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
                         "period": raw_window.get("period"),
                         "estimated_percent": round(share, 2),
                     }
-                    rates = stored.get("rates") if isinstance(stored, dict) else None
                     forecast_weight = _forecast_weight(provider, session)
-                    calibration = (
-                        [
-                            value
-                            for rate in rates
-                            for value in [_number(rate)]
-                            if value is not None and value > 0
-                        ]
-                        if isinstance(rates, list)
-                        else []
-                    )
-                    if forecast_weight is not None and calibration:
+                    calibration = _calibration_rate(stored) if isinstance(stored, dict) else None
+                    if forecast_weight is not None and calibration is not None:
                         estimate["projected_next_10_percent"] = round(
-                            median(calibration) * forecast_weight, 2
+                            calibration * forecast_weight, 2
                         )
                     estimates.append(estimate)
             session["quota_attribution"] = {"state": "observing" if not estimates else "estimated", "windows": estimates}
