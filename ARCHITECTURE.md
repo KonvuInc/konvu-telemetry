@@ -6,7 +6,8 @@ Konvu Telemetry is one Python package with a single resident process. The proces
 
 - The collector never modifies provider transcripts.
 - The dashboard server binds only to IPv4 loopback and rejects non-local `Host` and `Origin` values.
-- The package has no runtime Python dependencies. Its only outbound client sends a small allowlisted set of anonymous product events to PostHog with a 500 ms timeout. Setup durably queues its event before the setup process exits; network delivery and resident-process events run in a background thread.
+- The package has no runtime Python dependencies. The collector makes credential-backed provider requests every two minutes to fetch account limits: Claude calls Anthropic's usage endpoint directly, while a validated installed Codex app-server contacts OpenAI. The Claude credential remains in memory for one request; the Codex credential never enters Konvu Telemetry. Only normalized limits are persisted. Authentication failures clear the provider immediately; transient failures keep the last provider result for at most ten minutes with an explicit stale status and back off without blocking transcript collection.
+- A separate outbound client sends a small allowlisted set of anonymous product events to PostHog with a 500 ms timeout. Setup durably queues its event before the setup process exits; network delivery and resident-process events run in a background thread.
 - Product analytics uses a random install ID. It does not create person profiles and sends no transcripts, prompts, code, paths, command arguments, usage data, raw errors, environment variables, account IDs, or workspace IDs.
 - Browser notifications require an open dashboard tab and browser permission.
 - A paid session is marked hot when it was active in the last twenty minutes, its cost is complete, and its next-ten-prompt forecast reaches `ALERT_FORECAST_USD`. Browser-local state controls notification cooldowns.

@@ -13,6 +13,7 @@ from konvu_telemetry.provider_limits import (
     FetchResult,
     ProviderLimitPoller,
     _claude_token,
+    _codex_executable,
     _secure_file,
     decode_claude_usage,
     decode_codex_usage,
@@ -346,6 +347,55 @@ class ProviderLimitsTests(unittest.TestCase):
         ):
             keychain.return_value = '{"claudeAiOauth":{"accessToken":"token"}}'
             self.assertEqual(read_claude_access_token(), "token")
+
+    def test_codex_executable_ignores_path_and_uses_a_validated_install(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            injected = home / "injected" / "codex"
+            installed = home / ".local" / "bin" / "codex"
+            injected.parent.mkdir()
+            installed.parent.mkdir(parents=True)
+            injected.write_text("untrusted")
+            installed.write_text("trusted")
+            injected.chmod(0o700)
+            installed.chmod(0o700)
+            with (
+                patch.dict(os.environ, {"PATH": str(injected.parent)}),
+                patch("konvu_telemetry.provider_limits.Path.home", return_value=home),
+                patch.object(
+                    Path,
+                    "resolve",
+                    autospec=True,
+                    side_effect=lambda path, strict=False: (
+                        path
+                        if path == installed
+                        else (_ for _ in ()).throw(FileNotFoundError())
+                    ),
+                ),
+            ):
+                self.assertEqual(_codex_executable(), str(installed))
+
+    def test_codex_executable_rejects_a_writable_install(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            installed = home / ".local" / "bin" / "codex"
+            installed.parent.mkdir(parents=True)
+            installed.write_text("unsafe")
+            installed.chmod(0o722)
+            with (
+                patch("konvu_telemetry.provider_limits.Path.home", return_value=home),
+                patch.object(
+                    Path,
+                    "resolve",
+                    autospec=True,
+                    side_effect=lambda path, strict=False: (
+                        path
+                        if path == installed
+                        else (_ for _ in ()).throw(FileNotFoundError())
+                    ),
+                ),
+            ):
+                self.assertIsNone(_codex_executable())
 
     def test_provider_results_are_the_only_account_quota_source(self) -> None:
         snapshot: dict[str, object] = {"sessions": []}

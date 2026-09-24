@@ -48,7 +48,9 @@ Costs are estimates, not provider invoices. See [ACCURACY.md](ACCURACY.md) for t
 
 ## Privacy
 
-Konvu Telemetry stores derived usage data in `~/.konvu/telemetry`; provider transcript files are never changed. Setup enables a small amount of anonymous product telemetry to PostHog by default: successful setup, when the first dashboard-visible snapshot is ready, dashboard opens, one active-day event per day when data is visible, and collector failures, at most once per day. An existing telemetry choice remains unchanged.
+Konvu Telemetry stores derived usage data in `~/.konvu/telemetry`; provider transcript files are never changed. Every two minutes, the collector uses the provider-owned login already on the device to fetch current account limits: it calls Anthropic's usage endpoint for Claude, while Codex's installed local app-server contacts OpenAI using Codex's own login. Konvu Telemetry holds the Claude credential only for that request and never receives the Codex credential. Credentials, raw provider responses, and account IDs are never copied to Konvu files or logs; only normalized limit data is retained locally.
+
+Separately, setup enables a small amount of anonymous product telemetry to PostHog by default: successful setup, when the first dashboard-visible snapshot is ready, dashboard opens, one active-day event per day when data is visible, and collector failures, at most once per day. An existing telemetry choice remains unchanged.
 
 Events use a random per-install ID so we can measure activation and repeat use. Each event receives its capture time and a random deduplication ID. They do not include prompts, code, transcripts, file paths, command arguments, token usage, raw errors, environment variables, account IDs, or workspace IDs. Events do not create PostHog person profiles and request IP discard. The local queue is capped at 100 events, and failed delivery backs off for up to 24 hours. To disable product telemetry and delete any unsent events, run:
 
