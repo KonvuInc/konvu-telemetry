@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1 - 2026-09-24
+
+- Ship the quota-aware usage dashboard and accounting.
+
 ## 0.3.0 - 2026-09-24
 
 - Fetch Claude and Codex account limits every two minutes using provider-owned local logins without retaining credentials. Codex executable discovery now accepts only validated standard install locations rather than trusting `PATH`.
