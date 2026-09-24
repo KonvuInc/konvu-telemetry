@@ -19,6 +19,7 @@ from .display import (
     statusline,
 )
 from .exporter import write_normalized_events
+from .provider_limits import ProviderLimitPoller
 from .service import open_dashboard, run_local_service, write_health
 from .snapshot import build_snapshot, write_snapshot
 
@@ -68,7 +69,11 @@ def main(arguments: list[str] | None = None) -> None:
     args = parser.parse_args(arguments)
     if args.command == "once":
         now = time.time()
-        write_snapshot(build_snapshot(now))
+        try:
+            provider_quotas = ProviderLimitPoller().refresh(now)
+        except Exception:
+            provider_quotas = {"claude": None, "codex": None}
+        write_snapshot(build_snapshot(now, provider_quotas=provider_quotas))
         write_health(now)
     elif args.command == "serve":
         run_local_service(max(1, args.interval), args.port)

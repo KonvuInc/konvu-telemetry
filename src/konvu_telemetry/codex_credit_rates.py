@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import re
 
 from .models import UsageEvent
-from .pricing import is_internal_codex_review, requires_pricing
+from .pricing import is_internal_codex_review
 
 
 CODEX_CREDIT_EQUIVALENT_SOURCE = "https://learn.chatgpt.com/docs/pricing"
@@ -89,16 +89,3 @@ def codex_credit_equivalent(event: UsageEvent) -> float | None:
         * rate.output
         / per_million
     )
-
-
-def codex_credit_equivalent_status(events: list[UsageEvent]) -> tuple[str, int]:
-    """Label a Codex credit equivalent as complete, partial, or unavailable."""
-    relevant = [event for event in events if requires_pricing(event)]
-    unrated = sum(1 for event in relevant if codex_credit_equivalent(event) is None)
-    if not relevant:
-        return "unavailable", 0
-    if unrated == 0:
-        return "complete", 0
-    if unrated == len(relevant):
-        return "unavailable", unrated
-    return "partial", unrated

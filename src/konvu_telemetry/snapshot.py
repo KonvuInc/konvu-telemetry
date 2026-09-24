@@ -11,8 +11,7 @@ from pathlib import Path
 import time
 
 from .analytics import (
-    apply_notification_tracking,
-    baseline_comparison,
+    apply_session_hot_state,
     claude_compact_times,
     context_usage_history,
     deduplicate_usage_events,
@@ -21,25 +20,17 @@ from .analytics import (
     locate_compactions,
     next_ten_forecast,
     scaled_precompact_forecast,
-    single_model_effort,
 )
 from .config import (
     ACTIVITY_FRESHNESS_SECONDS,
     DASHBOARD_SESSION_WINDOW_SECONDS,
-    DEFAULT_LIVE_WINDOW_SECONDS,
     FORECAST_MIN_SAMPLES,
     LIVE_ACTIVITY_SECONDS,
     MAX_CONTEXT_HISTORY_POINTS,
     MAX_SUMMARY_ITERATION_POINTS,
-    ROLLING_WINDOW_SECONDS,
     SESSION_FILE_RETENTION_SECONDS,
 )
-from .codex_credit_rates import (
-    CODEX_CREDIT_EQUIVALENT_SOURCE,
-    CODEX_CREDIT_RATE_CARD,
-    codex_credit_equivalent,
-    codex_credit_equivalent_status,
-)
+from .codex_credit_rates import codex_credit_equivalent
 from .fleet_telemetry import enrich_snapshot
 from .quota_attribution import (
     apply_out_of_plan_accounting,
@@ -69,7 +60,6 @@ from .parsers import (
     user_prompt_times_by_session,
 )
 from .pricing import (
-    cache_read_rate,
     claude_context_window,
     cost_status,
     event_cost,
@@ -79,7 +69,6 @@ from .pricing import (
 from .storage import (
     home_dir,
     parse_timestamp,
-    pinned_sessions,
     session_path,
     snapshot_path,
     valid_session_id,
@@ -297,7 +286,6 @@ def build_snapshot(
             for cost, priced in zip(completed_prompt_costs, prompt_priced)
         ]
         forecast_prompt_costs = complete_prompt_costs
-        last_task_cost = iteration_costs[-1] if iteration_costs else None
         next_10_forecast: float | None = (
             next_ten_forecast(forecast_prompt_costs, "claude")
             if len(forecast_prompt_costs) >= FORECAST_MIN_SAMPLES
@@ -309,12 +297,7 @@ def build_snapshot(
             if compact_times.get(session_id)
             else None
         )
-        comparison_task_count = len(starts)
-        comparison_tokens = total_tokens = sum(
-            event.usage.total_tokens for event in events
-        )
-        total_cost_status, unpriced_event_count = cost_status(events, prices)
-        comparison_cost = sum(known_costs) if total_cost_status == "complete" else None
+        total_cost_status, _ = cost_status(events, prices)
         since_compact = False
         forecast_mode = "rolling"
         if latest_compact is not None:
@@ -323,23 +306,6 @@ def build_snapshot(
                 for start in starts
                 if start > latest_compact and start not in unpriced_prompts
             ]
-            post_compact_events = [
-                event for event in events if event.timestamp > latest_compact
-            ]
-            comparison_task_count = len(post_compact_costs)
-            comparison_tokens = sum(
-                event.usage.total_tokens for event in post_compact_events
-            )
-            comparison_cost = (
-                sum(
-                    cost
-                    for event in post_compact_events
-                    for cost in [claude_costs[id(event)]]
-                    if cost is not None
-                )
-                if total_cost_status == "complete"
-                else None
-            )
             since_compact = True
             if len(post_compact_costs) >= FORECAST_MIN_SAMPLES:
                 next_10_forecast = next_ten_forecast(post_compact_costs, "claude")
@@ -388,40 +354,6 @@ def build_snapshot(
         main_thread_events = [event for event in events if not event.is_subagent]
         context_event = main_thread_events[-1] if main_thread_events else last_event
         context_window = claude_context_window(context_event.model, prices)
-        baseline_events = [
-            event
-            for event in main_thread_events
-            if latest_compact is None or event.timestamp > latest_compact
-        ]
-        baseline_configuration = single_model_effort(baseline_events)
-        baseline_model, baseline_effort = (
-            baseline_configuration
-            if baseline_configuration is not None
-            else ("unknown", "standard")
-        )
-        claude_provider_baseline = baseline_comparison(
-            "claude",
-            comparison_task_count,
-            comparison_tokens,
-            baselines,
-            model=baseline_model,
-            effort=baseline_effort,
-            since_compact=since_compact,
-            cost_usd=comparison_cost,
-            comparison_scope="provider",
-        )
-        claude_configuration_baseline = baseline_comparison(
-            "claude",
-            comparison_task_count,
-            comparison_tokens,
-            baselines,
-            model=baseline_model,
-            effort=baseline_effort,
-            since_compact=since_compact,
-            cost_usd=comparison_cost,
-            comparison_scope="model_effort",
-        )
-        claude_baseline = claude_configuration_baseline
         sessions.append(
             {
                 "id": session_id,
@@ -433,24 +365,11 @@ def build_snapshot(
                 "model": context_event.model,
                 "effort": context_event.effort,
                 "speed": context_event.usage.speed,
-                "comparison_configuration": (
-                    {
-                        "model": baseline_model,
-                        "effort": baseline_effort,
-                    }
-                    if baseline_configuration is not None
-                    else None
-                ),
                 "last_activity_at": datetime.fromtimestamp(
                     last_event.timestamp, timezone.utc
                 ).isoformat(),
-                "rolling_window_seconds": ROLLING_WINDOW_SECONDS,
                 "total_cost_usd": round(sum(known_costs), 6),
                 "cost_status": total_cost_status,
-                "unpriced_event_count": unpriced_event_count,
-                "last_task_cost_usd": round(last_task_cost, 6)
-                if isinstance(last_task_cost, (int, float))
-                else None,
                 "projected_next_10_tasks_usd": round(next_10_forecast, 6)
                 if isinstance(next_10_forecast, (int, float))
                 else None,
@@ -467,17 +386,8 @@ def build_snapshot(
                 "task_count": task_count,
                 "since_compact": since_compact,
                 "last_task_tool_calls": last_task_tool_calls,
-                "baseline": claude_baseline,
-                "baselines": {
-                    "provider": claude_provider_baseline,
-                    "model_effort": claude_configuration_baseline,
-                },
                 "context_tokens": context_event.usage.context_tokens,
                 "context_window_tokens": context_window,
-                "context_window_source": (
-                    "model_pricing" if context_window is not None else "unavailable"
-                ),
-                "cache_read_usd_per_mtok": cache_read_rate(context_event.model, prices),
                 "active_subagents": sum(
                     1 for agent_id in all_subagent_ids if statuses.get(agent_id, False)
                 ),
@@ -516,7 +426,6 @@ def build_snapshot(
                     }
                     for agent_id in sorted(all_subagent_ids)
                 ],
-                "priced_events": len(known_costs),
                 "token_usage": {
                     "input": sum(event.usage.input_tokens for event in events),
                     "output": sum(event.usage.output_tokens for event in events),
@@ -696,7 +605,6 @@ def build_snapshot(
             for start in starts
             if start not in unpriced_tasks
         ]
-        last_task_cost = iteration_costs[-1] if iteration_costs else None
         task_credits = [
             credit_equivalents_by_task.get(start, 0.0)
             if start not in unrated_credit_tasks
@@ -708,7 +616,6 @@ def build_snapshot(
             for start in starts
             if start not in unrated_credit_tasks
         ]
-        last_task_credits = task_credits[-1] if task_credits else None
         next_10_forecast = (
             next_ten_forecast(complete_task_costs, "codex")
             if len(complete_task_costs) >= FORECAST_MIN_SAMPLES
@@ -722,43 +629,8 @@ def build_snapshot(
         task_count = len(starts)
         all_events = [*events, *child_events]
         last_event = max(all_events, key=lambda event: event.timestamp)
-        total_tokens = sum(event.usage.total_tokens for event in all_events)
-        total_cost_status, unpriced_event_count = cost_status(all_events, prices)
-        credit_equivalent_status, unrated_credit_equivalent_event_count = (
-            codex_credit_equivalent_status(all_events)
-        )
+        total_cost_status, _ = cost_status(all_events, prices)
         last_task_start = starts[-1] if starts else None
-        baseline_configuration = single_model_effort(events)
-        baseline_model, baseline_effort = (
-            baseline_configuration
-            if baseline_configuration is not None
-            else ("unknown", "standard")
-        )
-        codex_provider_baseline = baseline_comparison(
-            "codex",
-            task_count,
-            total_tokens,
-            baselines,
-            model=baseline_model,
-            effort=baseline_effort,
-            cost_usd=(sum(known_costs) + sum(known_child_costs))
-            if total_cost_status == "complete"
-            else None,
-            comparison_scope="provider",
-        )
-        codex_configuration_baseline = baseline_comparison(
-            "codex",
-            task_count,
-            total_tokens,
-            baselines,
-            model=baseline_model,
-            effort=baseline_effort,
-            cost_usd=(sum(known_costs) + sum(known_child_costs))
-            if total_cost_status == "complete"
-            else None,
-            comparison_scope="model_effort",
-        )
-        codex_baseline = codex_configuration_baseline
         sessions.append(
             {
                 "id": session_id,
@@ -770,36 +642,15 @@ def build_snapshot(
                 "model": last_event.model,
                 "effort": last_event.effort,
                 "speed": last_event.usage.speed,
-                "comparison_configuration": (
-                    {
-                        "model": baseline_model,
-                        "effort": baseline_effort,
-                    }
-                    if baseline_configuration is not None
-                    else None
-                ),
                 "last_activity_at": datetime.fromtimestamp(
                     last_event.timestamp, timezone.utc
                 ).isoformat(),
                 "total_cost_usd": round(sum(known_costs) + sum(known_child_costs), 6),
                 "cost_status": total_cost_status,
-                "unpriced_event_count": unpriced_event_count,
                 "total_credit_equivalent": round(
                     sum(known_credit_equivalents) + sum(known_child_credit_equivalents),
                     6,
                 ),
-                "credit_equivalent_status": credit_equivalent_status,
-                "credit_equivalent_rate_card": CODEX_CREDIT_RATE_CARD,
-                "credit_equivalent_source": CODEX_CREDIT_EQUIVALENT_SOURCE,
-                "unrated_credit_equivalent_event_count": (
-                    unrated_credit_equivalent_event_count
-                ),
-                "last_task_cost_usd": round(last_task_cost, 6)
-                if isinstance(last_task_cost, (int, float))
-                else None,
-                "last_task_credit_equivalent": round(last_task_credits, 6)
-                if isinstance(last_task_credits, (int, float))
-                else None,
                 "projected_next_10_tasks_usd": round(next_10_forecast, 6)
                 if isinstance(next_10_forecast, (int, float))
                 else None,
@@ -818,11 +669,6 @@ def build_snapshot(
                 )
                 if last_task_start is not None
                 else 0,
-                "baseline": codex_baseline,
-                "baselines": {
-                    "provider": codex_provider_baseline,
-                    "model_effort": codex_configuration_baseline,
-                },
                 "active_subagents": sum(
                     1 for _, _, _, is_live, _ in child_entries if is_live
                 ),
@@ -831,9 +677,6 @@ def build_snapshot(
                     context for _, _, context, _, _ in child_entries
                 ),
                 "subagent_cost_usd": round(sum(known_child_costs), 6),
-                "subagent_credit_equivalent": round(
-                    sum(known_child_credit_equivalents), 6
-                ),
                 "subagents": [
                     {
                         "id": agent_id,
@@ -857,11 +700,7 @@ def build_snapshot(
                     }
                     for agent_id, label, context, is_live, agent_events in child_entries
                 ],
-                "priced_events": len(
-                    [cost for cost in [*codex_costs, *child_costs] if cost is not None]
-                ),
                 "context_tokens": last_event.usage.context_tokens,
-                "cache_read_usd_per_mtok": cache_read_rate(last_event.model, prices),
                 "context_window_tokens": last_event.context_window_tokens,
                 "token_usage": {
                     "input": sum(event.usage.input_tokens for event in all_events),
@@ -878,11 +717,8 @@ def build_snapshot(
                 },
             }
         )
-    live_ids = {session["id"] for session in sessions}
-    sessions.extend(row for row in pinned_sessions() if row.get("id") not in live_ids)
     snapshot = {
         "generated_at": datetime.fromtimestamp(now, timezone.utc).isoformat(),
-        "liveness_window_seconds": DEFAULT_LIVE_WINDOW_SECONDS,
         "live_activity_window_seconds": LIVE_ACTIVITY_SECONDS,
         "baselines": baselines,
         "sessions": sessions,
@@ -894,22 +730,24 @@ def build_snapshot(
         now,
         provider_quotas,
     )
+    snapshot.pop("baselines", None)
     apply_quota_attribution(snapshot)
     apply_usage_modes(snapshot)
     apply_out_of_plan_accounting(snapshot)
     locate_compactions(snapshot)
     for session in sessions:
+        for internal_field in (
+            "forecast_mode",
+            "projected_next_10_usage_tokens",
+            "since_compact",
+        ):
+            session.pop(internal_field, None)
         history = session.get("context_history")
         if isinstance(history, list):
             session["context_history"] = sampled_rows(
                 history, MAX_CONTEXT_HISTORY_POINTS
             )
-    account_quotas = snapshot.get("account_quotas")
-    apply_notification_tracking(
-        sessions,
-        now,
-        account_quotas if isinstance(account_quotas, dict) else None,
-    )
+    apply_session_hot_state(sessions, now)
     sessions.sort(
         key=lambda session: str(session.get("last_activity_at") or ""), reverse=True
     )

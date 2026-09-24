@@ -8,16 +8,10 @@ import math
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
-from .config import (
-    ALERT_QUOTA_5H_PERCENT,
-    ALERT_QUOTA_WEEKLY_PERCENT,
-    ALLOWED_PROVIDERS,
-    CLAUDE_DESKTOP_ENTRYPOINT,
-    DASHBOARD_PORT,
-)
+from .config import ALLOWED_PROVIDERS, CLAUDE_DESKTOP_ENTRYPOINT, DASHBOARD_PORT
 from .parsers import (
     claude_hook_transcript,
     codex_client_in_file,
@@ -25,13 +19,7 @@ from .parsers import (
     codex_turn_tool_calls,
 )
 from .service import load_health
-from .storage import (
-    claude_quota_path,
-    session_path,
-    snapshot_path,
-    valid_session_id,
-    write_private_json,
-)
+from .storage import session_path, snapshot_path, valid_session_id
 
 # Desktop clients hide hook system messages, so the box has to ride in as model context instead.
 PROMPT_BOX_INSTRUCTION = (
@@ -40,61 +28,6 @@ PROMPT_BOX_INSTRUCTION = (
     "Write them as ordinary italic text, not as a code block or a quote."
 )
 SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
-
-
-def record_claude_quotas(payload: dict[str, object], session_id: str) -> None:
-    """Persist fresh Claude quota windows reported to the status-line hook."""
-    if not valid_session_id(session_id):
-        return
-    rate_limits = payload.get("rate_limits")
-    if not isinstance(rate_limits, dict):
-        return
-    windows: list[dict[str, object]] = []
-    for name, minutes in (("five_hour", 5 * 60), ("seven_day", 7 * 24 * 60)):
-        raw_window = rate_limits.get(name)
-        if not isinstance(raw_window, dict):
-            continue
-        value = next(
-            (
-                raw_window.get(key)
-                for key in ("utilization", "used_percentage", "used_pct")
-                if isinstance(raw_window.get(key), (int, float))
-            ),
-            None,
-        )
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            continue
-        used_percent = value * 100 if 0 <= value <= 1 else value
-        if not math.isfinite(used_percent) or used_percent < 0:
-            continue
-        used_percent = min(100.0, used_percent)
-        resets_at = next(
-            (
-                raw_window.get(key)
-                for key in ("resets_at", "reset_at")
-                if isinstance(raw_window.get(key), str)
-            ),
-            None,
-        )
-        windows.append(
-            {
-                "limit_id": "default",
-                "session_id": session_id,
-                "window_minutes": minutes,
-                "used_percent": used_percent,
-                "remaining_percent": 100 - used_percent,
-                "resets_at": resets_at,
-            }
-        )
-    if windows:
-        write_private_json(
-            claude_quota_path(),
-            {
-                "observed_at": datetime.now(timezone.utc).isoformat(),
-                "source": "claude_statusline",
-                "windows": windows,
-            },
-        )
 
 
 def money(value: object) -> str:
@@ -142,58 +75,6 @@ def relative_age(value: object) -> str:
     if seconds < 3600:
         return "10m ago"
     return f"{seconds // 3600}h ago"
-
-
-def baseline_text(session: dict[str, object]) -> str:
-    comparison = session.get("baseline")
-    if not isinstance(comparison, dict):
-        return ""
-    emoji = (
-        comparison.get("emoji") if isinstance(comparison.get("emoji"), str) else "⚪"
-    )
-    overhead = comparison.get("cost_overhead_percent")
-    if not isinstance(overhead, int):
-        overhead = comparison.get("token_overhead_percent")
-    iterations = comparison.get("iterations")
-    if not isinstance(overhead, int) or not isinstance(iterations, int):
-        return "⚪ baseline unavailable"
-    direction = "below" if overhead < 0 else "over"
-    return f"{emoji} {abs(overhead)}% {direction} your median"
-
-
-def quota_usage_text(payload: dict[str, object]) -> str:
-    """Render Claude's provider-reported five-hour and weekly quota usage."""
-    rate_limits = payload.get("rate_limits")
-    if not isinstance(rate_limits, dict):
-        return ""
-
-    def percentage(window_name: str) -> int | None:
-        window = rate_limits.get(window_name)
-        if not isinstance(window, dict):
-            return None
-        value = next(
-            (
-                window.get(key)
-                for key in ("utilization", "used_percentage", "used_pct")
-                if isinstance(window.get(key), (int, float))
-            ),
-            None,
-        )
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return None
-        percentage = value * 100 if 0 <= value <= 1 else value
-        return round(min(100, percentage)) if math.isfinite(percentage) else None
-
-    five_hour = percentage("five_hour")
-    weekly = percentage("seven_day")
-    parts: list[str] = []
-    if five_hour is not None:
-        hot = "🔥 " if five_hour >= ALERT_QUOTA_5H_PERCENT else ""
-        parts.append(f"{hot}⏳ {five_hour}% 5-hour limit")
-    if weekly is not None:
-        hot = "🔥 " if weekly >= ALERT_QUOTA_WEEKLY_PERCENT else ""
-        parts.append(f"{hot}📅 {weekly}% weekly limit")
-    return " · ".join(parts)
 
 
 def recorded_quota_usage_text(provider: str) -> str:
@@ -391,7 +272,6 @@ def statusline() -> None:
     ):
         print("Konvu live usage: collector starting")
         return
-    record_claude_quotas(payload, session_id)
     session = refreshed_session("claude", session_id)
     if session is None:
         print("Konvu live usage: collector starting")
