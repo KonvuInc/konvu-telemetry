@@ -16,6 +16,7 @@ from .config import (
     MAX_PARSED_RECORD_BYTES,
 )
 from .live import IncrementalLiveState
+from .provider_limits import fetch_codex_limits
 from .storage import claude_quota_path
 
 
@@ -42,9 +43,6 @@ class TranscriptTelemetry:
     )
     completions: list[tuple[float, str | None]] = field(default_factory=list)
     compactions: list[dict[str, object]] = field(default_factory=list)
-    quotas: dict[str, tuple[float, list[dict[str, object]]]] = field(
-        default_factory=dict
-    )
     task_tools: dict[float, int] = field(default_factory=dict)
     latest_task: float | None = None
     last_compacted: float | None = None
@@ -122,32 +120,6 @@ def is_claude_prompt(record: dict[str, object]) -> bool:
     )
 
 
-def _quota_windows(raw: dict[str, object], observed: float) -> list[dict[str, object]]:
-    windows: list[dict[str, object]] = []
-    limit_id = raw.get("limit_id")
-    for name in ("primary", "secondary"):
-        window = raw.get(name)
-        if not isinstance(window, dict):
-            continue
-        used = _number(window.get("used_percent"))
-        minutes = _number(window.get("window_minutes"))
-        reset = _number(window.get("resets_at"))
-        if used is None or minutes is None or minutes <= 0:
-            continue
-        used_percent = used * 100 if 0 <= used <= 1 else used
-        windows.append(
-            {
-                "limit_id": limit_id if isinstance(limit_id, str) else "default",
-                "window_minutes": minutes,
-                "used_percent": min(100.0, used_percent),
-                "remaining_percent": max(0.0, 100.0 - used_percent),
-                "resets_at": _iso(reset),
-                "observed_at": _iso(observed),
-            }
-        )
-    return windows
-
-
 def _claude_quota_snapshot(now: float) -> dict[str, object] | None:
     """Read recent provider-reported Claude quota data from the status-line hook."""
     try:
@@ -156,18 +128,16 @@ def _claude_quota_snapshot(now: float) -> dict[str, object] | None:
         return None
     if not isinstance(raw, dict):
         return None
-    observed_at = raw.get("observed_at")
-    observed = _timestamp(observed_at)
-    if observed is None or now - observed > ACTIVITY_FRESHNESS_SECONDS:
+    captured_at = raw.get("captured_at")
+    captured = _timestamp(captured_at)
+    if captured is None or now - captured > ACTIVITY_FRESHNESS_SECONDS:
         return None
     raw_windows = raw.get("windows")
     if not isinstance(raw_windows, list):
         return None
     windows = [window for window in raw_windows if isinstance(window, dict)]
-    if not windows:
-        return None
     return {
-        "observed_at": observed_at,
+        "captured_at": captured_at,
         "source": "claude_statusline",
         "windows": windows,
     }
@@ -372,20 +342,6 @@ def _read_telemetry(
                             "source": "codex_context_compacted",
                         }
                     )
-                if event_type == "token_count":
-                    quotas = payload.get("rate_limits")
-                    if isinstance(quotas, dict):
-                        limit_id = quotas.get("limit_id")
-                        key = limit_id if isinstance(limit_id, str) else "default"
-                        previous = result.quotas.get(key)
-                        if previous is None or timestamp >= previous[0]:
-                            windows = _quota_windows(quotas, timestamp)
-                            for window in windows:
-                                window["session_id"] = result.session_id
-                            result.quotas[key] = (
-                                timestamp,
-                                windows,
-                            )
     except (OSError, UnicodeError):
         pass
     return result, next_offset
@@ -682,7 +638,6 @@ def enrich_snapshot(
 ) -> None:
     """Add explicit transcript telemetry without changing cost accounting."""
     grouped: dict[tuple[str, str], list[TranscriptTelemetry]] = {}
-    quotas: dict[str, tuple[float, list[dict[str, object]]]] = {}
     sources: tuple[tuple[Provider, list[Path]], ...] = (
         ("claude", claude_paths),
         ("codex", codex_paths),
@@ -698,9 +653,6 @@ def enrich_snapshot(
             row = parse_telemetry(path, provider)
             if row.session_id is not None and not row.is_subagent:
                 grouped.setdefault((provider, row.session_id), []).append(row)
-            for limit_id, observation in row.quotas.items():
-                if limit_id not in quotas or observation[0] > quotas[limit_id][0]:
-                    quotas[limit_id] = observation
     sessions = snapshot.get("sessions")
     for session in sessions if isinstance(sessions, list) else []:
         if not isinstance(session, dict):
@@ -745,23 +697,10 @@ def enrich_snapshot(
                     start = _timestamp(iteration.get("started_at"))
                     if start in task_tools:
                         iteration["tool_calls"] = task_tools[start]
-    named = {key: value for key, value in quotas.items() if key != "default"}
-    if (
-        named
-        and "default" in quotas
-        and max(value[0] for value in named.values()) >= quotas["default"][0]
-    ):
-        quotas.pop("default")
-    observed = max((row[0] for row in quotas.values()), default=None)
-    account_quotas: dict[str, object] = {
-        "codex": {
-            "observed_at": _iso(observed),
-            "source": "local_transcript",
-            "windows": [
-                window for limit_id in sorted(quotas) for window in quotas[limit_id][1]
-            ],
-        },
-    }
+    account_quotas: dict[str, object] = {}
+    codex_quotas = fetch_codex_limits()
+    if codex_quotas is not None:
+        account_quotas["codex"] = codex_quotas
     claude_quotas = _claude_quota_snapshot(now)
     if claude_quotas is not None:
         account_quotas["claude"] = claude_quotas

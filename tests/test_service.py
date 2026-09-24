@@ -55,10 +55,13 @@ from konvu_telemetry.fleet_telemetry import (
     TranscriptTelemetry,
     _comparable_forecast,
     _timestamp,
-    _quota_windows,
     enrich_snapshot,
     is_claude_prompt,
     parse_telemetry,
+)
+from konvu_telemetry.provider_limits import (
+    claude_limit_snapshot,
+    codex_limit_snapshot,
 )
 from konvu_telemetry.live import CodexLiveFile, IncrementalLiveState
 from konvu_telemetry.models import Usage, UsageEvent
@@ -553,11 +556,59 @@ class ServiceTests(unittest.TestCase):
         )
         self.assertEqual(deduplicate_usage_events([first, replay]), [first])
 
-    def test_ratio_quota_values_are_normalized_to_percent(self) -> None:
-        windows = _quota_windows(
-            {"primary": {"used_percent": 0.8, "window_minutes": 300}}, 0
+    def test_claude_limit_snapshot_uses_documented_percentages(self) -> None:
+        snapshot = claude_limit_snapshot(
+            {
+                "rate_limits": {
+                    "five_hour": {
+                        "used_percentage": 1,
+                        "resets_at": 1767225600,
+                    },
+                    "seven_day": {"used_percentage": 90},
+                }
+            },
+            "session",
+            "2026-01-01T00:00:00+00:00",
         )
-        self.assertEqual(windows[0]["used_percent"], 80.0)
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot["windows"][0]["used_percent"], 1.0)
+        self.assertEqual(
+            snapshot["windows"][0]["resets_at"], "2026-01-01T00:00:00+00:00"
+        )
+
+    def test_codex_limit_snapshot_records_weekly_and_monthly_limits(self) -> None:
+        snapshot = codex_limit_snapshot(
+            {
+                "ordinaryUsageAllowed": False,
+                "rateLimits": {
+                    "primary": {
+                        "usedPercent": 29,
+                        "windowDurationMins": 10080,
+                        "resetsAt": 1767225600,
+                    },
+                    "individualLimit": {
+                        "remainingPercent": 36,
+                        "used": "800",
+                        "limit": "1250",
+                        "resetsAt": 1769904000,
+                    },
+                    "spendControlReached": True,
+                    "rateLimitReachedType": "workspace_member_usage_limit_reached",
+                },
+            },
+            "2026-01-01T00:00:00+00:00",
+        )
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(
+            [
+                (window["period"], window["used_percent"])
+                for window in snapshot["windows"]
+            ],
+            [("weekly", 29.0), ("monthly", 64.0)],
+        )
+        self.assertEqual(snapshot["windows"][1]["limit"], "1250")
+        self.assertFalse(snapshot["ordinary_usage_allowed"])
+        self.assertTrue(snapshot["spend_control_reached"])
 
     def test_claude_sdk_client_is_explicitly_attributed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2815,8 +2866,8 @@ class ServiceTests(unittest.TestCase):
             quota_usage_text(
                 {
                     "rate_limits": {
-                        "five_hour": {"utilization": 0.8},
-                        "seven_day": {"utilization": 0.9},
+                        "five_hour": {"used_percentage": 80},
+                        "seven_day": {"used_percentage": 90},
                     }
                 }
             ),
@@ -2863,7 +2914,7 @@ class ServiceTests(unittest.TestCase):
                 record_claude_quotas(
                     {
                         "rate_limits": {
-                            "five_hour": {"utilization": 0.8},
+                            "five_hour": {"used_percentage": 80},
                             "seven_day": {"used_percentage": 90},
                         }
                     },
@@ -2874,14 +2925,18 @@ class ServiceTests(unittest.TestCase):
                 "konvu_telemetry.fleet_telemetry.claude_quota_path",
                 return_value=quota_path,
             ):
-                enrich_snapshot(snapshot, [], [], time.time())
+                with patch(
+                    "konvu_telemetry.fleet_telemetry.fetch_codex_limits",
+                    return_value=None,
+                ):
+                    enrich_snapshot(snapshot, [], [], time.time())
         quotas = snapshot["account_quotas"]["claude"]
         self.assertEqual(quotas["source"], "claude_statusline")
         self.assertEqual(
             quotas["windows"],
             [
                 {
-                    "limit_id": "default",
+                    "period": "five_hour",
                     "session_id": "session",
                     "window_minutes": 300,
                     "used_percent": 80.0,
@@ -2889,7 +2944,7 @@ class ServiceTests(unittest.TestCase):
                     "resets_at": None,
                 },
                 {
-                    "limit_id": "default",
+                    "period": "weekly",
                     "session_id": "session",
                     "window_minutes": 10080,
                     "used_percent": 90,
@@ -2898,6 +2953,23 @@ class ServiceTests(unittest.TestCase):
                 },
             ],
         )
+
+    def test_claude_statusline_records_a_lower_post_reset_value(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            quota_path = Path(directory) / "claude-quotas.json"
+            with patch(
+                "konvu_telemetry.display.claude_quota_path", return_value=quota_path
+            ):
+                record_claude_quotas(
+                    {"rate_limits": {"five_hour": {"used_percentage": 90}}},
+                    "session",
+                )
+                record_claude_quotas(
+                    {"rate_limits": {"five_hour": {"used_percentage": 10}}},
+                    "session",
+                )
+            snapshot = json.loads(quota_path.read_text())
+        self.assertEqual(snapshot["windows"][0]["used_percent"], 10.0)
 
 
 if __name__ == "__main__":

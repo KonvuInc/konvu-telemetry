@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from functools import wraps
 import json
-import math
 import os
 import sys
 import time
@@ -23,6 +22,7 @@ from .parsers import (
     codex_hook_transcript,
     codex_turn_tool_calls,
 )
+from .provider_limits import claude_limit_snapshot
 from .storage import (
     claude_quota_path,
     session_path,
@@ -44,55 +44,12 @@ def record_claude_quotas(payload: dict[str, object], session_id: str) -> None:
     """Persist fresh Claude quota windows reported to the status-line hook."""
     if not valid_session_id(session_id):
         return
-    rate_limits = payload.get("rate_limits")
-    if not isinstance(rate_limits, dict):
+    snapshot = claude_limit_snapshot(
+        payload, session_id, datetime.now(timezone.utc).isoformat()
+    )
+    if snapshot is None:
         return
-    windows: list[dict[str, object]] = []
-    for name, minutes in (("five_hour", 5 * 60), ("seven_day", 7 * 24 * 60)):
-        raw_window = rate_limits.get(name)
-        if not isinstance(raw_window, dict):
-            continue
-        value = next(
-            (
-                raw_window.get(key)
-                for key in ("utilization", "used_percentage", "used_pct")
-                if isinstance(raw_window.get(key), (int, float))
-            ),
-            None,
-        )
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            continue
-        used_percent = value * 100 if 0 <= value <= 1 else value
-        if not math.isfinite(used_percent) or used_percent < 0:
-            continue
-        used_percent = min(100.0, used_percent)
-        resets_at = next(
-            (
-                raw_window.get(key)
-                for key in ("resets_at", "reset_at")
-                if isinstance(raw_window.get(key), str)
-            ),
-            None,
-        )
-        windows.append(
-            {
-                "limit_id": "default",
-                "session_id": session_id,
-                "window_minutes": minutes,
-                "used_percent": used_percent,
-                "remaining_percent": 100 - used_percent,
-                "resets_at": resets_at,
-            }
-        )
-    if windows:
-        write_private_json(
-            claude_quota_path(),
-            {
-                "observed_at": datetime.now(timezone.utc).isoformat(),
-                "source": "claude_statusline",
-                "windows": windows,
-            },
-        )
+    write_private_json(claude_quota_path(), snapshot)
 
 
 def money(value: object) -> str:
@@ -169,18 +126,11 @@ def quota_usage_text(payload: dict[str, object]) -> str:
         window = rate_limits.get(window_name)
         if not isinstance(window, dict):
             return None
-        value = next(
-            (
-                window.get(key)
-                for key in ("utilization", "used_percentage", "used_pct")
-                if isinstance(window.get(key), (int, float))
-            ),
-            None,
-        )
+        value = window.get("used_percentage")
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return None
-        percentage = value * 100 if 0 <= value <= 1 else value
-        return round(min(100, percentage)) if math.isfinite(percentage) else None
+        percentage = float(value)
+        return round(percentage) if 0 <= percentage <= 100 else None
 
     five_hour = percentage("five_hour")
     weekly = percentage("seven_day")
