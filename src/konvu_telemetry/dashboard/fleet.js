@@ -1784,11 +1784,22 @@ function browserAlerts(payload) {
     for (const window of Array.isArray(quotas?.windows) ? quotas.windows : []) {
       if (!finite(window?.used_percent)) continue;
       const threshold = [100, 80, 50].find((value) => window.used_percent >= value);
-      if (!threshold) continue;
       const period = window.period || duration(window.window_minutes * 60);
-      const reset = Date.parse(window.resets_at);
-      const resetKey = finite(reset) ? Math.floor(reset / 60000) : "unknown";
-      const key = "konvu-quota-alert-" + provider + "-" + period + "-" + resetKey;
+      const limitId = typeof window.limit_id === "string" && window.limit_id ? window.limit_id : "default";
+      const key = "konvu-quota-alert-" + provider + "-" + limitId + "-" + period;
+      if (!threshold) {
+        localStorage.removeItem(key);
+        continue;
+      }
+      if (localStorage.getItem(key) === null) {
+        const legacyPrefix = "konvu-quota-alert-" + provider + "-" + period + "-";
+        for (let index = 0; index < localStorage.length; index++) {
+          const legacyKey = localStorage.key(index);
+          if (!legacyKey?.startsWith(legacyPrefix)) continue;
+          const priorThreshold = Number(localStorage.getItem(legacyKey) || 0);
+          if (priorThreshold >= threshold) localStorage.setItem(key, String(priorThreshold));
+        }
+      }
       if (Number(localStorage.getItem(key) || 0) >= threshold) continue;
       localStorage.setItem(key, String(threshold));
       const notification = new Notification(
