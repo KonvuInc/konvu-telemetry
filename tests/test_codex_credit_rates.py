@@ -42,5 +42,6 @@ class CodexCreditRateTests(unittest.TestCase):
         event = replace(codex_event("fast"), model="gpt-6-sol")
         self.assertEqual(codex_credit_equivalent(event), 5.425)
 
+
 if __name__ == "__main__":
     unittest.main()

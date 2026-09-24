@@ -290,7 +290,6 @@ class ServiceTests(unittest.TestCase):
             )
         )
 
-
     def test_claude_stream_records_are_deduplicated(self) -> None:
         records = [
             {
@@ -550,7 +549,6 @@ class ServiceTests(unittest.TestCase):
             "standard",
         )
         self.assertEqual(deduplicate_usage_events([first, replay]), [first])
-
 
     def test_claude_sdk_client_is_explicitly_attributed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -962,8 +960,6 @@ class ServiceTests(unittest.TestCase):
         record = {"message": {"role": "user", "content": "<div>real user markup</div>"}}
         self.assertTrue(is_human_claude_prompt(record))
         self.assertTrue(is_claude_prompt(record))
-
-
 
     def test_incremental_reader_keeps_large_prompt_boundary_without_retaining_text(
         self,
@@ -1872,7 +1868,9 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(lines[-1], "╰─")
         self.assertEqual(lines[1:-1], [f"│ {row}" for row in rows])
 
-    def test_the_status_line_uses_collector_quotas_instead_of_stale_payload(self) -> None:
+    def test_the_status_line_uses_collector_quotas_instead_of_stale_payload(
+        self,
+    ) -> None:
         # Mutation guard: a status line that renders its own rows again fails here.
         session = self.shared_row_session()
         stale_quotas = {
@@ -2443,7 +2441,6 @@ class ServiceTests(unittest.TestCase):
         )
         self.assertEqual(session["forecast_basis"]["sample_count"], 2)
 
-
     def test_forecast_uses_completed_matching_configuration_only(self) -> None:
         session: dict[str, object] = {
             "speed": "standard",
@@ -2487,8 +2484,6 @@ class ServiceTests(unittest.TestCase):
             _comparable_forecast(session, [telemetry], True)
         self.assertEqual(session["projected_next_10_tasks_usd"], 20.0)
         self.assertEqual(session["forecast_basis"]["method"], "sparse_session_prompts")
-
-
 
     def test_task_series_preserves_zero_cost_prompt_boundaries(self) -> None:
         prices = {
@@ -2598,6 +2593,7 @@ class ServiceTests(unittest.TestCase):
             set(baseline),
             {"schema_version", "generated_at", "lookback_days", "forecasts"},
         )
+
 
 if __name__ == "__main__":
     unittest.main()

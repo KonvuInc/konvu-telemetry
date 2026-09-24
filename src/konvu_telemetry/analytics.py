@@ -192,9 +192,7 @@ def alert_number(value: object) -> float | None:
     return float(value)
 
 
-def apply_session_hot_state(
-    sessions: list[dict[str, object]], now: float
-) -> None:
+def apply_session_hot_state(sessions: list[dict[str, object]], now: float) -> None:
     """Mark currently active, fully priced sessions with a large paid forecast."""
     for session in sessions:
         forecast = alert_number(session.get("projected_next_10_tasks_usd"))

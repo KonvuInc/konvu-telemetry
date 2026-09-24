@@ -493,10 +493,7 @@ def _comparable_forecast(
         and _number(iteration.get("cost_usd")) is not None
     ][-FORECAST_WINDOW:]
     sufficient = len(comparable) >= FORECAST_MIN_SAMPLES
-    quota_tokens = [
-        _number(iteration.get("usage_tokens"))
-        for iteration in comparable
-    ]
+    quota_tokens = [_number(iteration.get("usage_tokens")) for iteration in comparable]
     if sufficient and all(tokens is not None for tokens in quota_tokens):
         session["projected_next_10_usage_tokens"] = round(
             sum(tokens for tokens in quota_tokens if tokens is not None)

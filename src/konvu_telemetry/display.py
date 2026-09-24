@@ -170,7 +170,9 @@ def quota_attribution_text(session: dict[str, object]) -> str:
         hot = (provider == "claude" and period == "five_hour" and estimate > 20) or (
             provider == "codex" and period == "weekly" and estimate > 10
         )
-        parts.append(f"~{float(estimate):.1f}% of {label} limit" + (" 🔥" if hot else ""))
+        parts.append(
+            f"~{float(estimate):.1f}% of {label} limit" + (" 🔥" if hot else "")
+        )
     return " · ".join(parts)
 
 
@@ -178,7 +180,11 @@ def quota_forecast_text(session: dict[str, object]) -> str:
     """Render a calibrated next-ten subscription-limit estimate when available."""
     attribution = session.get("quota_attribution")
     windows = attribution.get("windows") if isinstance(attribution, dict) else None
-    rows = [row for row in windows if isinstance(row, dict)] if isinstance(windows, list) else []
+    rows = (
+        [row for row in windows if isinstance(row, dict)]
+        if isinstance(windows, list)
+        else []
+    )
     for period in ("five_hour", "weekly"):
         for window in rows:
             forecast = window.get("projected_next_10_percent")
@@ -223,9 +229,7 @@ def usage_rows(
     rows = (
         [f"💸 {total_text} total · {forecast_text}"]
         if money_visible
-        else [
-            f"🟢 Included · {quota_forecast_text(session)}".rstrip(" ·")
-        ]
+        else [f"🟢 Included · {quota_forecast_text(session)}".rstrip(" ·")]
         if usage_mode == "included"
         else ["⚪ Subscription limit unavailable"]
     )
