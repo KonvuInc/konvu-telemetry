@@ -72,7 +72,12 @@ const series = (s) =>
         .sort((a, b) => Date.parse(a.started_at) - Date.parse(b.started_at))
     : [];
 const showsMoney = (s) => s.usage_mode === "exhausted" || s.usage_mode === "api_billed";
-const cost = (s) => (!showsMoney(s) || !nonnegative(s.total_cost_usd) || s.cost_status === "unavailable" ? null : s.total_cost_usd);
+const cost = (s) => {
+  if (!showsMoney(s) || s.cost_status === "unavailable") return null;
+  if (s.usage_mode === "api_billed") return nonnegative(s.total_cost_usd) ? s.total_cost_usd : null;
+  if (s.out_of_plan_spend_status === undefined) return nonnegative(s.total_cost_usd) ? s.total_cost_usd : null;
+  return nonnegative(s.out_of_plan_spend_usd) ? s.out_of_plan_spend_usd : null;
+};
 const forecast = (s) => (cost(s) !== null && nonnegative(s.projected_next_10_tasks_usd) ? s.projected_next_10_tasks_usd : null);
 const quotaShare = (s, period = "five_hour") => {
   const windows = s.quota_attribution?.windows;
@@ -516,11 +521,13 @@ function subagentCell(s) {
   );
 }
 function ledger(rows) {
+  const scale = ledgerDollarScale(rows);
   return (
-    '<div class="table-shell"><table class="session-ledger compact-ledger layout-1"><thead><tr><th>Session</th><th>Plan <span>/ next 10 prompts</span></th><th>Share of limit</th><th>Context</th><th>Subagents</th><th>Activity <span>/ age</span></th></tr></thead><tbody>' +
+    '<div class="table-shell"><table class="session-ledger compact-ledger layout-1"><thead><tr><th>Session</th><th>Plan or spend <span>/ next 10 prompts</span></th><th>Share of limit</th><th>Context</th><th>Subagents</th><th>Activity <span>/ age</span></th></tr></thead><tbody>' +
     rows
       .map((s) => {
-        const burning = s.notification?.hot === true;
+        const next = forecast(s),
+          burning = s.notification?.hot === true;
         return (
           '<tr class="' +
           (burning ? "burning-row" : "") +
@@ -529,7 +536,7 @@ function ledger(rows) {
           '"><td><div class="indexed-title">' +
           titleCell(s) +
           "</div></td><td>" +
-          spendVisual(s, 1) +
+          spendVisual(s, scale) +
           "</td><td>" +
           responsibilityCell(s) +
           "</td><td>" +
@@ -1120,10 +1127,13 @@ function renderAccounts() {
   $("#account-strip").innerHTML = cards.join("");
   $("#account-strip").hidden = !cards.length;
 }
-function renderOutOfPlan(rows) {
+function renderOutsidePlan(rows) {
   const paid = rows.filter(showsMoney);
-  $("#out-of-plan").innerHTML = paid.length
-    ? '<div class="attention-heading"><div><h2>Outside your plan</h2><p>These sessions are recording paid usage.</p></div></div><div class="attention-cards">' + paid.map((s) => '<article class="attention-card" data-session="' + esc(keyOf(s)) + '"><div>' + titleCell(s) + '</div><div class="attention-cost"><strong>' + money(cost(s)) + ' spent</strong>' + (forecast(s) !== null ? '<span>' + additional(forecast(s)) + ' over the next 10 prompts</span>' : '') + '</div></article>').join("") + "</div>"
+  const total = paid.reduce((sum, session) => sum + (cost(session) ?? 0), 0);
+  const next = paid.reduce((sum, session) => sum + (forecast(session) ?? 0), 0);
+  $("#outside-plan").hidden = !paid.length;
+  $("#outside-plan").innerHTML = paid.length
+    ? '<div class="outside-plan-copy"><span>Outside your plan</span><b>' + paid.length + ' live session' + (paid.length === 1 ? '' : 's') + '</b><strong>' + money(total) + ' spent</strong>' + (next ? '<em>' + additional(next) + ' over the next 10 prompts</em>' : '') + '</div>'
     : "";
 }
 function render() {
@@ -1136,14 +1146,13 @@ function render() {
   $("#live-count").textContent = rows.length;
   renderFreshness(stale);
   document.querySelectorAll("[data-provider]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.provider === state.provider)));
-  const inPlan = rows.filter((session) => !showsMoney(session));
-  $("#fleet").innerHTML = inPlan.length
-    ? ledger(inPlan)
+  $("#fleet").innerHTML = rows.length
+    ? ledger(rows)
     : '<div class="empty"><h3>No live sessions</h3><p>No activity in the last ' + liveWindowLabel() +
       (state.provider !== "all" ? " for " + providerName(state.provider) : "") +
       ". New sessions appear automatically.</p></div>";
   renderAccounts();
-  renderOutOfPlan(rows);
+  renderOutsidePlan(rows);
   renderInspector();
 }
 function renderFreshness(stale) {
@@ -1666,7 +1675,7 @@ function closeSession() {
   saveUrl();
   renderInspector();
   if (state.lastOpener?.isConnected) state.lastOpener.focus();
-  else document.querySelector('[data-provider="all"]')?.focus();
+  else $("#view-switch")?.focus();
 }
 
 const notificationUi = { busy: false, testSent: false };

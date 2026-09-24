@@ -2,35 +2,13 @@
   "generated_at": "2026-09-24T12:00:00Z",
   "live_activity_window_seconds": 1200,
   "account_quotas": {
-    "claude": {
-      "windows": [
-        {"period": "five_hour", "used_percent": 68, "window_minutes": 300},
-        {"period": "weekly", "used_percent": 74, "window_minutes": 10080}
-      ]
-    },
-    "codex": {
-      "windows": [
-        {"period": "weekly", "used_percent": 41, "window_minutes": 10080},
-        {"period": "monthly", "used_percent": 88, "window_minutes": 43200}
-      ]
-    }
+    "claude": {"windows": [{"period": "five_hour", "used_percent": 68, "window_minutes": 300}, {"period": "weekly", "used_percent": 74, "window_minutes": 10080}]},
+    "codex": {"ordinary_usage_allowed": false, "windows": [{"period": "weekly", "used_percent": 100, "window_minutes": 10080}, {"period": "monthly", "used_percent": 88, "window_minutes": 43200}]}
   },
   "sessions": [
-    {
-      "id": "preview-claude-included", "provider": "claude", "client": "cli", "title": "Implement subscription-limit dashboard", "model": "Claude Opus 4.1", "effort": "high", "usage_mode": "included", "context_tokens": 126000, "context_window_tokens": 200000, "task_count": 14, "subagent_total": 2, "active_subagents": 1,
-      "activity": {"state": "running"}, "quota_attribution": {"state": "estimated", "windows": [{"period": "five_hour", "estimated_percent": 24.2, "projected_next_10_percent": 8.1}, {"period": "weekly", "estimated_percent": 14.5}]}
-    },
-    {
-      "id": "preview-codex-included", "provider": "codex", "client": "desktop", "title": "Refactor collector polling", "model": "GPT-5 Codex", "effort": "medium", "usage_mode": "included", "context_tokens": 47000, "context_window_tokens": 128000, "task_count": 9, "subagent_total": 0, "active_subagents": 0,
-      "activity": {"state": "running"}, "quota_attribution": {"state": "estimated", "windows": [{"period": "weekly", "estimated_percent": 12.4, "projected_next_10_percent": 4.6}]}
-    },
-    {
-      "id": "preview-claude-paid", "provider": "claude", "client": "cli", "title": "Migrate authentication flows", "model": "Claude Opus 4.1", "effort": "high", "usage_mode": "exhausted", "context_tokens": 181000, "context_window_tokens": 200000, "task_count": 27, "subagent_total": 4, "active_subagents": 2,
-      "activity": {"state": "running"}, "cost_status": "complete", "total_cost_usd": 46.8, "projected_next_10_tasks_usd": 18.4, "notification": {"hot": true}
-    },
-    {
-      "id": "preview-codex-paid", "provider": "codex", "client": "cli", "title": "Investigate CI failures", "model": "GPT-5 Codex", "effort": "high", "usage_mode": "api_billed", "context_tokens": 31000, "context_window_tokens": 128000, "task_count": 6, "subagent_total": 0, "active_subagents": 0,
-      "activity": {"state": "idle"}, "cost_status": "complete", "total_cost_usd": 12.3, "projected_next_10_tasks_usd": 5.7
-    }
+    {"id":"preview-claude-1","provider":"claude","client":"cli","title":"Implement subscription-limit dashboard","model":"Claude Opus 4.1","effort":"high","usage_mode":"included","context_tokens":126000,"context_window_tokens":200000,"task_count":14,"subagent_total":2,"active_subagents":1,"activity":{"state":"running"},"quota_attribution":{"state":"estimated","windows":[{"period":"five_hour","estimated_percent":24.2,"projected_next_10_percent":8.1},{"period":"weekly","estimated_percent":14.5}]}},
+    {"id":"preview-claude-2","provider":"claude","client":"desktop","title":"Review pull-request feedback","model":"Claude Sonnet 4","effort":"medium","usage_mode":"included","context_tokens":47000,"context_window_tokens":200000,"task_count":9,"subagent_total":0,"active_subagents":0,"activity":{"state":"running"},"quota_attribution":{"state":"estimated","windows":[{"period":"five_hour","estimated_percent":9.8,"projected_next_10_percent":2.4}]}},
+    {"id":"preview-codex-1","provider":"codex","client":"cli","title":"Migrate authentication flows","model":"GPT-5 Codex","effort":"high","usage_mode":"exhausted","context_tokens":181000,"context_window_tokens":200000,"task_count":27,"subagent_total":4,"active_subagents":2,"activity":{"state":"running"},"cost_status":"complete","total_cost_usd":46.8,"out_of_plan_spend_usd":8.4,"out_of_plan_spend_status":"since_observed_plan_exit","projected_next_10_tasks_usd":18.4,"notification":{"hot":true}},
+    {"id":"preview-codex-2","provider":"codex","client":"desktop","title":"Investigate CI failures","model":"GPT-5 Codex","effort":"high","usage_mode":"exhausted","context_tokens":31000,"context_window_tokens":128000,"task_count":6,"subagent_total":0,"active_subagents":0,"activity":{"state":"idle"},"cost_status":"complete","total_cost_usd":12.3,"out_of_plan_spend_usd":2.3,"out_of_plan_spend_status":"since_observed_plan_exit","projected_next_10_tasks_usd":5.7}
   ]
 }

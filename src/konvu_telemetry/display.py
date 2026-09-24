@@ -313,6 +313,7 @@ def usage_rows(
     context_percent: float | None = None,
 ) -> list[str]:
     """Build the usage summary every surface shows, unframed; each surface wraps it itself."""
+    usage_mode = session.get("usage_mode")
     complete = session.get("cost_status") == "complete"
     forecast = session.get("projected_next_10_tasks_usd")
     forecast_text = (
@@ -320,7 +321,11 @@ def usage_rows(
         if complete and isinstance(forecast, (int, float))
         else "forecast unavailable"
     )
-    total_cost = session.get("total_cost_usd")
+    total_cost = (
+        session.get("total_cost_usd")
+        if usage_mode == "api_billed" or session.get("out_of_plan_spend_status") is None
+        else session.get("out_of_plan_spend_usd")
+    )
     total_text = (
         f"{money(total_cost)} API-equivalent"
         if complete
@@ -333,7 +338,6 @@ def usage_rows(
         if context_percent is not None
         else context_usage_text(session)
     )
-    usage_mode = session.get("usage_mode")
     money_visible = usage_mode in {"api_billed", "exhausted"}
     rows = (
         [f"💸 {total_text} total · {forecast_text}"]

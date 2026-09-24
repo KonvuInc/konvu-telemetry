@@ -240,3 +240,48 @@ def apply_usage_modes(snapshot: dict[str, object]) -> None:
             session["usage_mode"] = "included"
         else:
             session["usage_mode"] = "unknown"
+
+
+def apply_out_of_plan_accounting(snapshot: dict[str, object]) -> None:
+    """Count exhausted-plan spend only from the first locally observed cutoff."""
+    sessions = snapshot.get("sessions")
+    if not isinstance(sessions, list):
+        return
+    state = _load_state()
+    providers = state["providers"]
+    assert isinstance(providers, dict)
+    for provider in ("claude", "codex"):
+        rows = [
+            session
+            for session in sessions
+            if isinstance(session, dict) and session.get("provider") == provider
+        ]
+        if not rows:
+            continue
+        provider_state = providers.setdefault(provider, {"sessions": {}, "windows": {}})
+        if not isinstance(provider_state, dict):
+            providers[provider] = provider_state = {"sessions": {}, "windows": {}}
+        billing = provider_state.setdefault("billing", {})
+        if not isinstance(billing, dict):
+            provider_state["billing"] = billing = {}
+        exhausted = all(session.get("usage_mode") == "exhausted" for session in rows)
+        if not exhausted:
+            billing["mode"] = "included"
+            billing["offsets"] = {}
+            continue
+        offsets = billing.setdefault("offsets", {})
+        if not isinstance(offsets, dict):
+            billing["offsets"] = offsets = {}
+        for session in rows:
+            session_id = session.get("id")
+            total = _number(session.get("total_cost_usd"))
+            if not isinstance(session_id, str) or total is None:
+                continue
+            prior = _number(offsets.get(session_id))
+            if prior is None:
+                offsets[session_id] = total
+                prior = total
+            session["out_of_plan_spend_usd"] = round(max(0.0, total - prior), 6)
+            session["out_of_plan_spend_status"] = "since_observed_plan_exit"
+        billing["mode"] = "exhausted"
+    write_private_json(quota_attribution_path(), state)

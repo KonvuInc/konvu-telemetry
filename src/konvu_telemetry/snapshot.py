@@ -41,7 +41,11 @@ from .codex_credit_rates import (
     codex_credit_equivalent_status,
 )
 from .fleet_telemetry import enrich_snapshot
-from .quota_attribution import apply_quota_attribution, apply_usage_modes
+from .quota_attribution import (
+    apply_out_of_plan_accounting,
+    apply_quota_attribution,
+    apply_usage_modes,
+)
 from .live import CodexLiveFile, IncrementalLiveState
 from .models import UsageEvent
 from .parsers import (
@@ -892,6 +896,7 @@ def build_snapshot(
     )
     apply_quota_attribution(snapshot)
     apply_usage_modes(snapshot)
+    apply_out_of_plan_accounting(snapshot)
     locate_compactions(snapshot)
     for session in sessions:
         history = session.get("context_history")

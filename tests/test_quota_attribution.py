@@ -5,7 +5,11 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from konvu_telemetry.quota_attribution import apply_quota_attribution, apply_usage_modes
+from konvu_telemetry.quota_attribution import (
+    apply_out_of_plan_accounting,
+    apply_quota_attribution,
+    apply_usage_modes,
+)
 from konvu_telemetry.storage import quota_attribution_path
 
 
@@ -144,6 +148,17 @@ class QuotaAttributionTests(unittest.TestCase):
                 value for key, value in windows.items() if ":five_hour:" in key
             )
             self.assertEqual(five_hour_ledger["allocations"], {})
+
+    def test_exhausted_plan_spend_starts_when_the_cutoff_is_observed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ, {"KONVU_LIVE_USAGE_HOME": directory}
+        ):
+            first = {"sessions": [{"id": "a", "provider": "claude", "usage_mode": "exhausted", "total_cost_usd": 12.0}]}
+            apply_out_of_plan_accounting(first)
+            self.assertEqual(first["sessions"][0]["out_of_plan_spend_usd"], 0.0)
+            second = {"sessions": [{"id": "a", "provider": "claude", "usage_mode": "exhausted", "total_cost_usd": 17.5}]}
+            apply_out_of_plan_accounting(second)
+            self.assertEqual(second["sessions"][0]["out_of_plan_spend_usd"], 5.5)
 
 
 if __name__ == "__main__":
