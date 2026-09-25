@@ -8,6 +8,7 @@ import math
 import os
 import sys
 import time
+from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -30,12 +31,26 @@ PROMPT_BOX_INSTRUCTION = (
 SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
 
+def one_decimal(value: int | float) -> str:
+    """Round a finite display value to one decimal using half-up semantics."""
+    return str(Decimal(str(value)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
+
+
 def money(value: object) -> str:
     return (
-        f"${float(value):.1f}"
+        f"${one_decimal(value)}"
         if isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
         else "price unavailable"
     )
+
+
+def percentage(value: object) -> str:
+    """Format a displayed percentage consistently across CLI surfaces."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "—"
+    return f"{one_decimal(value)}%" if math.isfinite(value) else "—"
 
 
 def tokens(value: object) -> str:
@@ -120,7 +135,9 @@ def quota_usage_text(snapshot: dict[str, object], provider: str) -> str:
             if label == "monthly"
             else ""
         )
-        parts.append(f"{emoji} {round(min(100, max(0, used)))}% {label} limit".lstrip())
+        parts.append(
+            f"{emoji} {percentage(min(100, max(0, used)))} {label} limit".lstrip()
+        )
     text = " · ".join(parts)
     stale = isinstance(account, dict) and account.get("status") == "stale"
     return f"Last known · {text}" if text and stale else text
@@ -142,9 +159,9 @@ def subagent_usage_text(session: dict[str, object]) -> str:
         return ""
     shared_percentage = None
     if isinstance(handed, int) and isinstance(context, int) and context > 0:
-        shared_percentage = round(handed / (context * total) * 100)
+        shared_percentage = handed / (context * total) * 100
     shared_text = (
-        f"{min(100, shared_percentage)}% context shared"
+        f"{percentage(min(100, shared_percentage))} context shared"
         if shared_percentage is not None
         else tokens(handed)
     )
@@ -171,7 +188,7 @@ def context_usage_text(session: dict[str, object]) -> str:
     context = session.get("context_tokens")
     window = session.get("context_window_tokens")
     if isinstance(context, int) and isinstance(window, int) and window > 0:
-        return f"{round(context / window * 100)}% context"
+        return f"{percentage(context / window * 100)} context"
     return f"{tokens(context)} context"
 
 
@@ -194,7 +211,7 @@ def quota_attribution_text(session: dict[str, object]) -> str:
             provider == "codex" and period == "weekly" and estimate > 10
         )
         parts.append(
-            f"~{float(estimate):.1f}% of {label} limit" + (" 🔥" if hot else "")
+            f"~{percentage(estimate)} of {label} limit" + (" 🔥" if hot else "")
         )
     return " · ".join(parts)
 
@@ -214,7 +231,7 @@ def quota_forecast_text(session: dict[str, object]) -> str:
             if window.get("period") == period and isinstance(forecast, (int, float)):
                 label = "5-hour" if period == "five_hour" else "weekly"
                 return (
-                    f"~{float(forecast):.1f}% of {label} limit in the next 10 prompts"
+                    f"~{percentage(forecast)} of {label} limit in the next 10 prompts"
                 )
     return ""
 
@@ -250,7 +267,7 @@ def usage_rows(
         else "cost unavailable"
     )
     context_text = (
-        f"{context_percent:.0f}% context"
+        f"{percentage(context_percent)} context"
         if context_percent is not None
         else context_usage_text(session)
     )
