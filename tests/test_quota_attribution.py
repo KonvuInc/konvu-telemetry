@@ -354,3 +354,45 @@ class QuotaAttributionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class QuotaWeightTests(unittest.TestCase):
+    """Cache reads re-read the whole conversation, so parity weighting let them
+    swamp the calibration rate in long sessions."""
+
+    def test_cache_reads_are_discounted_against_fresh_tokens(self) -> None:
+        from konvu_telemetry.models import CACHE_READ_QUOTA_WEIGHT, Usage
+
+        usage = Usage(
+            input_tokens=1000,
+            output_tokens=0,
+            cache_write_tokens=0,
+            cache_write_one_hour_tokens=0,
+            cache_read_tokens=1000,
+            web_search_requests=0,
+            speed="standard",
+        )
+        self.assertEqual(usage.total_tokens, 2000)
+        self.assertEqual(usage.quota_tokens, 1000 + 1000 * CACHE_READ_QUOTA_WEIGHT)
+        self.assertLess(usage.quota_tokens, usage.total_tokens)
+
+    def test_forecast_never_exceeds_the_window_headroom(self) -> None:
+        snapshot = {
+            "generated_at": "2026-01-01T00:00:00+00:00",
+            "account_quotas": {
+                "claude": {"windows": [{"period": "five_hour", "used_percent": 97.0}]}
+            },
+            "sessions": [
+                {
+                    "provider": "claude",
+                    "id": "s1",
+                    "token_usage": {"input": 10_000},
+                    "projected_next_10_usage_tokens": 10_000_000_000.0,
+                }
+            ],
+        }
+        apply_quota_attribution(snapshot)
+        for window in snapshot["sessions"][0]["quota_attribution"]["windows"]:
+            forecast = window.get("projected_next_10_percent")
+            if forecast is not None:
+                self.assertLessEqual(forecast, 3.0)

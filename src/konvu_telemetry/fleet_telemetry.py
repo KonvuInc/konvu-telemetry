@@ -492,7 +492,16 @@ def _comparable_forecast(
         and _number(iteration.get("cost_usd")) is not None
     ][-FORECAST_WINDOW:]
     sufficient = len(comparable) >= FORECAST_MIN_SAMPLES
-    quota_tokens = [_number(iteration.get("usage_tokens")) for iteration in comparable]
+    # Forecast and calibration must weigh tokens the same way, or the rate and
+    # the projection it multiplies disagree. Sessions stored before quota_tokens
+    # existed fall back to the raw sum so their forecast does not vanish; the
+    # next collection rewrites them with the weighted value.
+    quota_tokens = [
+        _number(iteration.get("quota_tokens"))
+        if _number(iteration.get("quota_tokens")) is not None
+        else _number(iteration.get("usage_tokens"))
+        for iteration in comparable
+    ]
     if sufficient and all(tokens is not None for tokens in quota_tokens):
         session["projected_next_10_usage_tokens"] = round(
             sum(tokens for tokens in quota_tokens if tokens is not None)

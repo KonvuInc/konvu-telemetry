@@ -7,6 +7,7 @@ import math
 from datetime import datetime
 from typing import TypedDict
 
+from .models import CACHE_READ_QUOTA_WEIGHT
 from .storage import quota_attribution_path, write_private_json
 
 
@@ -55,7 +56,14 @@ def _session_usage(session: dict[str, object]) -> SessionUsage | None:
     token_usage = session.get("token_usage")
     tokens = 0.0
     if isinstance(token_usage, dict):
-        tokens = sum(_number(token_usage.get(key)) or 0.0 for key in token_usage)
+        # Same weighting as Usage.quota_tokens: a cached read is a tenth of an
+        # input token. Summing every bucket at parity let cache reads, which
+        # re-read the whole conversation each prompt, swamp the rate.
+        tokens = sum(
+            (_number(value) or 0.0)
+            * (CACHE_READ_QUOTA_WEIGHT if key == "cache_read" else 1.0)
+            for key, value in token_usage.items()
+        )
     credits = _number(session.get("total_credit_equivalent"))
     return {"tokens": tokens, "credits": credits}
 
@@ -313,8 +321,11 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
                         "scope": "observed_window",
                     }
                     if forecast_weight is not None and calibration is not None:
+                        # A share of a window cannot exceed the window's
+                        # remaining headroom, whatever the calibrated rate says.
+                        headroom_percent = max(0.0, 100.0 - used_percent)
                         estimate["projected_next_10_percent"] = round(
-                            calibration * forecast_weight, 2
+                            min(calibration * forecast_weight, headroom_percent), 2
                         )
                     estimates.append(estimate)
             session["quota_attribution"] = {
