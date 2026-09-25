@@ -15,6 +15,7 @@ import sysconfig
 import time
 import webbrowser
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
@@ -30,6 +31,7 @@ CLAUDE_STATUSLINE_STATE_NAME = "konvu-claude-statusline-state.json"
 CONSOLE_COMMAND = "konvu-telemetry"
 HOOK_TIMEOUT_SECONDS = 5
 REQUIRED_CONSOLE_COMMANDS = ("claude-prompt-hook", "codex-prompt-hook")
+INITIAL_COLLECTION_WAIT_SECONDS = 15.0
 
 
 def record_setup_completed(duration_seconds: float, *, default_enabled: bool) -> None:
@@ -502,6 +504,27 @@ def restore_installation(states: list[FileState], restart_service: bool) -> None
         start_launch_agent()
 
 
+def wait_for_initial_collection(
+    started_at: float, timeout_seconds: float = INITIAL_COLLECTION_WAIT_SECONDS
+) -> bool:
+    """Wait for the resident collector, rather than issuing a duplicate provider poll."""
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        health = load_health()
+        last_success = health.get("last_success_at")
+        if isinstance(last_success, str):
+            try:
+                completed_at = datetime.fromisoformat(
+                    last_success.replace("Z", "+00:00")
+                ).timestamp()
+            except ValueError:
+                completed_at = 0.0
+            if completed_at >= started_at:
+                return True
+        time.sleep(0.1)
+    return False
+
+
 def setup(
     interval: int, open_browser: bool, tracking_enabled: bool = True
 ) -> dict[str, str]:
@@ -535,6 +558,7 @@ def setup(
             ensure_launcher=False, create_backup=False
         )
         dashboard = f"http://127.0.0.1:{PORT}/"
+        collection_started_after = time.time()
         install_launch_agent(interval, ensure_launcher=False)
     except Exception:
         restore_installation(states, states[-1].contents is not None)
@@ -542,6 +566,7 @@ def setup(
             path.unlink(missing_ok=True)
         raise
     if open_browser:
+        wait_for_initial_collection(collection_started_after)
         webbrowser.open(dashboard)
     record_setup_completed(
         time.monotonic() - started_at,

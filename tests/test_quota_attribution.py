@@ -164,7 +164,11 @@ class QuotaAttributionTests(unittest.TestCase):
             apply_quota_attribution(reset)
             self.assertEqual(
                 reset["sessions"][0]["quota_attribution"],
-                {"state": "observing", "windows": []},
+                {
+                    "state": "observing",
+                    "windows": [],
+                    "reason": "window_reset",
+                },
             )
 
     def test_future_deadline_correction_does_not_reset_before_the_old_deadline(
@@ -209,7 +213,11 @@ class QuotaAttributionTests(unittest.TestCase):
 
             self.assertEqual(
                 reset["sessions"][0]["quota_attribution"],
-                {"state": "observing", "windows": []},
+                {
+                    "state": "observing",
+                    "windows": [],
+                    "reason": "window_reset",
+                },
             )
 
             resumed = snapshot(2, [session("a", 300)])
@@ -313,7 +321,11 @@ class QuotaAttributionTests(unittest.TestCase):
 
             self.assertEqual(
                 current["sessions"][0]["quota_attribution"],
-                {"state": "observing", "windows": []},
+                {
+                    "state": "observing",
+                    "windows": [],
+                    "reason": "establishing_baseline",
+                },
             )
 
     def test_codex_spending_cap_does_not_mask_available_subscription_usage(
@@ -344,6 +356,10 @@ class QuotaAttributionTests(unittest.TestCase):
             apply_quota_attribution(first)
             self.assertEqual(
                 first["sessions"][0]["quota_attribution"]["state"], "observing"
+            )
+            self.assertEqual(
+                first["sessions"][0]["quota_attribution"]["reason"],
+                "establishing_baseline",
             )
 
             second = snapshot(24, [session("a", 160), session("b", 120)])
@@ -449,7 +465,11 @@ class QuotaAttributionTests(unittest.TestCase):
 
             self.assertEqual(
                 reset["sessions"][0]["quota_attribution"],
-                {"state": "observing", "windows": []},
+                {
+                    "state": "observing",
+                    "windows": [],
+                    "reason": "window_reset",
+                },
             )
             ledger = json.loads(quota_attribution_path().read_text())
             stored = next(iter(ledger["providers"]["claude"]["windows"].values()))

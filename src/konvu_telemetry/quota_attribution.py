@@ -248,6 +248,43 @@ def _reset_window(
         stored.pop("resets_at", None)
 
 
+def _observation_reason(
+    provider: str,
+    session_id: str,
+    account: dict[str, object],
+    raw_windows: list[object],
+    windows_state: dict[str, object],
+    new_window_keys: set[str],
+    reset_window_keys: set[str],
+) -> str:
+    if account.get("status") == "unavailable":
+        return "provider_unavailable"
+    primary_period = "weekly" if provider == "codex" else "five_hour"
+    primary = next(
+        (
+            window
+            for window in raw_windows
+            if isinstance(window, dict) and window.get("period") == primary_period
+        ),
+        None,
+    )
+    if not isinstance(primary, dict):
+        return "provider_unavailable"
+    primary_key = _window_key(primary)
+    used = _number(primary.get("used_percent"))
+    if used == 0 or primary_key in reset_window_keys:
+        return "window_reset"
+    if primary_key in new_window_keys:
+        return "establishing_baseline"
+    _, stored = _stored_window(windows_state, primary)
+    if not isinstance(stored, dict):
+        return "establishing_baseline"
+    pending = stored.get("pending")
+    if isinstance(pending, dict) and (_number(pending.get(session_id)) or 0) > 0:
+        return "waiting_for_quota_change"
+    return "waiting_for_activity"
+
+
 def apply_quota_attribution(snapshot: dict[str, object]) -> None:
     """Attach forward-only quota-share estimates and persist their small local ledger."""
     sessions = snapshot.get("sessions")
@@ -281,6 +318,8 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
             previous_sessions = provider_state["sessions"]
             windows_state = provider_state["windows"]
         provider_state.pop("pending", None)
+        new_window_keys: set[str] = set()
+        reset_window_keys: set[str] = set()
         current: dict[str, StoredSessionUsage] = {}
         interval_weights: dict[str, float] = {}
         for session in session_rows:
@@ -336,6 +375,7 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
             if window_key is None or used is None:
                 continue
             if not isinstance(old_window, dict):
+                new_window_keys.add(window_key)
                 windows_state[window_key] = {
                     "used_percent": used,
                     "allocations": {},
@@ -359,6 +399,7 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
                 used < previous_used and not has_current_reset
             ):
                 _reset_window(old_window, raw_window, used)
+                reset_window_keys.add(window_key)
                 continue
             _refresh_reset_timestamp(old_window, raw_window)
             pending = old_window.setdefault("pending", {})
@@ -453,6 +494,16 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
                 "state": "observing" if not estimates else "estimated",
                 "windows": estimates,
             }
+            if not estimates:
+                session["quota_attribution"]["reason"] = _observation_reason(
+                    provider,
+                    str(session["id"]),
+                    account,
+                    raw_windows,
+                    windows_state,
+                    new_window_keys,
+                    reset_window_keys,
+                )
     write_private_json(quota_attribution_path(), state)
 
 
