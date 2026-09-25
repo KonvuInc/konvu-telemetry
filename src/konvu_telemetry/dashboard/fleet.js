@@ -35,10 +35,12 @@ const $ = (selector) => document.querySelector(selector);
 const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const finite = (value) => typeof value === "number" && Number.isFinite(value);
 const nonnegative = (value) => finite(value) && value >= 0;
-const money = (value) => (nonnegative(value) ? "$" + value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "—");
+const oneDecimal = (value) => Math.round((value + Number.EPSILON) * 10) / 10;
+const percentage = (value) => (finite(value) ? oneDecimal(value).toFixed(1) + "%" : "—");
+const money = (value) => (nonnegative(value) ? "$" + oneDecimal(value).toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 }) : "—");
 const additional = (value) => (nonnegative(value) ? "+" + money(value) : "—");
 const compactMoney = (value) =>
-  nonnegative(value) ? "$" + (value >= 1000 ? (value / 1000).toFixed(1) + "k" : value >= 10 ? Math.round(value) : value.toFixed(1)) : "—";
+  nonnegative(value) ? "$" + (value >= 1000 ? oneDecimal(value / 1000).toFixed(1) + "k" : oneDecimal(value).toFixed(1)) : "—";
 const tokens = (value) =>
   nonnegative(value) ? (value >= 1e6 ? (value / 1e6).toFixed(1) + "M" : value >= 1000 ? (value / 1000).toFixed(1) + "k" : String(value)) : "—";
 const duration = (seconds) => {
@@ -346,7 +348,7 @@ function donut(s) {
     '" transform="rotate(-90 19 19)"/></svg><span style="color:' +
     contextColor(pct) +
     '">' +
-    (pct === null ? "—" : Math.round(pct) + "%") +
+    percentage(pct) +
     "</span></div>"
   );
 }
@@ -431,7 +433,7 @@ function quotaFireIcon(percent) {
   const art = QF_STAGES[stage];
   const label =
     ["", "Warming up", "Burning through your limit", "Tearing through your limit"][stage] +
-    ": +" + percent.toFixed(percent >= 10 ? 0 : 1) + "% of the limit over the next 10 prompts";
+    ": +" + percentage(percent) + " of the limit over the next 10 prompts";
   return (
     '<span class="quota-fire fire-' + stage + '" role="img" aria-label="' + esc(label) + '" title="' + esc(label) + '">' +
     '<svg viewBox="' + art.box + '" aria-hidden="true">' + art.body() + "</svg></span>"
@@ -499,7 +501,7 @@ function spendVisual(s, scale) {
     const ahead = shareAhead(s);
     const window = quotaWindowName(s);
     const line = finite(ahead)
-      ? "Next 10 prompts: +" + ahead.toFixed(ahead >= 10 ? 0 : 1) + "% of " + window + " limit"
+      ? "Next 10 prompts: +" + percentage(ahead) + " of " + window + " limit"
       : "";
     return (
       '<div class="spending included-copy"><div class="included-copy-text"><strong>' +
@@ -537,7 +539,7 @@ function spendVisual(s, scale) {
 function shareBar(value, sentence, title) {
   return (
     '<div class="share-bar" title="' + esc(title) + '">' +
-    '<div class="share-line"><b>' + value.toFixed(value >= 10 ? 0 : 1) + "%</b>" +
+    '<div class="share-line"><b>' + percentage(value) + "</b>" +
     "<span>" + esc(sentence) + "</span></div>" +
     '<i><em style="width:' + Math.max(1, Math.min(100, value)) + '%"></em></i></div>'
   );
@@ -555,7 +557,7 @@ function responsibilityCell(s) {
   const share = shareOf(s);
   if (!finite(share)) return '<span class="tiny">—</span>';
   const window = quotaWindowName(s);
-  return shareBar(share, "of your " + window + " limit", "This session is responsible for " + share.toFixed(1) + "% of the " + window + " limit");
+  return shareBar(share, "of your " + window + " limit", "This session is responsible for " + percentage(share) + " of the " + window + " limit");
 }
 function subagentCell(s) {
   const total = Number.isInteger(s.subagent_total) && s.subagent_total >= 0 ? s.subagent_total : "—";
@@ -680,10 +682,10 @@ function planTiles(rows) {
   const windowOf = (s) => (s.provider === "codex" ? "weekly" : "5-hour");
   return [
     kpiTile("Spent beyond plan", money(0), "good", kpiFootnote("nothing is billing"), true),
-    heaviest ? kpiTile("Using most of your " + windowOf(heaviest) + " limit", shareOf(heaviest).toFixed(1) + "%", band(shareOf(heaviest), 10, 20, 35), kpiSession(heaviest)) : "",
-    drifting ? kpiTile("Growing fastest", "+" + shareAhead(drifting).toFixed(1) + "%", band(shareAhead(drifting), 4, 8, 12), kpiSession(drifting)) : "",
-    finite(avgContext) ? kpiTile("Average context used", avgContext.toFixed(0) + "%", band(avgContext, 50, 70, 88), kpiFootnote("across " + rows.length + " sessions")) : "",
-    agents.length ? kpiTile("Average subagent context", finite(agentContext) ? agentContext.toFixed(0) + "%" : "\u2014", band(agentContext, 30, 45, 60), kpiFootnote((agents.length / rows.length).toFixed(1) + " subagents per session")) : "",
+    heaviest ? kpiTile("Using most of your " + windowOf(heaviest) + " limit", percentage(shareOf(heaviest)), band(shareOf(heaviest), 10, 20, 35), kpiSession(heaviest)) : "",
+    drifting ? kpiTile("Growing fastest", "+" + percentage(shareAhead(drifting)), band(shareAhead(drifting), 4, 8, 12), kpiSession(drifting)) : "",
+    finite(avgContext) ? kpiTile("Average context used", percentage(avgContext), band(avgContext, 50, 70, 88), kpiFootnote("across " + rows.length + " sessions")) : "",
+    agents.length ? kpiTile("Average subagent context", percentage(agentContext), band(agentContext, 30, 45, 60), kpiFootnote((agents.length / rows.length).toFixed(1) + " subagents per session")) : "",
   ].filter(Boolean);
 }
 function moneyTiles(rows) {
@@ -698,7 +700,7 @@ function moneyTiles(rows) {
     kpiTile("Spent beyond plan", money(spend), spend > 0 ? "bad" : "good", kpiFootnote("across " + rows.length + " billing sessions"), true),
     priciest ? kpiTile("Most expensive session", money(cost(priciest)), band((cost(priciest) / (spend || 1)) * 100, 25, 45, 65), kpiSession(priciest)) : "",
     hottest ? kpiTile("Biggest forecast", additional(forecast(hottest)), band(forecast(hottest), 5, 12, 20), kpiSession(hottest)) : "",
-    finite(avgContext) ? kpiTile("Average context used", avgContext.toFixed(0) + "%", band(avgContext, 50, 70, 88), kpiFootnote("across " + rows.length + " billing sessions")) : "",
+    finite(avgContext) ? kpiTile("Average context used", percentage(avgContext), band(avgContext, 50, 70, 88), kpiFootnote("across " + rows.length + " billing sessions")) : "",
     topAgent ? kpiTile("Costliest subagent", money(topAgent.agent.cost_usd), band((topAgent.agent.cost_usd / (spend || 1)) * 100, 15, 30, 45), kpiSession(topAgent.session, subagentLabel(topAgent.agent))) : "",
   ].filter(Boolean);
 }
@@ -722,7 +724,7 @@ function quotaInline(providers) {
         .map((w) => {
           const used = Math.max(0, Math.min(100, w.used_percent));
           const label = w.period === "five_hour" ? "5h" : w.period === "weekly" ? "week" : "month";
-          return '<span class="qm"><i>' + label + '</i><u><em style="width:' + used + '%"></em></u><b>' + used.toFixed(0) + "%</b></span>";
+          return '<span class="qm"><i>' + label + '</i><u><em style="width:' + used + '%"></em></u><b>' + percentage(used) + "</b></span>";
         })
         .join("");
       return (
@@ -1005,7 +1007,7 @@ function showGraphTip(point, x, y) {
     "</dd><dt>Next 10 prompts</dt><dd>" +
     additional(forecast(s)) +
     "</dd><dt>Context</dt><dd>" +
-    (context(s) === null ? "—" : Math.round(context(s)) + "%") +
+    percentage(context(s)) +
     "</dd></dl>";
   tip.hidden = false;
   positionGraphTip(x, y);
@@ -1774,7 +1776,7 @@ function contextGraph(s) {
       const py = T + (1 - f) * (H - T - B);
       return (
         '<line class="cg-grid" x1="' + L + '" x2="' + (W - R) + '" y1="' + py.toFixed(1) + '" y2="' + py.toFixed(1) + '"/>' +
-        '<text class="cg-ylab" x="' + (L - 8) + '" y="' + (py + 3).toFixed(1) + '">' + Math.round(f * 100) + "%</text>"
+        '<text class="cg-ylab" x="' + (L - 8) + '" y="' + (py + 3).toFixed(1) + '">' + percentage(f * 100) + "</text>"
       );
     })
     .join("");
@@ -1789,13 +1791,13 @@ function contextGraph(s) {
     .map((r) => '<line class="cg-compact" x1="' + x(r.iteration).toFixed(1) + '" x2="' + x(r.iteration).toFixed(1) + '" y1="' + T + '" y2="' + (H - B) + '"><title>Context compacted</title></line>')
     .join("");
   const end = points[points.length - 1];
-  const nowPct = Math.round((rows[rows.length - 1].context_tokens / windowTokens) * 100);
+  const nowPct = (rows[rows.length - 1].context_tokens / windowTokens) * 100;
   return (
     '<figure class="context-graph"><svg viewBox="0 0 ' + W + " " + H + '" role="img" aria-label="Context used against prompt number">' +
     grid + drops +
     '<path class="cg-area" d="' + area + '"/><path class="cg-line" d="' + line + '"/>' +
     '<circle class="cg-end" cx="' + end[0].toFixed(1) + '" cy="' + end[1].toFixed(1) + '" r="3.5"/>' +
-    '<text class="cg-end-label" x="' + Math.min(end[0] + 8, W - R - 30) + '" y="' + Math.max(end[1] - 8, T + 10) + '">' + nowPct + "%</text>" +
+    '<text class="cg-end-label" x="' + Math.min(end[0] + 8, W - R - 30) + '" y="' + Math.max(end[1] - 8, T + 10) + '">' + percentage(nowPct) + "</text>" +
     ticks +
     '<text class="cg-axis" x="' + ((L + W - R) / 2) + '" y="' + (H - 2) + '">Prompt</text>' +
     "</svg></figure>"
@@ -1841,8 +1843,8 @@ function renderInspector() {
     scroll = $("#inspector-body").scrollTop;
   const included = !showsMoney(s);
   const stats = included
-    ? '<div class="inspector-stats"><div><span>Subscription</span><strong>' + (s.quota_status === "stale" ? "Last known: included" : s.usage_mode === "included" ? "Included" : "Unknown") + '</strong></div><div><span>Context</span><strong>' + (pct !== null ? Math.round(pct) + "%" : "—") + "</strong><small>" + tokens(s.context_tokens) + " / " + tokens(s.context_window_tokens) + "</small></div><div><span>Prompts</span><strong>" + count(s) + "</strong><small>recorded locally</small></div></div>"
-    : '<div class="inspector-stats"><div><span>Recorded spend</span><strong>' + money(cost(s)) + "</strong><small>" + count(s) + " prompts</small></div><div><span>" + (last?.completed === false ? "Current prompt" : "Last prompt") + "</span><strong>" + money(last?.priced === false ? null : last?.cost_usd) + "</strong><small>" + (last?.completed === false ? "still accumulating" : "recorded cost") + "</small></div><div><span>Next 10 prompts</span><strong>" + additional(forecast(s)) + "</strong><small>additional estimate</small></div><div><span>Context</span><strong>" + (pct !== null ? Math.round(pct) + "%" : "—") + "</strong><small>" + tokens(s.context_tokens) + " / " + tokens(s.context_window_tokens) + "</small></div></div>";
+    ? '<div class="inspector-stats"><div><span>Subscription</span><strong>' + (s.quota_status === "stale" ? "Last known: included" : s.usage_mode === "included" ? "Included" : "Unknown") + '</strong></div><div><span>Context</span><strong>' + percentage(pct) + "</strong><small>" + tokens(s.context_tokens) + " / " + tokens(s.context_window_tokens) + "</small></div><div><span>Prompts</span><strong>" + count(s) + "</strong><small>recorded locally</small></div></div>"
+    : '<div class="inspector-stats"><div><span>Recorded spend</span><strong>' + money(cost(s)) + "</strong><small>" + count(s) + " prompts</small></div><div><span>" + (last?.completed === false ? "Current prompt" : "Last prompt") + "</span><strong>" + money(last?.priced === false ? null : last?.cost_usd) + "</strong><small>" + (last?.completed === false ? "still accumulating" : "recorded cost") + "</small></div><div><span>Next 10 prompts</span><strong>" + additional(forecast(s)) + "</strong><small>additional estimate</small></div><div><span>Context</span><strong>" + percentage(pct) + "</strong><small>" + tokens(s.context_tokens) + " / " + tokens(s.context_window_tokens) + "</small></div></div>";
   $("#inspector-body").innerHTML =
     '<span class="eyebrow">' +
     providerName(s.provider) +
@@ -2038,9 +2040,9 @@ function browserAlerts(payload) {
       if (Number(localStorage.getItem(key) || 0) >= threshold) continue;
       localStorage.setItem(key, String(threshold));
       const notification = new Notification(
-        providerName(provider) + " " + period + " limit at " + Math.round(window.used_percent) + "%",
+        providerName(provider) + " " + period + " limit at " + percentage(window.used_percent),
         {
-          body: Math.round(window.used_percent) + "% of your " + period + " subscription limit is used.",
+          body: percentage(window.used_percent) + " of your " + period + " subscription limit is used.",
           icon: "/konvu-ghost.svg",
           requireInteraction: true,
           tag: key,
@@ -2065,9 +2067,9 @@ function browserAlerts(payload) {
     const notification = new Notification(providerName(session.provider) + " session running hot", {
       body:
         "🔥 " +
-        (forecastUsd >= 50 ? "💸💸💸" : forecastUsd >= 30 ? "💸💸" : "💸") + " $" + forecastUsd.toFixed(1) +
-        " forecast for the next 10 prompts\n💸 $" +
-        Number(session.total_cost_usd || 0).toFixed(1) + " API-equivalent so far",
+        (forecastUsd >= 50 ? "💸💸💸" : forecastUsd >= 30 ? "💸💸" : "💸") + " " + money(forecastUsd) +
+        " forecast for the next 10 prompts\n💸 " +
+        money(Number(session.total_cost_usd || 0)) + " API-equivalent so far",
       icon: "/konvu-ghost.svg",
       requireInteraction: true,
       tag: key,

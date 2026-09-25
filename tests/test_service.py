@@ -41,7 +41,9 @@ from konvu_telemetry.display import (
     codex_prompt_hook,
     dashboard_line,
     last_prompt_used_a_tool,
+    money,
     payload_context_percent,
+    percentage,
     quota_usage_text,
     refreshed_session,
     retained_session,
@@ -1602,7 +1604,7 @@ class ServiceTests(unittest.TestCase):
             patch("konvu_telemetry.display.refreshed_session", return_value=session),
             patch(
                 "konvu_telemetry.display.recorded_quota_usage_text",
-                return_value="3% weekly limit",
+                return_value="3.0% weekly limit",
             ),
             health_patch({"status": "starting"} if health is None else health),
         ):
@@ -1631,7 +1633,7 @@ class ServiceTests(unittest.TestCase):
             {
                 "systemMessage": "\n╭─ Konvu usage\n"
                 "│ 💸 $25.4 API-equivalent total · $4.9 API-equivalent for the next 10 prompts\n"
-                "│ 🧠 65% context · 3% weekly limit\n"
+                "│ 🧠 65.0% context · 3.0% weekly limit\n"
                 "│ 🔗 run konvu-telemetry setup to start the dashboard\n"
                 "╰─"
             },
@@ -1662,7 +1664,7 @@ class ServiceTests(unittest.TestCase):
         self.assertNotIn("systemMessage", payload)
         context = payload["hookSpecificOutput"]["additionalContext"]
         self.assertIn("verbatim as the very last thing in your reply", context)
-        self.assertIn("│ 🧠 65% context · 3% weekly limit", context)
+        self.assertIn("│ 🧠 65.0% context · 3.0% weekly limit", context)
         for client in ("cli", "unknown"):
             self.assertEqual(
                 json.loads(self.run_codex_hook(codex_prompt_hook, client, session)),
@@ -1887,16 +1889,21 @@ class ServiceTests(unittest.TestCase):
 
     def test_usage_rows_are_the_content_every_surface_renders(self) -> None:
         with health_patch({"status": "stale"}):
-            rows = usage_rows(self.shared_row_session(), "3% weekly limit")
+            rows = usage_rows(self.shared_row_session(), "3.0% weekly limit")
         self.assertEqual(
             rows,
             [
                 "💸 $25.4 API-equivalent total · $4.9 API-equivalent for the next 10 prompts",
-                "🤖 1 live / 2 total · 90% context shared · $0.4 API-equivalent",
-                "🧠 50% context · 3% weekly limit",
+                "🤖 1 live / 2 total · 90.0% context shared · $0.4 API-equivalent",
+                "🧠 50.0% context · 3.0% weekly limit",
                 DASHBOARD_HINT,
             ],
         )
+
+    def test_display_numbers_use_one_decimal_and_round_half_up(self) -> None:
+        self.assertEqual(percentage(1.25), "1.3%")
+        self.assertEqual(percentage(100), "100.0%")
+        self.assertEqual(money(1.25), "$1.3")
 
     def test_included_usage_rows_hide_monetary_estimates(self) -> None:
         session = {
@@ -1913,13 +1920,13 @@ class ServiceTests(unittest.TestCase):
             },
         }
         with health_patch({"status": "stale"}):
-            rows = usage_rows(session, "20% 5-hour limit")
+            rows = usage_rows(session, "20.0% 5-hour limit")
         self.assertEqual(
             rows[:3],
             [
                 "🟢 Included · ~3.0% of 5-hour limit in the next 10 prompts",
-                "20% 5-hour limit",
-                "🧠 50% context · 🎯 Responsible for ~1.2% of 5-hour limit",
+                "20.0% 5-hour limit",
+                "🧠 50.0% context · 🎯 Responsible for ~1.3% of 5-hour limit",
             ],
         )
         self.assertNotIn("$", "\n".join(rows))
@@ -1938,7 +1945,7 @@ class ServiceTests(unittest.TestCase):
         }
         self.assertEqual(
             quota_usage_text(snapshot, "claude"),
-            "⏳ 6% 5-hour limit · 📅 54% weekly limit · 🌙 100% monthly limit",
+            "⏳ 6.0% 5-hour limit · 📅 54.0% weekly limit · 🌙 100.0% monthly limit",
         )
 
     def test_hot_subscription_share_gets_a_fire_marker(self) -> None:
@@ -1966,8 +1973,8 @@ class ServiceTests(unittest.TestCase):
     def test_the_usage_box_is_the_shared_rows_inside_a_frame(self) -> None:
         session = self.shared_row_session()
         with health_patch({"status": "stale"}):
-            lines = usage_box_lines(session, "3% weekly limit")
-            rows = usage_rows(session, "3% weekly limit")
+            lines = usage_box_lines(session, "3.0% weekly limit")
+            rows = usage_rows(session, "3.0% weekly limit")
         self.assertEqual(lines[0], "╭─ Konvu usage")
         self.assertEqual(lines[-1], "╰─")
         self.assertEqual(lines[1:-1], [f"│ {row}" for row in rows])
@@ -1981,7 +1988,7 @@ class ServiceTests(unittest.TestCase):
             "five_hour": {"utilization": 0.11},
             "seven_day": {"utilization": 0.52},
         }
-        current_quotas = "6% 5-hour limit · 51% weekly limit"
+        current_quotas = "6.0% 5-hour limit · 51.0% weekly limit"
         output = self.run_statusline(
             session,
             {"status": "stale"},
@@ -1994,9 +2001,9 @@ class ServiceTests(unittest.TestCase):
         with health_patch({"status": "stale"}):
             rows = usage_rows(session, current_quotas, 87.4)
         self.assertEqual(output, "".join(f"{row}\n" for row in rows))
-        self.assertIn("6% 5-hour limit · 51% weekly limit\n", output)
-        self.assertNotIn("11% 5-hour limit", output)
-        self.assertNotIn("52% weekly limit", output)
+        self.assertIn("6.0% 5-hour limit · 51.0% weekly limit\n", output)
+        self.assertNotIn("11.0% 5-hour limit", output)
+        self.assertNotIn("52.0% weekly limit", output)
         self.assertNotIn("│", output)
         self.assertNotIn("╭", output)
 
@@ -2006,9 +2013,9 @@ class ServiceTests(unittest.TestCase):
         output = self.run_statusline(
             session, {"status": "stale"}, {"context_window": {"used_percentage": 87.4}}
         )
-        self.assertIn("🧠 87% context\n", output)
+        self.assertIn("🧠 87.4% context\n", output)
         with health_patch({"status": "stale"}):
-            self.assertIn("│ 🧠 50% context", usage_box_lines(session, ""))
+            self.assertIn("│ 🧠 50.0% context", usage_box_lines(session, ""))
 
     def test_an_unusable_payload_context_falls_back_to_the_snapshot(self) -> None:
         for context_window in (None, {}, {"used_percentage": True}, "50%"):
@@ -2021,7 +2028,7 @@ class ServiceTests(unittest.TestCase):
                 {"status": "stale"},
                 {"context_window": context_window},
             )
-            self.assertIn("🧠 50% context\n", output, repr(context_window))
+            self.assertIn("🧠 50.0% context\n", output, repr(context_window))
         self.assertIsNone(payload_context_percent({}))
         for value in (float("nan"), float("inf")):
             self.assertIsNone(
