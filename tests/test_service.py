@@ -16,7 +16,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from scripts.update_pricing import validated_payload
+from scripts.update_pricing import OFFICIAL_MODEL_OVERRIDES, validated_payload
 
 from konvu_telemetry import service
 from konvu_telemetry.analytics import (
@@ -211,6 +211,32 @@ class ServiceTests(unittest.TestCase):
         }
         with self.assertRaises(ValueError):
             validated_payload(json.dumps(payload).encode())
+
+    def test_new_agent_models_have_context_and_complete_pricing(self) -> None:
+        pricing_file = (
+            Path(__file__).resolve().parents[1]
+            / "src"
+            / "konvu_telemetry"
+            / "pricing.json"
+        )
+        bundled = json.loads(pricing_file.read_text(encoding="utf-8"))
+        for model, override in OFFICIAL_MODEL_OVERRIDES.items():
+            self.assertEqual(bundled[model], override)
+
+        prices = load_pricing()
+
+        self.assertEqual(claude_context_window("claude-opus-5-5", prices), 1_000_000)
+        self.assertEqual(prices["claude-opus-5-5"]["input"], 0.000004)
+        self.assertEqual(prices["claude-opus-5-5"]["output"], 0.00002)
+        for model, input_rate, output_rate in (
+            ("gpt-6-sol", 0.000002, 0.00001),
+            ("gpt-6-luna", 0.0000001, 0.0000005),
+        ):
+            self.assertEqual(prices[model]["input"], input_rate)
+            self.assertEqual(prices[model]["output"], output_rate)
+            self.assertEqual(prices[model]["long_context_threshold"], 272_000)
+            self.assertEqual(prices[model]["fast_multiplier"], 2.0)
+            self.assertEqual(prices[model]["web_search"], 0.01)
 
     def test_previous_baseline_schema_is_rebuilt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
