@@ -40,6 +40,24 @@ def snapshot(used: float, sessions: list[dict[str, object]]) -> dict[str, object
     }
 
 
+def ledger_window(
+    ledger: dict[str, object], provider: str, period: str
+) -> dict[str, object]:
+    providers = ledger["providers"]
+    assert isinstance(providers, dict)
+    provider_state = providers[provider]
+    assert isinstance(provider_state, dict)
+    windows = provider_state["windows"]
+    assert isinstance(windows, dict)
+    return next(
+        value
+        for key, value in windows.items()
+        if isinstance(key, str)
+        and isinstance(value, dict)
+        and json.loads(key)[1] == period
+    )
+
+
 class QuotaAttributionTests(unittest.TestCase):
     def test_session_reactivation_keeps_its_previous_usage_baseline(self) -> None:
         with (
@@ -62,19 +80,19 @@ class QuotaAttributionTests(unittest.TestCase):
             self.assertEqual(attribution["state"], "estimated")
             self.assertEqual(attribution["windows"][0]["estimated_percent"], 1.0)
 
-    def test_fractional_reset_jitter_stays_in_the_same_window(self) -> None:
+    def test_reset_jitter_across_a_minute_boundary_keeps_the_window(self) -> None:
         with (
             tempfile.TemporaryDirectory() as directory,
             patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
         ):
             first = snapshot(20, [session("a", 100), session("b", 100)])
             first["account_quotas"]["claude"]["windows"][0]["resets_at"] = (
-                "2026-01-01T05:00:00.100000+00:00"
+                "2026-01-01T05:00:00.342591+00:00"
             )
             apply_quota_attribution(first)
             second = snapshot(24, [session("a", 160), session("b", 120)])
             second["account_quotas"]["claude"]["windows"][0]["resets_at"] = (
-                "2026-01-01T05:00:00.900000+00:00"
+                "2026-01-01T04:59:59.942803+00:00"
             )
             apply_quota_attribution(second)
             self.assertEqual(
@@ -83,6 +101,219 @@ class QuotaAttributionTests(unittest.TestCase):
                     for row in second["sessions"]
                 ],
                 [3.0, 1.0],
+            )
+
+            ledger = json.loads(quota_attribution_path().read_text())
+            self.assertEqual(
+                len(ledger["providers"]["claude"]["windows"]),
+                1,
+            )
+
+    def test_bounded_reset_corrections_do_not_accumulate_into_a_false_reset(
+        self,
+    ) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+        ):
+            first = snapshot(20, [session("a", 100)])
+            first["account_quotas"]["claude"]["windows"][0]["resets_at"] = (
+                "2026-01-01T05:00:00+00:00"
+            )
+            apply_quota_attribution(first)
+            for used, tokens, reset in (
+                (22, 150, "2026-01-01T05:00:50+00:00"),
+                (24, 200, "2026-01-01T05:01:40+00:00"),
+            ):
+                current = snapshot(used, [session("a", tokens)])
+                current["account_quotas"]["claude"]["windows"][0]["resets_at"] = reset
+                apply_quota_attribution(current)
+
+            self.assertEqual(
+                current["sessions"][0]["quota_attribution"]["windows"][0][
+                    "estimated_percent"
+                ],
+                4.0,
+            )
+
+    def test_true_reset_uses_the_advanced_deadline_not_a_small_usage_drop(
+        self,
+    ) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+        ):
+            apply_quota_attribution(snapshot(20, [session("a", 100)]))
+            increased = snapshot(24, [session("a", 200)])
+            apply_quota_attribution(increased)
+
+            correction = snapshot(23.9, [session("a", 250)])
+            apply_quota_attribution(correction)
+            self.assertEqual(
+                correction["sessions"][0]["quota_attribution"]["windows"][0][
+                    "estimated_percent"
+                ],
+                6.0,
+            )
+
+            reset = snapshot(1, [session("a", 300)])
+            reset["generated_at"] = "2026-01-01T05:01:00+00:00"
+            reset["account_quotas"]["claude"]["windows"][0]["resets_at"] = (
+                "2026-01-01T10:00:00+00:00"
+            )
+            apply_quota_attribution(reset)
+            self.assertEqual(
+                reset["sessions"][0]["quota_attribution"],
+                {"state": "observing", "windows": []},
+            )
+
+    def test_future_deadline_correction_does_not_reset_before_the_old_deadline(
+        self,
+    ) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+        ):
+            first = snapshot(20, [session("a", 100)])
+            first["generated_at"] = "2026-01-01T00:00:00+00:00"
+            apply_quota_attribution(first)
+            increased = snapshot(24, [session("a", 200)])
+            increased["generated_at"] = "2026-01-01T00:02:00+00:00"
+            apply_quota_attribution(increased)
+
+            correction = snapshot(25, [session("a", 250)])
+            correction["generated_at"] = "2026-01-01T00:04:00+00:00"
+            correction["account_quotas"]["claude"]["windows"][0]["resets_at"] = (
+                "2026-01-01T10:00:00+00:00"
+            )
+            apply_quota_attribution(correction)
+
+            self.assertEqual(
+                correction["sessions"][0]["quota_attribution"]["windows"][0][
+                    "estimated_percent"
+                ],
+                5.0,
+            )
+
+    def test_usage_drop_resets_when_the_current_deadline_is_unavailable(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+        ):
+            apply_quota_attribution(snapshot(20, [session("a", 100)]))
+            apply_quota_attribution(snapshot(24, [session("a", 200)]))
+            reset = snapshot(1, [session("a", 250)])
+            reset["account_quotas"]["claude"]["windows"][0]["resets_at"] = None
+
+            apply_quota_attribution(reset)
+
+            self.assertEqual(
+                reset["sessions"][0]["quota_attribution"],
+                {"state": "observing", "windows": []},
+            )
+
+            resumed = snapshot(2, [session("a", 300)])
+            resumed["generated_at"] = "2026-01-01T05:02:00+00:00"
+            resumed["account_quotas"]["claude"]["windows"][0]["resets_at"] = (
+                "2026-01-01T10:00:00+00:00"
+            )
+            apply_quota_attribution(resumed)
+            self.assertEqual(
+                resumed["sessions"][0]["quota_attribution"]["windows"][0][
+                    "estimated_percent"
+                ],
+                1.0,
+            )
+
+    def test_migrates_the_richest_legacy_window_without_losing_estimates(
+        self,
+    ) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+        ):
+            quota_attribution_path().parent.mkdir(parents=True, exist_ok=True)
+            quota_attribution_path().write_text(
+                json.dumps(
+                    {
+                        "version": 3,
+                        "providers": {
+                            "claude": {
+                                "sessions": {"a": {"cost": 200, "credits": None}},
+                                "windows": {
+                                    "default:five_hour:2026-01-01T04:59:00+00:00": {
+                                        "used_percent": 24,
+                                        "allocations": {"a": 4},
+                                        "calibration_samples": [
+                                            {"percent": 4, "weight": 100}
+                                        ],
+                                        "pending": {},
+                                    },
+                                    "default:five_hour:2026-01-01T05:00:00+00:00": {
+                                        "used_percent": 24,
+                                        "allocations": {},
+                                        "pending": {},
+                                    },
+                                },
+                            }
+                        },
+                    }
+                )
+            )
+            current = snapshot(24, [session("a", 200)])
+            current["account_quotas"]["claude"]["windows"][0]["resets_at"] = (
+                "2026-01-01T05:00:00.342591+00:00"
+            )
+
+            apply_quota_attribution(current)
+
+            self.assertEqual(
+                current["sessions"][0]["quota_attribution"]["windows"][0][
+                    "estimated_percent"
+                ],
+                4.0,
+            )
+            ledger = json.loads(quota_attribution_path().read_text())
+            self.assertEqual(ledger["version"], 4)
+            self.assertEqual(
+                len(ledger["providers"]["claude"]["windows"]),
+                1,
+            )
+
+    def test_does_not_migrate_legacy_evidence_from_an_expired_window(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+        ):
+            quota_attribution_path().write_text(
+                json.dumps(
+                    {
+                        "version": 3,
+                        "providers": {
+                            "claude": {
+                                "sessions": {"a": {"cost": 200, "credits": None}},
+                                "windows": {
+                                    "default:five_hour:2026-01-01T05:00:00+00:00": {
+                                        "used_percent": 24,
+                                        "allocations": {"a": 4},
+                                        "pending": {},
+                                    }
+                                },
+                            }
+                        },
+                    }
+                )
+            )
+            current = snapshot(1, [session("a", 200)])
+            current["account_quotas"]["claude"]["windows"][0]["resets_at"] = (
+                "2026-01-01T10:00:00+00:00"
+            )
+
+            apply_quota_attribution(current)
+
+            self.assertEqual(
+                current["sessions"][0]["quota_attribution"],
+                {"state": "observing", "windows": []},
             )
 
     def test_codex_spending_cap_does_not_mask_available_subscription_usage(
@@ -210,6 +441,9 @@ class QuotaAttributionTests(unittest.TestCase):
                 apply_quota_attribution(snapshot(used, [session("a", tokens)]))
 
             reset = snapshot(0, [session("a", 800)])
+            reset["account_quotas"]["claude"]["windows"][0]["resets_at"] = (
+                "2026-01-01T10:00:00+00:00"
+            )
             reset["sessions"][0]["projected_next_10_tasks_usd"] = 100
             apply_quota_attribution(reset)
 
@@ -279,12 +513,13 @@ class QuotaAttributionTests(unittest.TestCase):
                     },
                 ],
             )
-            apply_quota_attribution(snapshot_with_windows(1, 36, [session("a", 200)]))
-            ledger = json.loads(quota_attribution_path().read_text())
-            windows = ledger["providers"]["claude"]["windows"]
-            five_hour_ledger = next(
-                value for key, value in windows.items() if ":five_hour:" in key
+            reset = snapshot_with_windows(1, 36, [session("a", 200)])
+            reset["account_quotas"]["claude"]["windows"][0]["resets_at"] = (
+                "2026-01-01T10:00:00+00:00"
             )
+            apply_quota_attribution(reset)
+            ledger = json.loads(quota_attribution_path().read_text())
+            five_hour_ledger = ledger_window(ledger, "claude", "five_hour")
             self.assertEqual(five_hour_ledger["allocations"], {})
             self.assertEqual(five_hour_ledger["calibration_samples"], [])
 
@@ -312,11 +547,8 @@ class QuotaAttributionTests(unittest.TestCase):
             apply_quota_attribution(snapshot_with_windows(21, 31, 500))
 
             ledger = json.loads(quota_attribution_path().read_text())
-            windows = ledger["providers"]["claude"]["windows"]
-            five_hour = next(
-                value for key, value in windows.items() if ":five_hour:" in key
-            )
-            weekly = next(value for key, value in windows.items() if ":weekly:" in key)
+            five_hour = ledger_window(ledger, "claude", "five_hour")
+            weekly = ledger_window(ledger, "claude", "weekly")
             self.assertEqual(five_hour["pending"], {"a": 200.0})
             self.assertEqual(
                 weekly["calibration_samples"], [{"percent": 1.0, "weight": 400.0}]
