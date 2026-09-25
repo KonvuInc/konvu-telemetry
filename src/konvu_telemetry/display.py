@@ -19,7 +19,7 @@ from .parsers import (
     codex_turn_tool_calls,
 )
 from .service import load_health
-from .storage import snapshot_path, valid_session_id
+from .storage import session_path, snapshot_path, valid_session_id
 
 # Desktop clients hide hook system messages, so the box has to ride in as model context instead.
 PROMPT_BOX_INSTRUCTION = (
@@ -310,6 +310,8 @@ def statusline() -> None:
         return
     session = refreshed_session("claude", session_id)
     if session is None:
+        session = retained_session("claude", session_id)
+    if session is None:
         print("Konvu live usage: collector starting")
         return
     # Claude's context is live, but its rate-limit payload can lag the provider API.
@@ -472,4 +474,21 @@ def refreshed_session(provider: str, session_id: str) -> dict[str, object] | Non
             and payload.get("id") == session_id
         ):
             return {str(key): value for key, value in payload.items()}
+    return None
+
+
+def retained_session(provider: str, session_id: str) -> dict[str, object] | None:
+    """Read a collector-written session filtered from the live dashboard summary."""
+    if provider not in ALLOWED_PROVIDERS or not valid_session_id(session_id):
+        return None
+    try:
+        payload = json.loads(session_path(provider, session_id).read_text())
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    if (
+        isinstance(payload, dict)
+        and payload.get("provider") == provider
+        and payload.get("id") == session_id
+    ):
+        return {str(key): value for key, value in payload.items()}
     return None
