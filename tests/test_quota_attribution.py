@@ -12,11 +12,13 @@ from konvu_telemetry.quota_attribution import (
 from konvu_telemetry.storage import quota_attribution_path
 
 
-def session(session_id: str, tokens: int) -> dict[str, object]:
+def session(session_id: str, weight: float) -> dict[str, object]:
+    """Weight is recorded cost now, not a token count."""
     return {
         "id": session_id,
         "provider": "claude",
-        "token_usage": {"input": tokens},
+        "total_cost_usd": float(weight),
+        "cost_status": "complete",
     }
 
 
@@ -142,13 +144,13 @@ class QuotaAttributionTests(unittest.TestCase):
             apply_quota_attribution(snapshot(20, [session("a", 100)]))
             for used, tokens in ((22, 200), (24, 300)):
                 next_snapshot = snapshot(used, [session("a", tokens)])
-                next_snapshot["sessions"][0]["projected_next_10_usage_tokens"] = 50
+                next_snapshot["sessions"][0]["projected_next_10_tasks_usd"] = 50
                 apply_quota_attribution(next_snapshot)
                 window = next_snapshot["sessions"][0]["quota_attribution"]["windows"][0]
                 self.assertEqual(window["projected_next_10_percent"], 1.0)
 
             calibrated = snapshot(26, [session("a", 400)])
-            calibrated["sessions"][0]["projected_next_10_usage_tokens"] = 50
+            calibrated["sessions"][0]["projected_next_10_tasks_usd"] = 50
             apply_quota_attribution(calibrated)
             window = calibrated["sessions"][0]["quota_attribution"]["windows"][0]
             self.assertEqual(window["estimated_percent"], 6.0)
@@ -187,7 +189,7 @@ class QuotaAttributionTests(unittest.TestCase):
                 apply_quota_attribution(snapshot(used, [session("a", tokens)]))
 
             pending = snapshot(23, [session("a", 800)])
-            pending["sessions"][0]["projected_next_10_usage_tokens"] = 100
+            pending["sessions"][0]["projected_next_10_tasks_usd"] = 100
             apply_quota_attribution(pending)
 
             window = pending["sessions"][0]["quota_attribution"]["windows"][0]
@@ -208,7 +210,7 @@ class QuotaAttributionTests(unittest.TestCase):
                 apply_quota_attribution(snapshot(used, [session("a", tokens)]))
 
             reset = snapshot(0, [session("a", 800)])
-            reset["sessions"][0]["projected_next_10_usage_tokens"] = 100
+            reset["sessions"][0]["projected_next_10_tasks_usd"] = 100
             apply_quota_attribution(reset)
 
             self.assertEqual(
@@ -229,7 +231,7 @@ class QuotaAttributionTests(unittest.TestCase):
             apply_quota_attribution(snapshot(20, [session("a", 100)]))
             for used, tokens in ((22, 110), (24, 210), (26, 310)):
                 next_snapshot = snapshot(used, [session("a", tokens)])
-                next_snapshot["sessions"][0]["projected_next_10_usage_tokens"] = 50
+                next_snapshot["sessions"][0]["projected_next_10_tasks_usd"] = 50
                 apply_quota_attribution(next_snapshot)
             window = next_snapshot["sessions"][0]["quota_attribution"]["windows"][0]
             self.assertEqual(window["projected_next_10_percent"], 1.43)
@@ -354,3 +356,38 @@ class QuotaAttributionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class QuotaWeightTests(unittest.TestCase):
+    def test_forecast_never_exceeds_the_window_headroom(self) -> None:
+        """Whatever the calibrated rate says, a share of a window cannot exceed
+        what is left of that window."""
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+        ):
+            apply_quota_attribution(snapshot(90, [session("a", 100)]))
+            advanced = snapshot(97, [session("a", 200)])
+            advanced["sessions"][0]["projected_next_10_tasks_usd"] = 1_000_000.0
+            apply_quota_attribution(advanced)
+            window = advanced["sessions"][0]["quota_attribution"]["windows"][0]
+            self.assertLessEqual(window["projected_next_10_percent"], 3.0)
+
+    def test_cost_weighting_ignores_cache_read_volume(self) -> None:
+        """Two sessions with identical cost weigh the same, however many tokens
+        each re-read from cache."""
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+        ):
+            first = snapshot(20, [session("a", 100), session("b", 100)])
+            first["sessions"][0]["token_usage"] = {"cache_read": 500_000_000}
+            first["sessions"][1]["token_usage"] = {"cache_read": 1_000}
+            apply_quota_attribution(first)
+            second = snapshot(24, [session("a", 200), session("b", 200)])
+            apply_quota_attribution(second)
+            shares = [
+                row["quota_attribution"]["windows"][0]["estimated_percent"]
+                for row in second["sessions"]
+            ]
+            self.assertEqual(shares[0], shares[1])

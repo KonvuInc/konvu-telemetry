@@ -11,7 +11,7 @@ from .storage import quota_attribution_path, write_private_json
 
 
 class SessionUsage(TypedDict):
-    tokens: float
+    cost: float
     credits: float | None
 
 
@@ -22,7 +22,9 @@ class StoredSessionUsage(SessionUsage, total=False):
 MIN_FORECAST_SAMPLES = 1
 MIN_FORECAST_PERCENT = 1.0
 SESSION_BASELINE_RETENTION_SECONDS = 32 * 24 * 60 * 60
-STATE_VERSION = 2
+# 3: session weight changed from a raw token sum to recorded cost, so stored
+# baselines and calibration samples are in the wrong unit and must be rebuilt.
+STATE_VERSION = 3
 
 
 def _number(value: object) -> float | None:
@@ -48,28 +50,38 @@ def _load_state() -> dict[str, object]:
 
 
 def _session_usage(session: dict[str, object]) -> SessionUsage | None:
+    """Weigh a session by recorded cost, not by a raw token count.
+
+    Summing every token bucket at parity made cache reads — which re-read the
+    whole conversation on every prompt — dominate the weight, so the calibrated
+    rate drifted with conversation length instead of tracking quota. Cost is
+    already priced per token type and per model, so it is the closest proxy we
+    hold for what a prompt actually consumes. Codex keeps credits, which are
+    what its quota is denominated in.
+    """
     provider = session.get("provider")
     session_id = session.get("id")
     if provider not in {"claude", "codex"} or not isinstance(session_id, str):
         return None
-    token_usage = session.get("token_usage")
-    tokens = 0.0
-    if isinstance(token_usage, dict):
-        tokens = sum(_number(token_usage.get(key)) or 0.0 for key in token_usage)
+    if session.get("cost_status") == "unavailable":
+        return None
+    cost = _number(session.get("total_cost_usd")) or 0.0
     credits = _number(session.get("total_credit_equivalent"))
-    return {"tokens": tokens, "credits": credits}
+    return {"cost": cost, "credits": credits}
 
 
 def _weight(provider: str, usage: SessionUsage) -> float:
     if provider == "codex" and usage["credits"] is not None:
         return usage["credits"]
-    return usage["tokens"]
+    return usage["cost"]
 
 
 def _forecast_weight(provider: str, session: dict[str, object]) -> float | None:
+    """The projection must be measured the same way as the calibration weight,
+    or the rate and the number it multiplies are in different units."""
     if provider == "codex":
         return _number(session.get("projected_next_10_tasks_credit_equivalent"))
-    return _number(session.get("projected_next_10_usage_tokens"))
+    return _number(session.get("projected_next_10_tasks_usd"))
 
 
 def _calibration_rate(window: dict[str, object]) -> float | None:
@@ -166,7 +178,7 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
                 continue
             key = str(session["id"])
             stored_usage: StoredSessionUsage = {
-                "tokens": usage["tokens"],
+                "cost": usage["cost"],
                 "credits": usage["credits"],
             }
             if observed_at is not None:
@@ -174,9 +186,9 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
             current[key] = stored_usage
             earlier = previous_sessions.get(key)
             if isinstance(earlier, dict):
-                old_tokens = _number(earlier.get("tokens")) or 0.0
+                old_cost = _number(earlier.get("cost")) or 0.0
                 old_credits = _number(earlier.get("credits"))
-                token_delta = max(0.0, usage["tokens"] - old_tokens)
+                cost_delta = max(0.0, usage["cost"] - old_cost)
                 credit_delta = (
                     max(0.0, usage["credits"] - old_credits)
                     if usage["credits"] is not None and old_credits is not None
@@ -184,7 +196,7 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
                 )
                 weight = _weight(
                     provider,
-                    {"tokens": token_delta, "credits": credit_delta},
+                    {"cost": cost_delta, "credits": credit_delta},
                 )
                 if weight > 0:
                     interval_weights[key] = weight
@@ -313,8 +325,11 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
                         "scope": "observed_window",
                     }
                     if forecast_weight is not None and calibration is not None:
+                        # A share of a window cannot exceed the window's
+                        # remaining headroom, whatever the calibrated rate says.
+                        headroom_percent = max(0.0, 100.0 - used_percent)
                         estimate["projected_next_10_percent"] = round(
-                            calibration * forecast_weight, 2
+                            min(calibration * forecast_weight, headroom_percent), 2
                         )
                     estimates.append(estimate)
             session["quota_attribution"] = {
