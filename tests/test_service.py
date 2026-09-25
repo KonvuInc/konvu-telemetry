@@ -44,6 +44,7 @@ from konvu_telemetry.display import (
     payload_context_percent,
     quota_usage_text,
     refreshed_session,
+    retained_session,
     statusline,
     usage_box_lines,
     usage_rows,
@@ -1441,15 +1442,51 @@ class ServiceTests(unittest.TestCase):
                 payload = refreshed_session("claude", session_id)
         self.assertEqual(payload, {"id": session_id, "provider": "claude", "value": 1})
 
-    def test_refreshed_session_ignores_stale_per_session_document(self) -> None:
+    def test_refreshed_session_ignores_retained_session_filtered_from_summary(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             session = root / "session.json"
-            session.write_text('{"id":"fallback"}')
+            session_id = "00000000-0000-0000-0000-000000000001"
+            session.write_text(
+                json.dumps(
+                    {"id": session_id, "provider": "claude", "value": "retained"}
+                )
+            )
             snapshot = root / "live-sessions.json"
             snapshot.write_text('{"sessions":[]}')
-            with patch("konvu_telemetry.display.snapshot_path", return_value=snapshot):
-                payload = refreshed_session(
+            with (
+                patch("konvu_telemetry.display.snapshot_path", return_value=snapshot),
+                patch("konvu_telemetry.display.session_path", return_value=session),
+            ):
+                payload = refreshed_session("claude", session_id)
+        self.assertIsNone(payload)
+
+    def test_retained_session_reads_session_filtered_from_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            session = root / "session.json"
+            session_id = "00000000-0000-0000-0000-000000000001"
+            session.write_text(
+                json.dumps(
+                    {"id": session_id, "provider": "claude", "value": "retained"}
+                )
+            )
+            with patch("konvu_telemetry.display.session_path", return_value=session):
+                payload = retained_session("claude", session_id)
+        self.assertEqual(
+            payload,
+            {"id": session_id, "provider": "claude", "value": "retained"},
+        )
+
+    def test_retained_session_rejects_mismatched_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            session = root / "session.json"
+            session.write_text('{"id":"another-session","provider":"claude"}')
+            with patch("konvu_telemetry.display.session_path", return_value=session):
+                payload = retained_session(
                     "claude", "00000000-0000-0000-0000-000000000001"
                 )
         self.assertIsNone(payload)
@@ -1719,6 +1756,7 @@ class ServiceTests(unittest.TestCase):
         health: object,
         payload_extra: dict[str, object] | None = None,
         quota_text: str = "",
+        retained: dict[str, object] | None = None,
     ) -> str:
         """Render the Claude CLI status line against one session and health state."""
         session_id = "00000000-0000-0000-0000-000000000001"
@@ -1732,6 +1770,7 @@ class ServiceTests(unittest.TestCase):
                 return_value=Path("session.jsonl"),
             ),
             patch("konvu_telemetry.display.refreshed_session", return_value=session),
+            patch("konvu_telemetry.display.retained_session", return_value=retained),
             patch(
                 "konvu_telemetry.display.recorded_quota_usage_text",
                 return_value=quota_text,
@@ -1740,6 +1779,16 @@ class ServiceTests(unittest.TestCase):
         ):
             statusline()
         return stdout.getvalue()
+
+    def test_statusline_keeps_retained_session_after_dashboard_filter(self) -> None:
+        retained = {**self.shared_row_session(), "usage_mode": "included"}
+        output = self.run_statusline(
+            None,
+            {"status": "healthy"},
+            retained=retained,
+        )
+        self.assertIn("🟢 Included", output)
+        self.assertNotIn("collector starting", output)
 
     def surface_outputs(self, health: object) -> dict[str, str]:
         """Render the text all four usage surfaces show for one collector health state."""
