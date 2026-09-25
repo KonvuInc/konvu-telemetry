@@ -11,6 +11,19 @@ from konvu_telemetry import cli, installer
 
 
 class InstallerTests(unittest.TestCase):
+    def test_initial_collection_wait_ignores_pre_setup_health(self) -> None:
+        with patch.object(
+            installer,
+            "load_health",
+            side_effect=[
+                {"last_success_at": "2026-01-01T00:00:00+00:00"},
+                {"last_success_at": "2026-01-01T00:00:02+00:00"},
+            ],
+        ):
+            self.assertTrue(
+                installer.wait_for_initial_collection(1767225601.0, timeout_seconds=1)
+            )
+
     def test_cli_uninstall_removes_package_after_local_cleanup(self) -> None:
         calls: list[str] = []
         with (

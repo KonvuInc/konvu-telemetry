@@ -12,12 +12,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from konvu_telemetry.provider_limits import (
     FetchResult,
     ProviderLimitPoller,
+    RPCResponse,
     _claude_token,
     _codex_executable,
     _secure_file,
     decode_claude_usage,
     decode_codex_usage,
     fetch_claude_limits,
+    fetch_codex_limits,
     read_claude_access_token,
     stored_provider_quotas,
 )
@@ -150,7 +152,110 @@ class ProviderLimitsTests(unittest.TestCase):
             opener=lambda request, timeout: (_ for _ in ()).throw(error),
             token_reader=lambda: "secret-token",
         )
-        self.assertEqual(result, FetchResult(None, 90.0, failure="rate_limited"))
+        self.assertEqual(
+            result,
+            FetchResult(None, 90.0, failure="rate_limited", error_code=429),
+        )
+
+    @patch("konvu_telemetry.provider_limits._response")
+    @patch("konvu_telemetry.provider_limits.subprocess.Popen")
+    @patch("konvu_telemetry.provider_limits._codex_executable")
+    def test_codex_fetch_reports_missing_login_without_reading_credentials(
+        self, executable: Mock, popen: Mock, response: Mock
+    ) -> None:
+        executable.return_value = "/trusted/codex"
+        process = popen.return_value
+        process.poll.return_value = 0
+        response.side_effect = [
+            RPCResponse(result={}),
+            RPCResponse(result={"account": None, "requiresOpenaiAuth": True}),
+        ]
+
+        result = fetch_codex_limits()
+
+        self.assertEqual(
+            result,
+            FetchResult(
+                None,
+                unavailable=True,
+                failure="credentials_unavailable",
+            ),
+        )
+        self.assertEqual(process.stdin.write.call_count, 3)
+
+    @patch("konvu_telemetry.provider_limits._response")
+    @patch("konvu_telemetry.provider_limits.subprocess.Popen")
+    @patch("konvu_telemetry.provider_limits._codex_executable")
+    def test_codex_fetch_preserves_safe_auth_error_code(
+        self, executable: Mock, popen: Mock, response: Mock
+    ) -> None:
+        executable.return_value = "/trusted/codex"
+        process = popen.return_value
+        process.poll.return_value = 0
+        response.side_effect = [RPCResponse(result={}), RPCResponse(error_code=401)]
+
+        result = fetch_codex_limits()
+
+        self.assertEqual(
+            result,
+            FetchResult(
+                None,
+                unavailable=True,
+                failure="authentication_failed",
+                error_code=401,
+            ),
+        )
+
+    @patch("konvu_telemetry.provider_limits._response")
+    @patch("konvu_telemetry.provider_limits.subprocess.Popen")
+    @patch("konvu_telemetry.provider_limits._codex_executable")
+    def test_codex_fetch_does_not_mislabel_rpc_failure_as_auth_failure(
+        self, executable: Mock, popen: Mock, response: Mock
+    ) -> None:
+        executable.return_value = "/trusted/codex"
+        process = popen.return_value
+        process.poll.return_value = 0
+        response.side_effect = [RPCResponse(result={}), RPCResponse(error_code=-32601)]
+
+        self.assertEqual(
+            fetch_codex_limits(),
+            FetchResult(None, failure="provider_error", error_code=-32601),
+        )
+
+    @patch("konvu_telemetry.provider_limits._response")
+    @patch("konvu_telemetry.provider_limits.subprocess.Popen")
+    @patch("konvu_telemetry.provider_limits._codex_executable")
+    def test_codex_fetch_checks_account_then_reads_limits(
+        self, executable: Mock, popen: Mock, response: Mock
+    ) -> None:
+        executable.return_value = "/trusted/codex"
+        process = popen.return_value
+        process.poll.return_value = 0
+        response.side_effect = [
+            RPCResponse(result={}),
+            RPCResponse(
+                result={
+                    "account": {"type": "chatgpt"},
+                    "requiresOpenaiAuth": True,
+                }
+            ),
+            RPCResponse(
+                result={
+                    "rateLimits": {
+                        "primary": {
+                            "usedPercent": 12,
+                            "windowDurationMins": 10_080,
+                        }
+                    }
+                }
+            ),
+        ]
+
+        result = fetch_codex_limits(1_767_225_600)
+
+        assert result.snapshot is not None
+        self.assertEqual(result.snapshot["windows"][0]["used_percent"], 12.0)
+        self.assertEqual(process.stdin.write.call_count, 4)
 
     def test_credential_file_must_be_private_and_token_shape_is_exact(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -232,7 +337,12 @@ class ProviderLimitsTests(unittest.TestCase):
             side_effect=[
                 FetchResult({"windows": [{"used_percent": 7.0}]}),
                 FetchResult(None, failure="network_error"),
-                FetchResult(None, unavailable=True, failure="authentication_failed"),
+                FetchResult(
+                    None,
+                    unavailable=True,
+                    failure="authentication_failed",
+                    error_code=401,
+                ),
             ]
         )
         poller = ProviderLimitPoller(
@@ -249,6 +359,7 @@ class ProviderLimitsTests(unittest.TestCase):
                 "source": "provider_api",
                 "status": "unavailable",
                 "failure": "authentication_failed",
+                "error_code": 401,
                 "windows": [],
             },
         )

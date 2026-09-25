@@ -58,6 +58,13 @@ class FetchResult:
     retry_after_seconds: float | None = None
     unavailable: bool = False
     failure: FailureReason | None = None
+    error_code: int | None = None
+
+
+@dataclass(frozen=True)
+class RPCResponse:
+    result: dict[str, object] | None = None
+    error_code: int | None = None
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -408,6 +415,7 @@ def fetch_claude_limits(
                 if error.code in {401, 403}
                 else "provider_error"
             ),
+            error_code=error.code,
         )
     except (URLError, OSError, TimeoutError):
         return FetchResult(None, failure="network_error")
@@ -452,7 +460,7 @@ def _send(process: subprocess.Popen[str], message: dict[str, object]) -> None:
 
 def _response(
     process: subprocess.Popen[str], request_id: int, deadline: float
-) -> dict[str, object] | None:
+) -> RPCResponse | None:
     if process.stdout is None:
         return None
     with selectors.DefaultSelector() as selector:
@@ -471,7 +479,17 @@ def _response(
             if not isinstance(message, dict) or message.get("id") != request_id:
                 continue
             result = message.get("result")
-            return result if isinstance(result, dict) else None
+            if isinstance(result, dict):
+                return RPCResponse(result=result)
+            error = message.get("error")
+            error_code = error.get("code") if isinstance(error, dict) else None
+            return RPCResponse(
+                error_code=(
+                    error_code
+                    if isinstance(error_code, int) and not isinstance(error_code, bool)
+                    else None
+                )
+            )
     return None
 
 
@@ -502,20 +520,59 @@ def fetch_codex_limits(now: float | None = None) -> FetchResult:
                 },
             },
         )
-        if _response(process, 1, deadline) is None:
+        initialized = _response(process, 1, deadline)
+        if initialized is None or initialized.result is None:
             return FetchResult(None, failure="service_unavailable")
         _send(process, {"method": "initialized"})
         _send(
             process,
             {
                 "id": 2,
+                "method": "account/read",
+                "params": {"refreshToken": True},
+            },
+        )
+        account_response = _response(process, 2, deadline)
+        if account_response is None:
+            return FetchResult(None, failure="service_unavailable")
+        if account_response.result is None:
+            return FetchResult(
+                None,
+                unavailable=account_response.error_code in {401, 403},
+                failure=(
+                    "authentication_failed"
+                    if account_response.error_code in {401, 403}
+                    else "provider_error"
+                ),
+                error_code=account_response.error_code,
+            )
+        account = account_response.result.get("account")
+        requires_auth = account_response.result.get("requiresOpenaiAuth") is True
+        if account is None and requires_auth:
+            return FetchResult(
+                None,
+                unavailable=True,
+                failure="credentials_unavailable",
+            )
+        _send(
+            process,
+            {
+                "id": 3,
                 "method": "account/rateLimits/read",
                 "params": {"excludeResetCreditDetails": True},
             },
         )
-        result = _response(process, 2, deadline)
+        response = _response(process, 3, deadline)
+        if response is None:
+            return FetchResult(None, failure="service_unavailable")
+        if response.result is None:
+            return FetchResult(
+                None,
+                failure="provider_error",
+                error_code=response.error_code,
+            )
         captured = time.time() if now is None else now
-        snapshot = decode_codex_usage(result, _iso_now(captured))
+        snapshot = decode_codex_usage(response.result, _iso_now(captured))
         return FetchResult(
             snapshot,
             failure=None if snapshot is not None else "invalid_response",
@@ -550,6 +607,7 @@ class ProviderLimitPoller:
         self._snapshots: dict[str, dict[str, object] | None] = {}
         self._last_success_at: dict[str, float] = {}
         self._failure_reasons: dict[str, FailureReason | None] = {}
+        self._error_codes: dict[str, int | None] = {}
         for provider in self._fetchers:
             initial = (
                 initial_snapshots.get(provider)
@@ -570,6 +628,7 @@ class ProviderLimitPoller:
         snapshot = self._snapshots.get(provider)
         last_success = self._last_success_at.get(provider)
         failure = self._failure_reasons.get(provider)
+        error_code = self._error_codes.get(provider)
         if (
             snapshot is not None
             and last_success is not None
@@ -604,13 +663,18 @@ class ProviderLimitPoller:
                         visible.pop(key, None)
             visible["status"] = "stale"
             visible["failure"] = failure
+            if error_code is not None:
+                visible["error_code"] = error_code
             return visible
-        return {
+        unavailable: dict[str, object] = {
             "source": "provider_api",
             "status": "unavailable",
             "failure": failure or "service_unavailable",
             "windows": [],
         }
+        if error_code is not None:
+            unavailable["error_code"] = error_code
+        return unavailable
 
     def refresh(self, now: float) -> dict[str, object]:
         due = [
@@ -634,12 +698,15 @@ class ProviderLimitPoller:
                         self._snapshots[provider] = result.snapshot
                         self._last_success_at[provider] = now
                         self._failure_reasons[provider] = None
+                        self._error_codes[provider] = None
                     elif result.unavailable:
                         self._snapshots[provider] = None
                         self._last_success_at.pop(provider, None)
                         self._failure_reasons[provider] = failure
+                        self._error_codes[provider] = result.error_code
                     else:
                         self._failure_reasons[provider] = failure
+                        self._error_codes[provider] = result.error_code
                     if result.snapshot is not None or result.unavailable:
                         self._failures[provider] = 0
                     else:

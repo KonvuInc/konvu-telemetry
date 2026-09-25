@@ -75,6 +75,88 @@ p {
 .tiny {
   font-size: 9px;
 }
+.data-state {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--mist);
+  font-size: 9.5px;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+.data-state > span {
+  display: flex;
+  flex-direction: column;
+}
+.data-state small {
+  margin-top: 2px;
+  color: var(--mist);
+  font-size: 8.5px;
+}
+.data-state.loading {
+  color: #8f879f;
+  font-weight: 500;
+}
+.data-state.login,
+.data-state.error {
+  color: #c62828;
+  font-weight: 600;
+}
+.data-state.stale {
+  color: #8a5a00;
+  font-weight: 600;
+}
+.state-spinner {
+  width: 9px;
+  height: 9px;
+  flex: none;
+  border: 1.5px solid var(--line);
+  border-top-color: #8f879f;
+  border-radius: 50%;
+  animation: state-spin .8s linear infinite;
+}
+.state-warning {
+  display: inline-grid;
+  width: 14px;
+  height: 14px;
+  place-items: center;
+  flex: none;
+  border-radius: 50%;
+  background: #c62828;
+  color: var(--white);
+  font: 700 10px/1 var(--f);
+  font-style: normal;
+}
+.state-popover {
+  position: absolute;
+  z-index: 50;
+  left: 0;
+  top: calc(100% + 7px);
+  display: none !important;
+  width: max-content;
+  max-width: 280px;
+  padding: 8px 10px;
+  border-radius: 5px;
+  background: #24163d;
+  color: var(--white) !important;
+  font-size: 9.5px !important;
+  font-weight: 400;
+  line-height: 1.4;
+  white-space: normal;
+  box-shadow: 0 6px 18px #180c3126;
+}
+.data-state:hover .state-popover,
+.data-state:focus .state-popover,
+.data-state:focus-within .state-popover {
+  display: block !important;
+}
+@keyframes state-spin {
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .state-spinner { animation: none; }
+}
 .warning {
   color: var(--orange);
 }
@@ -797,6 +879,14 @@ select {
 .inspector-stats small {
   font-size: 8px;
   color: var(--mist);
+}
+.subscription-stats strong {
+  font-size: 12px;
+  line-height: 1.35;
+  font-weight: 500;
+}
+.subscription-stats .data-state {
+  font-size: 10px;
 }
 .inspector-signal {
   padding: 10px 12px;
@@ -2842,6 +2932,11 @@ select {
 }
 .quota-pill.exhausted .quota-legend {
   color: var(--mist);
+}
+.quota-pill > .data-state {
+  min-height: 16px;
+  padding: 1px 4px;
+  white-space: nowrap;
 }
 
 .qm {

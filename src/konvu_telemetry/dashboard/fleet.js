@@ -13,7 +13,8 @@ const COLORS = {
   red: "#A60808",
 };
 const BURNING_FORECAST_USD = 10;
-const previewMode = new URLSearchParams(location.search).get("preview") === "subscription";
+const previewName = new URLSearchParams(location.search).get("preview");
+const previewMode = ["subscription", "states"].includes(previewName);
 const state = {
   payload: null,
   view: "ledger",
@@ -488,6 +489,73 @@ function burningCashIcon(next) {
     "</svg></span>"
   );
 }
+function providerQuotaState(provider, account) {
+  if (!account || account.status === "fetching") {
+    return {
+      kind: "loading",
+      label: "Loading " + providerName(provider) + " limits…",
+      detail: "Konvu is fetching the subscription limits reported by your local " + providerName(provider) + " account.",
+    };
+  }
+  const errorCode = Number.isInteger(account.error_code) ? " Error " + account.error_code + "." : "";
+  if (account.status === "unavailable") {
+    if (["credentials_unavailable", "authentication_failed"].includes(account.failure)) {
+      const command = provider === "claude" ? "claude /login" : "codex login";
+      return {
+        kind: "login",
+        label: "Sign in to " + providerName(provider),
+        detail: "Run " + command + ". Konvu uses this local login only to fetch subscription limits; credentials never leave your computer." + errorCode,
+      };
+    }
+    return { kind: "error", label: "Couldn’t load " + providerName(provider) + " limits · retrying", detail: "Konvu will retry automatically." + errorCode };
+  }
+  if (account.status === "stale") {
+    return { kind: "stale", label: providerName(provider) + " limits delayed · retrying", detail: "The displayed percentages are from the last successful fetch." + errorCode };
+  }
+  return { kind: "ready", label: providerName(provider) + " limits ready", detail: "" };
+}
+function accountQuotaFor(s) {
+  if (previewMode && s.preview_account_quota) return s.preview_account_quota;
+  return state.payload?.account_quotas?.[s.provider];
+}
+function sessionDataState(s, metric = "forecast") {
+  const providerState = providerQuotaState(s.provider, accountQuotaFor(s));
+  if (providerState.kind !== "ready" && metric !== "plan") {
+    if (providerState.kind === "login") return providerState;
+    const noun = metric === "share" ? "Share" : "Forecast";
+    const labels = {
+      loading: noun + " starts after limits load",
+      login: noun + " unavailable until sign-in",
+      error: noun + " paused while retrying",
+      stale: noun + " paused while limits refresh",
+    };
+    return { ...providerState, label: labels[providerState.kind] || providerState.label };
+  }
+  if (providerState.kind !== "ready") return providerState;
+  const reason = s.quota_attribution?.reason;
+  const noun = metric === "share" ? "Share" : "Forecast";
+  const labels = {
+    window_reset: [noun + " recalculating after limit reset", "Konvu needs new activity in this limit window."],
+    establishing_baseline: [noun + " available after the next plan update", "Konvu needs two plan readings to estimate this session."],
+    waiting_for_quota_change: [noun + " updating…", "This session is recorded; Konvu is waiting for the matching plan-usage update."],
+    waiting_for_activity: [noun + " available after more prompts", "Konvu needs a few prompts to estimate this session."],
+  };
+  const [label, detail] = labels[reason] || [noun + " updating…", "Konvu needs another data point."];
+  return { kind: "loading", label, detail };
+}
+function dataStateMarkup(data) {
+  const marker = data.kind === "loading"
+    ? '<i class="state-spinner" aria-hidden="true"></i>'
+    : ["login", "error"].includes(data.kind)
+      ? '<i class="state-warning" aria-hidden="true">!</i>'
+      : "";
+  return (
+    '<span class="data-state ' + esc(data.kind) + '"' + (data.detail ? ' tabindex="0" title="' + esc(data.detail) + '" aria-label="' + esc(data.label + ". " + data.detail) + '"' : "") + '>' + marker +
+    '<span>' + esc(data.label) + "</span>" +
+    (data.detail ? '<span class="state-popover" role="tooltip">' + esc(data.detail) + "</span>" : "") +
+    "</span>"
+  );
+}
 function spendVisual(s, scale) {
   const spent = cost(s),
     next = forecast(s);
@@ -495,11 +563,13 @@ function spendVisual(s, scale) {
     const included = s.usage_mode === "included";
     const ahead = shareAhead(s);
     const window = quotaWindowName(s);
+    const dataState = sessionDataState(s, "forecast");
+    if (!included) {
+      return '<div class="spending included-copy">' + dataStateMarkup(sessionDataState(s, "plan")) + "</div>";
+    }
     const status = s.quota_status === "stale"
-      ? "Last known: included in your plan"
-      : included
-        ? "Included in your plan"
-        : "Subscription status unavailable";
+      ? "Included — limits delayed"
+      : "Included in your plan";
     // The forecast keeps its place under the heading; it is only nudged up in
     // size and weight so it stops disappearing into the row.
     // Keeps main's shared percentage() so precision matches the rest of the
@@ -507,7 +577,7 @@ function spendVisual(s, scale) {
     const line = finite(ahead)
       ? '<small class="plan-next">Next 10 prompts: <b>+' +
         percentage(ahead) + "</b> of " + esc(window) + " limit</small>"
-      : '<small class="plan-next">Next 10 prompts: ' + esc(attributionLabel(s)) + "</small>";
+      : '<small class="plan-next">Next 10 prompts: ' + dataStateMarkup(dataState) + "</small>";
     return (
       '<div class="spending included-copy"><div class="included-copy-text"><strong>' +
       esc(status) + "</strong>" + line + "</div>" +
@@ -559,7 +629,7 @@ function responsibilityCell(s) {
     return shareBar(share, "of all money spent", money(mine) + " of " + money(total) + " spent beyond plan");
   }
   const share = shareOf(s);
-  if (!finite(share)) return '<span class="tiny">—</span>';
+  if (!finite(share)) return dataStateMarkup(sessionDataState(s, "share"));
   const window = quotaWindowName(s);
   return shareBar(share, "of your " + window + " limit", "This session is responsible for " + percentage(share) + " of the " + window + " limit");
 }
@@ -642,12 +712,6 @@ const avg = (values) => (values.length ? values.reduce((a, b) => a + b, 0) / val
 const shareOf = (s) => quotaShare(s, s.provider === "codex" ? "weekly" : "five_hour");
 /* The collector reports "observing" while it still lacks the history to
    attribute usage. Naming that beats a bare dash, which reads like a bug. */
-function attributionLabel(s) {
-  const attribution = s.quota_attribution;
-  if (attribution?.state === "observing") return "Measuring";
-  if (!Array.isArray(attribution?.windows) || !attribution.windows.length) return "Not recorded";
-  return "Not estimated yet";
-}
 function windowUsedPercent(s) {
   const period = s.provider === "codex" ? "weekly" : "five_hour";
   const windows = state.payload?.account_quotas?.[s.provider]?.windows;
@@ -733,10 +797,11 @@ function kpiBanner(rows) {
 function quotaInline(providers) {
   const quotas = state.payload?.account_quotas || {};
   return (providers && providers.length ? providers : ["claude", "codex"])
-    .filter((id) => Array.isArray(quotas[id]?.windows) && quotas[id].windows.length)
     .map((id) => {
+      const quotaState = providerQuotaState(id, quotas[id]);
       const wanted = id === "codex" ? ["weekly", "monthly"] : ["five_hour", "weekly"];
-      const meters = quotas[id].windows
+      const windows = Array.isArray(quotas[id]?.windows) ? quotas[id].windows : [];
+      const meters = windows
         .filter((w) => w && finite(w.used_percent) && wanted.includes(w.period))
         .sort((a, b) => wanted.indexOf(a.period) - wanted.indexOf(b.period))
         .map((w) => {
@@ -746,10 +811,10 @@ function quotaInline(providers) {
         })
         .join("");
       return (
-        '<div class="quota-pill' + (quotas[id].ordinary_usage_allowed === false ? " exhausted" : "") + '">' +
+        '<div class="quota-pill' + (quotas[id]?.ordinary_usage_allowed === false ? " exhausted" : "") + '" title="' + esc(quotaState.detail) + '">' +
         '<span class="quota-legend"><img src="/' + esc(id) + '.png" alt="' + providerName(id) + '" width="12" height="12">' +
-        (quotas[id].status === "stale" ? "Last known usage" : "Usage limit") + "</span>" +
-        meters + "</div>"
+        (quotas[id]?.status === "stale" ? "Update delayed" : "Usage limit") + "</span>" +
+        (meters || dataStateMarkup(quotaState)) + "</div>"
       );
     })
     .join("");
@@ -1318,7 +1383,7 @@ function fleetGraph(rows) {
 }
 function saveUrl() {
   const q = new URLSearchParams();
-  if (previewMode) q.set("preview", "subscription");
+  if (previewMode) q.set("preview", previewName);
   if (state.provider !== "all") q.set("tool", state.provider);
   if (state.sort !== "forecast") q.set("sort", state.sort);
   if (state.selected) q.set("session", state.selected);
@@ -1439,7 +1504,8 @@ async function refresh(triggerCollector = false, healthAlreadyRefreshed = false)
     }
     const health = previewMode || healthAlreadyRefreshed ? Promise.resolve(false) : refreshHealth();
     const headers = state.snapshotEtag ? { "If-None-Match": state.snapshotEtag } : {};
-    const response = await fetch(previewMode ? "/subscription-preview.json" : "/api/live-sessions", { cache: "no-store", headers });
+    const previewPath = previewName === "states" ? "/onboarding-states-preview.json" : "/subscription-preview.json";
+    const response = await fetch(previewMode ? previewPath : "/api/live-sessions", { cache: "no-store", headers });
     await health;
     if (response.status === 304) {
       state.error = false;
@@ -1839,6 +1905,35 @@ function tokenBreakdown(s) {
     '</div><p class="detail-foot" style="margin-top:8px">Token traffic across the recorded session. Cache reads can repeat the same tokens; this is not a breakdown of the current context.</p>'
   );
 }
+function subscriptionStats(s, pct) {
+  const ahead = shareAhead(s);
+  const share = shareOf(s);
+  const window = quotaWindowName(s);
+  const providerState = providerQuotaState(s.provider, accountQuotaFor(s));
+  const subscription = providerState.kind !== "ready"
+    ? dataStateMarkup(providerState)
+    : s.usage_mode === "included"
+    ? "Included"
+    : dataStateMarkup(sessionDataState(s, "plan"));
+  const next = providerState.kind !== "ready"
+    ? dataStateMarkup(providerState)
+    : finite(ahead)
+    ? "+" + percentage(ahead) + " of " + window + " limit"
+    : dataStateMarkup(sessionDataState(s, "forecast"));
+  const responsibility = providerState.kind !== "ready"
+    ? dataStateMarkup(providerState)
+    : finite(share)
+    ? percentage(share) + " of " + window + " limit"
+    : dataStateMarkup(sessionDataState(s, "share"));
+  return (
+    '<div class="inspector-stats subscription-stats">' +
+    '<div><span>Subscription</span><strong>' + subscription + "</strong></div>" +
+    '<div><span>Next 10 prompts</span><strong>' + next + "</strong></div>" +
+    '<div><span>Responsible for</span><strong>' + responsibility + "</strong></div>" +
+    '<div><span>Context</span><strong>' + percentage(pct) + "</strong><small>" + tokens(s.context_tokens) + " / " + tokens(s.context_window_tokens) + "</small></div>" +
+    "</div>"
+  );
+}
 function renderInspector() {
   const panel = $("#inspector"),
     s = allRows().find((s) => keyOf(s) === state.selected || s.id === state.selected);
@@ -1861,7 +1956,7 @@ function renderInspector() {
     scroll = $("#inspector-body").scrollTop;
   const included = !showsMoney(s);
   const stats = included
-    ? '<div class="inspector-stats"><div><span>Subscription</span><strong>' + (s.quota_status === "stale" ? "Last known: included" : s.usage_mode === "included" ? "Included" : "Unknown") + '</strong></div><div><span>Context</span><strong>' + percentage(pct) + "</strong><small>" + tokens(s.context_tokens) + " / " + tokens(s.context_window_tokens) + "</small></div><div><span>Prompts</span><strong>" + count(s) + "</strong><small>recorded locally</small></div></div>"
+    ? subscriptionStats(s, pct)
     : '<div class="inspector-stats"><div><span>Recorded spend</span><strong>' + money(cost(s)) + "</strong><small>" + count(s) + " prompts</small></div><div><span>" + (last?.completed === false ? "Current prompt" : "Last prompt") + "</span><strong>" + money(last?.priced === false ? null : last?.cost_usd) + "</strong><small>" + (last?.completed === false ? "still accumulating" : "recorded cost") + "</small></div><div><span>Next 10 prompts</span><strong>" + additional(forecast(s)) + "</strong><small>additional estimate</small></div><div><span>Context</span><strong>" + percentage(pct) + "</strong><small>" + tokens(s.context_tokens) + " / " + tokens(s.context_window_tokens) + "</small></div></div>";
   $("#inspector-body").innerHTML =
     '<span class="eyebrow">' +
