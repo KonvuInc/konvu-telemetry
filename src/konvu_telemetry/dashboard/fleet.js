@@ -389,42 +389,37 @@ function bonfireEmbers(stage) {
     (stage === 3 ? '<circle class="bonfire-ember ember-late" cx="52" cy="18" r="1.1"/>' : "") + "</g>"
   );
 }
-/* One flame shape with two tongues rising off a single base, which is what
-   actually reads as fire at 20px. Extra flames overlap the main one heavily
-   rather than standing beside it, so a stage merges into a single silhouette
-   with several peaks instead of reading as detached blobs. */
-const QF_BODY =
-  '<path fill="$1" d="M20 54c-10 0-16-6-16-14 0-7 5-11 8-17 2-4 3-9 2-14 6 3 10 8 12 13 1-3 1-6 0-9 6 6 9 13 9 19 0 5-1 8-2 11-1 3 1 5 3 3 1-1 2-4 2-6 2 4 3 8 3 11 0 8-11 3-21 3Z"/>' +
-  '<path fill="$2" d="M20 54c-5 0-9-4-9-8 0-4 3-7 5-11 1-3 2-6 1-9 4 2 7 6 8 10 1-2 1-4 1-6 3 4 4 8 4 11 0 3-1 5-1 7 0 2 1 2 2 1 1-1 1-3 1-4 1 3 2 5 2 7 0 3-9 2-14 2Z"/>';
-const QF_HOT = ["#F47720", "#FFD268"];
-const QF_DIM = ["#E34D1C", "#FFAB27"];
-const QF_DEEP = ["#C9380F", "#FF8D22"];
+/* Traced from the reference flame: a tall body, a hooked tip curling left, and
+   a plain teardrop core. Stages add whole flames behind the front one in
+   deeper reds, so the group reads as one fire getting bigger. */
+const QF_OUT =
+  '<path fill="$1" d="M36 2c3 12-1 20-7 26-4 4-8 7-8 12 0 4 3 6 6 5 4-2 5-7 4-12 10 8 17 21 17 33 0 18-15 32-34 32S-16 84-16 66c0-12 6-21 11-29 4-6 8-12 8-19 0-4-1-8-3-11 9 3 16 9 19 17 2-5 3-10 2-15 5 2 10 6 13 10 1-4 2-9 2-15Z"/>';
+const QF_CORE =
+  '<path fill="$2" d="M9 30c8 7 15 17 15 26 0 9-7 15-15 15S-6 65-6 56c0-9 7-19 15-26Z"/>';
+const QF_HOT = ["#FF5722", "#FFC13B"];
+const QF_DEEP = ["#B52F07", "#E0530F"];
 /* Placement sits on the outer group; the flicker owns the inner one, because
    .bonfire-tongue animates transform and would otherwise erase the placement. */
 function qfFlame(colors, place) {
   return (
     '<g transform="' + place + '"><g class="bonfire-tongue">' +
-    QF_BODY.replace("$1", colors[0]).replace("$2", colors[1]) +
+    QF_OUT.replace("$1", colors[0]) + QF_CORE.replace("$2", colors[1]) +
     "</g></g>"
   );
 }
 const QF_STAGES = [
   null,
-  { box: "0 0 40 56", body: () => qfFlame(QF_HOT, "translate(0 0)") },
+  { box: "-20 0 60 100", body: () => qfFlame(QF_HOT, "translate(0 0)") },
   {
-    box: "-10 -6 60 62",
-    body: () =>
-      qfFlame(QF_DEEP, "translate(-8 -6) scale(.92)") +
-      qfFlame(QF_DIM, "translate(16 6) scale(.74)") +
-      qfFlame(QF_HOT, "translate(0 2) scale(.96)"),
+    box: "-44 -6 88 106",
+    body: () => qfFlame(QF_DEEP, "translate(-34 22) scale(.6)") + qfFlame(QF_HOT, "translate(0 0)"),
   },
   {
-    box: "-14 -12 68 68",
+    box: "-50 -10 116 110",
     body: () =>
-      qfFlame(QF_DEEP, "translate(-12 -4) scale(.8)") +
-      qfFlame(QF_DEEP, "translate(18 -12) scale(.98)") +
-      qfFlame(QF_DIM, "translate(20 10) scale(.66)") +
-      qfFlame(QF_HOT, "translate(0 2) scale(.96)"),
+      qfFlame(QF_DEEP, "translate(-40 24) scale(.58)") +
+      qfFlame(QF_DEEP, "translate(40 14) scale(.68)") +
+      qfFlame(QF_HOT, "translate(0 0)"),
   },
 ];
 function quotaFireIcon(percent) {
@@ -500,13 +495,22 @@ function spendVisual(s, scale) {
     const included = s.usage_mode === "included";
     const ahead = shareAhead(s);
     const window = quotaWindowName(s);
+    const status = s.quota_status === "stale"
+      ? "Last known: included in your plan"
+      : included
+        ? "Included in your plan"
+        : "Subscription status unavailable";
+    // The forecast keeps its place under the heading; it is only nudged up in
+    // size and weight so it stops disappearing into the row.
+    // Keeps main's shared percentage() so precision matches the rest of the
+    // page; only the number is emphasised.
     const line = finite(ahead)
-      ? "Next 10 prompts: +" + percentage(ahead) + " of " + window + " limit"
-      : "";
+      ? '<small class="plan-next">Next 10 prompts: <b>+' +
+        percentage(ahead) + "</b> of " + esc(window) + " limit</small>"
+      : '<small class="plan-next">Next 10 prompts: ' + esc(attributionLabel(s)) + "</small>";
     return (
       '<div class="spending included-copy"><div class="included-copy-text"><strong>' +
-      (s.quota_status === "stale" ? "Last known: included in your plan" : included ? "Included in your plan" : "Subscription status unavailable") + "</strong>" +
-      (line ? "<small>" + esc(line) + "</small>" : "") + "</div>" +
+      esc(status) + "</strong>" + line + "</div>" +
       (finite(ahead) ? quotaFireIcon(ahead) : "") + "</div>"
     );
   }
@@ -636,6 +640,20 @@ function groupHeading(group) {
    a subscription session must never contribute to a dollar figure. */
 const avg = (values) => (values.length ? values.reduce((a, b) => a + b, 0) / values.length : null);
 const shareOf = (s) => quotaShare(s, s.provider === "codex" ? "weekly" : "five_hour");
+/* The collector reports "observing" while it still lacks the history to
+   attribute usage. Naming that beats a bare dash, which reads like a bug. */
+function attributionLabel(s) {
+  const attribution = s.quota_attribution;
+  if (attribution?.state === "observing") return "Measuring";
+  if (!Array.isArray(attribution?.windows) || !attribution.windows.length) return "Not recorded";
+  return "Not estimated yet";
+}
+function windowUsedPercent(s) {
+  const period = s.provider === "codex" ? "weekly" : "five_hour";
+  const windows = state.payload?.account_quotas?.[s.provider]?.windows;
+  const row = Array.isArray(windows) ? windows.find((w) => w?.period === period) : null;
+  return row && finite(row.used_percent) ? row.used_percent : null;
+}
 const quotaWindowName = (s) => (s.provider === "codex" ? "weekly" : "5-hour");
 function shareAhead(s) {
   const period = s.provider === "codex" ? "weekly" : "five_hour";

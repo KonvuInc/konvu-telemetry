@@ -2758,16 +2758,16 @@ select {
   overflow: visible;
 }
 .quota-fire.fire-1 svg {
-  width: 14px;
-  height: 20px;
-}
-.quota-fire.fire-2 svg {
-  width: 27px;
+  width: 17px;
   height: 28px;
 }
+.quota-fire.fire-2 svg {
+  width: 24px;
+  height: 29px;
+}
 .quota-fire.fire-3 svg {
-  width: 36px;
-  height: 34px;
+  width: 32px;
+  height: 30px;
 }
 .quota-fire .bonfire-tongue {
   transform-box: fill-box;
@@ -3064,4 +3064,17 @@ select {
   content: "·";
   margin-right: 8px;
   color: var(--muted);
+}
+
+/* ---------- plan forecast line ---------- */
+.included-copy small.plan-next {
+  font-size: 10.5px;
+  color: var(--mist);
+  display: block;
+  margin-top: 4px;
+}
+.included-copy small.plan-next b {
+  font-weight: 700;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
 }
