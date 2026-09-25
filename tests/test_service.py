@@ -2523,7 +2523,6 @@ class ServiceTests(unittest.TestCase):
         ):
             _comparable_forecast(session, [telemetry], True)
             self.assertEqual(session["projected_next_10_tasks_usd"], 20.0)
-            self.assertEqual(session["projected_next_10_usage_tokens"], 2000.0)
             self.assertEqual(session["forecast_basis"]["sample_count"], 3)
             telemetry.configurations.append((3.0, "other-model", "medium"))
         with patch(

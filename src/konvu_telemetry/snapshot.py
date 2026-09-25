@@ -729,7 +729,6 @@ def build_snapshot(
     for session in sessions:
         for internal_field in (
             "forecast_mode",
-            "projected_next_10_usage_tokens",
             "since_compact",
         ):
             session.pop(internal_field, None)

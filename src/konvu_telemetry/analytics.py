@@ -91,9 +91,6 @@ def iteration_series(
                 "usage_tokens": sum(
                     event.usage.total_tokens for event in iteration_events
                 ),
-                "quota_tokens": round(
-                    sum(event.usage.quota_tokens for event in iteration_events), 6
-                ),
                 "tool_calls": sum(event.tool_calls for event in iteration_events),
                 "model": model,
                 "reasoning_effort": effort,
