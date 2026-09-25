@@ -21,10 +21,12 @@ class StoredSessionUsage(SessionUsage, total=False):
 
 MIN_FORECAST_SAMPLES = 1
 MIN_FORECAST_PERCENT = 1.0
+RESET_TIMESTAMP_JITTER_SECONDS = 60.0
+LEGACY_RESET_MATCH_SECONDS = 2 * RESET_TIMESTAMP_JITTER_SECONDS
 SESSION_BASELINE_RETENTION_SECONDS = 32 * 24 * 60 * 60
-# 3: session weight changed from a raw token sum to recorded cost, so stored
-# baselines and calibration samples are in the wrong unit and must be rebuilt.
-STATE_VERSION = 3
+# 3: Session weight changed from raw token totals to recorded cost.
+# 4: Quota-window identity stopped including mutable reset timestamps.
+STATE_VERSION = 4
 
 
 def _number(value: object) -> float | None:
@@ -39,14 +41,13 @@ def _load_state() -> dict[str, object]:
         state = json.loads(quota_attribution_path().read_text())
     except (OSError, json.JSONDecodeError):
         return {"version": STATE_VERSION, "providers": {}}
-    if not isinstance(state, dict) or state.get("version") != STATE_VERSION:
+    if not isinstance(state, dict) or state.get("version") not in {3, STATE_VERSION}:
         return {"version": STATE_VERSION, "providers": {}}
     providers = state.get("providers")
-    return (
-        state
-        if isinstance(providers, dict)
-        else {"version": STATE_VERSION, "providers": {}}
-    )
+    if not isinstance(providers, dict):
+        return {"version": STATE_VERSION, "providers": {}}
+    state["version"] = STATE_VERSION
+    return state
 
 
 def _session_usage(session: dict[str, object]) -> SessionUsage | None:
@@ -117,20 +118,134 @@ def _snapshot_time(snapshot: dict[str, object]) -> float | None:
 def _window_key(window: dict[str, object]) -> str | None:
     period = window.get("period")
     limit_id = window.get("limit_id", "default")
-    reset = window.get("resets_at")
     if not isinstance(period, str) or not isinstance(limit_id, str):
         return None
-    reset_key = "unknown"
-    if isinstance(reset, str):
-        try:
-            reset_key = (
-                datetime.fromisoformat(reset.replace("Z", "+00:00"))
-                .replace(second=0, microsecond=0)
-                .isoformat()
+    window_minutes = _number(window.get("window_minutes"))
+    return json.dumps([limit_id, period, window_minutes], separators=(",", ":"))
+
+
+def _reset_timestamp(value: object) -> float | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _legacy_window_prefix(window: dict[str, object]) -> str | None:
+    period = window.get("period")
+    limit_id = window.get("limit_id", "default")
+    if not isinstance(period, str) or not isinstance(limit_id, str):
+        return None
+    return f"{limit_id}:{period}:"
+
+
+def _window_evidence(window: dict[str, object]) -> tuple[int, int, int]:
+    allocations = window.get("allocations")
+    pending = window.get("pending")
+    samples = window.get("calibration_samples")
+    return (
+        len(samples) if isinstance(samples, list) else 0,
+        len(allocations) if isinstance(allocations, dict) else 0,
+        len(pending) if isinstance(pending, dict) else 0,
+    )
+
+
+def _stored_window(
+    windows: dict[str, object], raw_window: dict[str, object]
+) -> tuple[str | None, dict[str, object] | None]:
+    window_key = _window_key(raw_window)
+    if window_key is None:
+        return None, None
+    stored = windows.get(window_key)
+    prefix = _legacy_window_prefix(raw_window)
+    legacy = [
+        (key, value)
+        for key, value in windows.items()
+        if isinstance(key, str)
+        and prefix is not None
+        and key.startswith(prefix)
+        and isinstance(value, dict)
+    ]
+    if not isinstance(stored, dict) and legacy:
+        current_reset = _reset_timestamp(raw_window.get("resets_at"))
+        candidates: list[tuple[str, dict[str, object]]] = []
+        for item in legacy:
+            if current_reset is None:
+                candidates.append(item)
+                continue
+            legacy_reset = (
+                _reset_timestamp(item[0][len(prefix) :]) if prefix is not None else None
             )
-        except ValueError:
-            reset_key = reset
-    return f"{limit_id}:{period}:{reset_key}"
+            if (
+                legacy_reset is not None
+                and abs(current_reset - legacy_reset) <= LEGACY_RESET_MATCH_SECONDS
+            ):
+                candidates.append(item)
+        if candidates:
+            legacy_key, stored = max(
+                candidates, key=lambda item: _window_evidence(item[1])
+            )
+            reset = raw_window.get("resets_at")
+            if isinstance(reset, str):
+                stored["resets_at"] = reset
+            elif prefix is not None:
+                legacy_reset_value = legacy_key[len(prefix) :]
+                if _reset_timestamp(legacy_reset_value) is not None:
+                    stored["resets_at"] = legacy_reset_value
+            windows[window_key] = stored
+    for legacy_key, _ in legacy:
+        windows.pop(legacy_key, None)
+    return window_key, stored if isinstance(stored, dict) else None
+
+
+def _reset_advanced(
+    stored: dict[str, object],
+    raw_window: dict[str, object],
+    observed_at: float | None,
+) -> bool:
+    previous = _reset_timestamp(stored.get("resets_at"))
+    current = _reset_timestamp(raw_window.get("resets_at"))
+    return (
+        previous is not None
+        and current is not None
+        and current - previous > RESET_TIMESTAMP_JITTER_SECONDS
+        and (
+            observed_at is None
+            or observed_at >= previous - RESET_TIMESTAMP_JITTER_SECONDS
+        )
+    )
+
+
+def _refresh_reset_timestamp(
+    stored: dict[str, object], raw_window: dict[str, object]
+) -> None:
+    previous = _reset_timestamp(stored.get("resets_at"))
+    current_value = raw_window.get("resets_at")
+    current = _reset_timestamp(current_value)
+    if isinstance(current_value, str) and (
+        previous is None
+        or (
+            current is not None
+            and abs(current - previous) <= RESET_TIMESTAMP_JITTER_SECONDS
+        )
+    ):
+        stored["resets_at"] = current_value
+
+
+def _reset_window(
+    stored: dict[str, object], raw_window: dict[str, object], used: float
+) -> None:
+    stored["used_percent"] = used
+    stored["allocations"] = {}
+    stored["calibration_samples"] = []
+    stored["pending"] = {}
+    reset = raw_window.get("resets_at")
+    if isinstance(reset, str):
+        stored["resets_at"] = reset
+    else:
+        stored.pop("resets_at", None)
 
 
 def apply_quota_attribution(snapshot: dict[str, object]) -> None:
@@ -216,37 +331,42 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
         for raw_window in raw_windows:
             if not isinstance(raw_window, dict):
                 continue
-            window_key = _window_key(raw_window)
+            window_key, old_window = _stored_window(windows_state, raw_window)
             used = _number(raw_window.get("used_percent"))
             if window_key is None or used is None:
                 continue
-            old_window = windows_state.get(window_key)
             if not isinstance(old_window, dict):
                 windows_state[window_key] = {
                     "used_percent": used,
                     "allocations": {},
                     "pending": {},
                 }
+                reset = raw_window.get("resets_at")
+                if isinstance(reset, str):
+                    windows_state[window_key]["resets_at"] = reset
                 continue
             old_window.pop("rates", None)
             previous_used = _number(old_window.get("used_percent"))
             if previous_used is None:
                 old_window["used_percent"] = used
                 old_window["pending"] = {}
+                _refresh_reset_timestamp(old_window, raw_window)
                 continue
-            if used < previous_used:
-                # A reset starts a fresh provider window; old shares must not leak into it.
-                old_window["used_percent"] = used
-                old_window["allocations"] = {}
-                old_window["calibration_samples"] = []
-                old_window["pending"] = {}
+            has_current_reset = (
+                _reset_timestamp(raw_window.get("resets_at")) is not None
+            )
+            if _reset_advanced(old_window, raw_window, observed_at) or (
+                used < previous_used and not has_current_reset
+            ):
+                _reset_window(old_window, raw_window, used)
                 continue
+            _refresh_reset_timestamp(old_window, raw_window)
             pending = old_window.setdefault("pending", {})
             if not isinstance(pending, dict):
                 old_window["pending"] = pending = {}
             for session_id, weight in interval_weights.items():
                 pending[session_id] = (_number(pending.get(session_id)) or 0.0) + weight
-            if used == previous_used:
+            if used <= previous_used:
                 continue
             increase = used - previous_used
             allocations = old_window.setdefault("allocations", {})
@@ -272,10 +392,7 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
             for raw_window in raw_windows:
                 if not isinstance(raw_window, dict):
                     continue
-                window_key = _window_key(raw_window)
-                stored = (
-                    windows_state.get(window_key) if window_key is not None else None
-                )
+                _, stored = _stored_window(windows_state, raw_window)
                 used_percent = _number(raw_window.get("used_percent"))
                 if not isinstance(stored, dict) or used_percent is None:
                     continue
