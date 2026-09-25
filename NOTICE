@@ -1,8 +1,9 @@
-Konvu Telemetry uses a bundled snapshot of LiteLLM's public model-price table.
+Konvu Telemetry uses a bundled snapshot of LiteLLM's public model-price table
+with provider-published overrides for models newer than the pinned snapshot.
 
 LiteLLM pricing data: https://github.com/BerriAI/litellm
 LiteLLM is distributed under the MIT License: https://github.com/BerriAI/litellm/blob/main/LICENSE
 
 The bundled snapshot is `src/konvu_telemetry/pricing.json`.
-SHA-256: 529638485889e5499ddb631f05a7fa58c7aaa25ebddfea8b5152d6eca77b1d2b
+SHA-256: e567614465f2231a7d4037a10eff019e313c867fc5844a7eb892385507b9f868
 It is local estimate data, not a provider billing ledger.

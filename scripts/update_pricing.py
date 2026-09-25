@@ -21,6 +21,96 @@ SOURCE = (
 )
 MAX_PAYLOAD_BYTES = 20 * 1024 * 1024
 
+# Provider-published models newer than the pinned LiteLLM snapshot.
+OFFICIAL_MODEL_OVERRIDES: dict[str, dict[str, object]] = {
+    "claude-opus-5-5": {
+        "cache_creation_input_token_cost": 0.000005,
+        "cache_creation_input_token_cost_above_1hr": 0.000008,
+        "cache_read_input_token_cost": 0.0000002,
+        "fastMultiplier": 2.0,
+        "input_cost_per_token": 0.000004,
+        "litellm_provider": "anthropic",
+        "max_input_tokens": 1_000_000,
+        "max_output_tokens": 128_000,
+        "mode": "chat",
+        "output_cost_per_token": 0.00002,
+        "search_context_cost_per_query": {
+            "search_context_size_medium": 0.01,
+        },
+        "source": "https://platform.claude.com/docs/en/models/opus-5-5/overview",
+    },
+    "gpt-6-sol": {
+        "cache_creation_input_token_cost": 0.0000025,
+        "cache_creation_input_token_cost_above_272k_tokens": 0.000005,
+        "cache_creation_input_token_cost_above_272k_tokens_flex": 0.0000025,
+        "cache_creation_input_token_cost_above_272k_tokens_priority": 0.00001,
+        "cache_creation_input_token_cost_flex": 0.00000125,
+        "cache_creation_input_token_cost_priority": 0.000005,
+        "cache_read_input_token_cost": 0.0000002,
+        "cache_read_input_token_cost_above_272k_tokens": 0.0000004,
+        "cache_read_input_token_cost_above_272k_tokens_flex": 0.0000002,
+        "cache_read_input_token_cost_above_272k_tokens_priority": 0.0000008,
+        "cache_read_input_token_cost_flex": 0.0000001,
+        "cache_read_input_token_cost_priority": 0.0000004,
+        "fastMultiplier": 2.0,
+        "input_cost_per_token": 0.000002,
+        "input_cost_per_token_above_272k_tokens": 0.000004,
+        "input_cost_per_token_above_272k_tokens_flex": 0.000002,
+        "input_cost_per_token_above_272k_tokens_priority": 0.000008,
+        "input_cost_per_token_flex": 0.000001,
+        "input_cost_per_token_priority": 0.000004,
+        "litellm_provider": "openai",
+        "max_input_tokens": 922_000,
+        "max_output_tokens": 128_000,
+        "mode": "chat",
+        "output_cost_per_token": 0.00001,
+        "output_cost_per_token_above_272k_tokens": 0.000015,
+        "output_cost_per_token_above_272k_tokens_flex": 0.0000075,
+        "output_cost_per_token_above_272k_tokens_priority": 0.00003,
+        "output_cost_per_token_flex": 0.000005,
+        "output_cost_per_token_priority": 0.00002,
+        "search_context_cost_per_query": {
+            "search_context_size_medium": 0.01,
+        },
+        "source": "https://developers.openai.com/api/docs/models/gpt-6-sol",
+    },
+    "gpt-6-luna": {
+        "cache_creation_input_token_cost": 0.000000125,
+        "cache_creation_input_token_cost_above_272k_tokens": 0.00000025,
+        "cache_creation_input_token_cost_above_272k_tokens_flex": 0.000000125,
+        "cache_creation_input_token_cost_above_272k_tokens_priority": 0.0000005,
+        "cache_creation_input_token_cost_flex": 0.0000000625,
+        "cache_creation_input_token_cost_priority": 0.00000025,
+        "cache_read_input_token_cost": 0.00000001,
+        "cache_read_input_token_cost_above_272k_tokens": 0.00000002,
+        "cache_read_input_token_cost_above_272k_tokens_flex": 0.00000001,
+        "cache_read_input_token_cost_above_272k_tokens_priority": 0.00000004,
+        "cache_read_input_token_cost_flex": 0.000000005,
+        "cache_read_input_token_cost_priority": 0.00000002,
+        "fastMultiplier": 2.0,
+        "input_cost_per_token": 0.0000001,
+        "input_cost_per_token_above_272k_tokens": 0.0000002,
+        "input_cost_per_token_above_272k_tokens_flex": 0.0000001,
+        "input_cost_per_token_above_272k_tokens_priority": 0.0000004,
+        "input_cost_per_token_flex": 0.00000005,
+        "input_cost_per_token_priority": 0.0000002,
+        "litellm_provider": "openai",
+        "max_input_tokens": 922_000,
+        "max_output_tokens": 128_000,
+        "mode": "chat",
+        "output_cost_per_token": 0.0000005,
+        "output_cost_per_token_above_272k_tokens": 0.00000075,
+        "output_cost_per_token_above_272k_tokens_flex": 0.000000375,
+        "output_cost_per_token_above_272k_tokens_priority": 0.0000015,
+        "output_cost_per_token_flex": 0.00000025,
+        "output_cost_per_token_priority": 0.000001,
+        "search_context_cost_per_query": {
+            "search_context_size_medium": 0.01,
+        },
+        "source": "https://developers.openai.com/api/docs/models/gpt-6-luna",
+    },
+}
+
 
 def valid_rate(value: object) -> bool:
     return (
@@ -43,7 +133,9 @@ def validated_payload(raw: bytes) -> dict[str, object]:
             for field in ("input_cost_per_token", "output_cost_per_token")
         ):
             raise ValueError(f"LiteLLM pricing is missing required rates for {model}")
-    return {str(key): value for key, value in parsed.items()}
+    normalized = {str(key): value for key, value in parsed.items()}
+    normalized.update(OFFICIAL_MODEL_OVERRIDES)
+    return normalized
 
 
 def atomic_write(path: Path, contents: bytes) -> None:
