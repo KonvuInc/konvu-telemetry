@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.5 - 2026-09-28
+
+- Restart the collector automatically after a Homebrew upgrade so the new version
+  takes effect without running setup again.
+- Use sentence case across CLI and desktop usage displays.
+
 ## 0.3.4 - 2026-09-28
 
 - Let people choose the usage-box cadence with an arrow-key picker, and persist the
