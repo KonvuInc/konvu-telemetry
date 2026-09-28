@@ -14,14 +14,21 @@ brew install konvuinc/tap/konvu-telemetry
 konvu-telemetry setup
 ```
 
-Setup starts the local collector, opens the dashboard at `http://127.0.0.1:7824`, and wires each client to exactly one place: the Claude Code CLI shows usage in its status line, Claude Desktop and Codex Desktop append a usage box to the reply, and the Codex CLI keeps its Stop hook summary. The box appears when the last prompt used a tool, so ordinary questions stay uncluttered. Every usage summary ends with a link to the dashboard, or, when the collector is not running, with a reminder to run `konvu-telemetry setup`. Restart both desktop apps after setup; in Codex, open `/hooks` and trust the Konvu hooks.
+Setup starts the local collector, opens the dashboard at `http://127.0.0.1:7824`, and wires each client to exactly one place: the Claude Code CLI shows usage in its status line, Claude Desktop and Codex Desktop append a usage box to the reply, and the Codex CLI keeps its Stop hook summary. By default the box appears after a turn that called tools, so ordinary questions stay uncluttered; `konvu-telemetry cadence` changes that, and so does the settings panel in the dashboard. Every usage summary ends with a link to the dashboard, or, when the collector is not running, with a reminder to run `konvu-telemetry setup`. Restart both desktop apps after setup; in Codex, open `/hooks` and trust the Konvu hooks.
 
 ## Use it
 
 ```sh
 konvu-telemetry dashboard  # Open the local dashboard
 konvu-telemetry status     # Check that collection is running
+konvu-telemetry cadence    # Choose how often the usage box appears
 ```
+
+`cadence` with no argument lists the choices: after every prompt, after every tool
+call (the default), only when usage jumps, never, or a custom rule you describe and
+your coding agent writes. Pass one directly — `konvu-telemetry cadence never` — or
+`--status` to see the current one. The same choice lives in the dashboard's settings
+panel, and it is stored in your home directory, so upgrading does not reset it.
 
 To update:
 

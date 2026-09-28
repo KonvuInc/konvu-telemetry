@@ -1471,6 +1471,165 @@ function renderFreshness(stale) {
   button.setAttribute("aria-label", button.title);
   button.classList.toggle("stale", Boolean(stale));
 }
+/* ============ settings: display cadence ============
+   The cadence governs the Konvu usage box drawn inside a turn, in Codex CLI,
+   Codex desktop and Claude desktop. A custom rule
+   needs code, so the dashboard stores the wording and hands back a prompt for
+   the user's own agent rather than pretending it took effect. */
+const cadenceState = { options: [], cadence: "", custom_rule: "", loaded: false };
+async function loadPreferences() {
+  if (previewMode) return;
+  try {
+    const response = await fetch("/api/preferences", { cache: "no-store" });
+    if (!response.ok) return;
+    const value = await response.json();
+    Object.assign(cadenceState, value, { loaded: true });
+    renderCadenceOptions();
+  } catch {
+    return;
+  }
+}
+/* A custom cadence with no rule would save a setting that cannot do anything,
+   so it is blocked rather than accepted and quietly ignored. */
+const MIN_CUSTOM_RULE = 3;
+function customRuleIsUsable() {
+  return (($("#cadence-rule")?.value || "").trim().length >= MIN_CUSTOM_RULE);
+}
+function renderSaveState() {
+  const save = $("#cadence-save");
+  if (!save) return;
+  const blocked = cadenceState.cadence === "custom" && !customRuleIsUsable();
+  save.disabled = blocked;
+  const status = $("#cadence-status");
+  // Flagged on the element rather than recognised by its text, so an unrelated
+  // message (a failed save) is never mistaken for this one and cleared.
+  if (status && blocked) { status.textContent = "Describe your rule first"; status.dataset.hint = "blocked"; }
+  else if (status && status.dataset.hint === "blocked") { status.textContent = ""; delete status.dataset.hint; }
+}
+function renderCadenceOptions() {
+  const host = $("#cadence-options");
+  if (!host || !cadenceState.loaded) return;
+  const focusWasInRule = document.activeElement?.id === "cadence-rule";
+  const typed = focusWasInRule ? $("#cadence-rule").value : null;
+  const rows = cadenceState.options
+    .filter((option) => option.id !== "custom")
+    .map(
+      (option) =>
+        '<button class="cadence-option" role="radio" type="button" data-cadence="' +
+        esc(option.id) + '" aria-checked="' + String(option.id === cadenceState.cadence) + '">' +
+        esc(option.label) + "</button>"
+    )
+    .join("");
+  // The custom row is a field, not a label: typing in it is the clearest
+  // signal that custom is what you want, so it selects itself. Its label still
+  // comes from the server so it cannot drift from the command's wording.
+  const customLabel =
+    cadenceState.options.find((option) => option.id === "custom")?.label || "Custom rule";
+  const custom =
+    '<div class="cadence-option cadence-custom-row" role="radio" data-cadence="custom" aria-checked="' +
+    String(cadenceState.cadence === "custom") + '">' + esc(customLabel) +
+    '<input id="cadence-rule" type="text" autocomplete="off" maxlength="2000" placeholder="describe your rule" value="' +
+    esc(cadenceState.custom_rule || "") + '"></div>';
+  host.innerHTML = rows + custom;
+  if (focusWasInRule) {
+    const rule = $("#cadence-rule");
+    if (rule) {
+      rule.value = typed;
+      rule.focus();
+      rule.setSelectionRange(typed.length, typed.length);
+    }
+  }
+  renderSaveState();
+}
+function openSettings() {
+  $("#settings-panel").hidden = false;
+  $("#settings-backdrop").hidden = false;
+  document.querySelector("main").inert = true;
+  loadPreferences();
+}
+function closeSettings() {
+  $("#settings-panel").hidden = true;
+  $("#settings-backdrop").hidden = true;
+  document.querySelector("main").inert = false;
+  $("#settings-open")?.focus();
+}
+function openPromptModal(text) {
+  $("#cadence-prompt-text").textContent = text;
+  $("#prompt-modal").hidden = false;
+  $("#prompt-backdrop").hidden = false;
+  $("#cadence-copy")?.focus();
+}
+function closePromptModal() {
+  $("#prompt-modal").hidden = true;
+  $("#prompt-backdrop").hidden = true;
+  document.querySelector("main").inert = false;
+  $("#settings-open")?.focus();
+}
+async function saveCadence() {
+  const status = $("#cadence-status");
+  if (cadenceState.cadence === "custom" && !customRuleIsUsable()) {
+    renderSaveState();
+    $("#cadence-rule")?.focus();
+    return;
+  }
+  const body = { cadence: cadenceState.cadence, custom_rule: $("#cadence-rule")?.value || "" };
+  try {
+    const response = await fetch("/api/preferences", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) throw new Error("save failed");
+    const saved = await response.json();
+    Object.assign(cadenceState, saved);
+    renderCadenceOptions();
+    if (status) status.textContent = "";
+    // Saving is done, so the settings dialog has nothing left to say. A custom
+    // rule still needs a prompt handed over, which gets its own dialog.
+    $("#settings-panel").hidden = true;
+    $("#settings-backdrop").hidden = true;
+    if (saved.agent_prompt) openPromptModal(saved.agent_prompt);
+    else closePromptModal();
+  } catch {
+    if (status) status.textContent = "Couldn’t save — is the collector running?";
+  }
+}
+function bindSettings() {
+  $("#settings-open")?.addEventListener("click", openSettings);
+  $("#settings-close")?.addEventListener("click", closeSettings);
+  $("#settings-backdrop")?.addEventListener("click", closeSettings);
+  $("#cadence-save")?.addEventListener("click", saveCadence);
+  // Copy is the only way out: the prompt is the whole point of the dialog.
+  $("#cadence-copy")?.addEventListener("click", async () => {
+    const text = $("#cadence-prompt-text").textContent || "";
+    try {
+      await navigator.clipboard?.writeText(text);
+    } catch {
+      // Clipboard can be refused; the prompt is still on screen to copy by hand.
+    }
+    closePromptModal();
+  });
+  document.addEventListener("input", (event) => {
+    if (!(event.target instanceof Element) || event.target.id !== "cadence-rule") return;
+    if (cadenceState.cadence !== "custom") {
+      cadenceState.cadence = "custom";
+      renderCadenceOptions();
+      return;
+    }
+    renderSaveState();
+  });
+  document.addEventListener("click", (event) => {
+    const option = event.target instanceof Element ? event.target.closest("[data-cadence]") : null;
+    if (!option) return;
+    cadenceState.cadence = option.dataset.cadence;
+    $("#cadence-status").textContent = "";
+    renderCadenceOptions();
+  });
+  document.addEventListener("keydown", (event) => {
+    // The prompt dialog deliberately ignores Escape.
+    if (event.key === "Escape" && !$("#settings-panel").hidden) closeSettings();
+  });
+}
 function bindEvents() {
   $("#freshness").addEventListener("click", refreshNow);
   document.addEventListener(
@@ -2243,6 +2402,7 @@ initialUrl();
 bindEvents();
 bindStatePopovers();
 bindNotificationPanel();
+bindSettings();
 refresh();
 setInterval(() => {
   renderFreshness(state.error || !state.payload || elapsed(state.payload.generated_at) > 120000);

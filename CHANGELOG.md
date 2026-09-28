@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Let people choose how often the usage box appears, from `konvu-telemetry cadence`
+  or the dashboard's settings panel: after every prompt, after every tool call (the
+  default, matching previous behaviour), only when the binding limit moves, never, or
+  a custom rule. The choice lives in `~/.konvu/telemetry/preferences.json` and a
+  custom rule in `~/.konvu/telemetry/custom_rule.py`, both outside the package so
+  upgrades cannot reset them.
+
 ## 0.3.2 - 2026-09-25
 
 - Improve subscription quota forecast display.
