@@ -12,6 +12,9 @@
       <div class="brand"><img src="/konvu-ghost.svg" alt="Konvu" width="19" height="19" /><strong>Coding Agents monitoring</strong></div>
       <div class="top-actions">
         <button class="freshness" id="freshness" type="button"></button>
+        <button id="settings-open" class="settings-button" type="button" aria-label="Settings" title="Settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h10M18 18h2" /><circle cx="16" cy="6" r="2" /><circle cx="10" cy="12" r="2" /><circle cx="16" cy="18" r="2" /></svg>
+        </button>
         <div class="notification-wrap">
           <button
             id="konvu-alert-control"
@@ -63,6 +66,63 @@
       <section id="kpi-banner" aria-label="Fleet summary"></section>
       <div id="fleet"></div>
     </main>
+    <div id="settings-backdrop" hidden></div>
+    <section id="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title" hidden>
+      <div class="settings-top">
+        <h2 id="settings-title">Settings</h2>
+        <button id="settings-close" aria-label="Close settings">×</button>
+      </div>
+      <div class="settings-body">
+        <section class="settings-section">
+          <h3>The usage box</h3>
+          <p class="settings-note">
+            Konvu prints this box inside a turn, in Codex CLI, Codex desktop and Claude
+            desktop. It shows how much of your plan the session has used and what the
+            next ten prompts are forecast to cost. The Claude CLI status line is always
+            current and is not affected by this setting.
+          </p>
+          <div class="box-preview" aria-label="What the usage box looks like">
+          <figure>
+            <figcaption>Inside your plan</figcaption>
+            <div class="box-frame"><b>KONVU USAGE</b><pre>🟢 INCLUDED
+⏱️ 5H [██░░░░░] 24.0%  WEEK [███░░░░] 38.0%  CONTEXT [████░░░] 63.0%
+📈 THIS SESSION 12.0% OF 5H ━━━▶ 16.0% NEXT 10 PROMPTS
+🔗 OPEN LIVE DASHBOARD</pre></div>
+          </figure>
+          <figure>
+            <figcaption>Beyond your plan</figcaption>
+            <div class="box-frame"><b>KONVU USAGE</b><pre>🔴 PAYING
+⏱️ CONTEXT [██████░] 91.0%
+💸 CURRENT SPEND $8.4 ━━━▶ $26.8 NEXT 10 PROMPTS
+🔗 OPEN LIVE DASHBOARD</pre></div>
+          </figure>
+        </div>
+        </section>
+        <section class="settings-section">
+          <h3>When it appears</h3>
+          <p class="settings-note">
+            Pick how often the box is printed. A custom rule lets you describe the
+            condition in your own words and have your coding agent write it.
+          </p>
+          <div id="cadence-options" class="cadence-options" role="radiogroup" aria-label="Display cadence"></div>
+        </section>
+        <div class="settings-actions">
+          <button id="cadence-save" class="settings-primary" type="button">Save</button>
+          <span id="cadence-status" role="status"></span>
+        </div>
+      </div>
+    </section>
+    <div id="prompt-backdrop" hidden></div>
+    <section id="prompt-modal" role="dialog" aria-modal="true" aria-labelledby="prompt-modal-title" hidden>
+      <div class="settings-top"><h2 id="prompt-modal-title">Give this to your coding agent</h2></div>
+      <div class="settings-body">
+        <p class="settings-note">
+          A custom rule needs code. Copying this prompt closes the dialog.
+        </p>
+        <pre id="cadence-prompt-text"></pre>
+        <button id="cadence-copy" class="settings-primary" type="button">Copy and close</button>
+      </div>
+    </section>
     <div id="graph-tooltip" role="tooltip" hidden></div>
     <div id="backdrop" hidden></div>
     <section id="inspector" role="dialog" aria-modal="true" aria-labelledby="inspector-title" hidden>

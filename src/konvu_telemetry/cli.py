@@ -8,6 +8,13 @@ import sys
 
 from .collector import main as collector_main
 from .installer import service_status, setup, uninstall, uninstall_homebrew_package
+from .preferences import (
+    CADENCES,
+    Preferences,
+    custom_rule_prompt,
+    read_preferences,
+    write_preferences,
+)
 from .tracking import set_tracking_enabled, tracking_status
 
 
@@ -42,8 +49,109 @@ def tracking_main(arguments: list[str]) -> None:
     print(json.dumps({"enabled": tracking_status().enabled}))
 
 
+def _print_cadence(preference: Preferences) -> None:
+    print(
+        json.dumps(
+            {
+                "cadence": preference["cadence"],
+                "label": CADENCES[preference["cadence"]],
+                "custom_rule": preference["custom_rule"],
+                "jump_percent": preference["jump_percent"],
+            },
+            indent=2,
+        )
+    )
+
+
+def _choose_cadence_interactively() -> None:
+    """Offer the same options the dashboard shows, numbered for the terminal."""
+    options = list(CADENCES.items())
+    current = read_preferences()
+    print("How often should Konvu show the usage box inside a turn?\n")
+    for index, (key, label) in enumerate(options, start=1):
+        marker = " (current)" if key == current["cadence"] else ""
+        print(f"  {index}. {label}{marker}")
+    print()
+    try:
+        answer = input("Choose 1-%d: " % len(options)).strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+    try:
+        # Parsed rather than pre-matched: str.isdigit() accepts digits int() rejects.
+        choice = int(answer)
+    except ValueError:
+        print("Not a listed choice; nothing changed.")
+        return
+    if not 1 <= choice <= len(options):
+        print("Not a listed choice; nothing changed.")
+        return
+    cadence = options[choice - 1][0]
+    if cadence != "custom":
+        _print_cadence(write_preferences(cadence))
+        return
+    try:
+        rule = input("Describe your rule: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+    preference = write_preferences("custom", rule)
+    # A custom rule needs code, so hand over the prompt that writes it.
+    print("\nGive this to your coding agent:\n")
+    print(custom_rule_prompt(preference["custom_rule"]))
+
+
+def cadence_main(arguments: list[str]) -> None:
+    parser = argparse.ArgumentParser(
+        description="Choose how often the Konvu usage box is shown inside a turn"
+    )
+    parser.add_argument(
+        "cadence",
+        nargs="?",
+        choices=sorted(CADENCES),
+        help="Omit to choose from a list.",
+    )
+    parser.add_argument("--rule", default="", help="Your rule, with cadence 'custom'.")
+    parser.add_argument(
+        "--jump-percent",
+        type=float,
+        default=None,
+        help=(
+            "Percent a limit must move before showing usage, with 'usage-jump'. "
+            "Must be greater than zero."
+        ),
+    )
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Print the current choice and exit without changing it.",
+    )
+    args = parser.parse_args(arguments)
+    if args.status:
+        _print_cadence(read_preferences())
+        return
+    if args.cadence is None:
+        _choose_cadence_interactively()
+        return
+    if args.jump_percent is not None and args.jump_percent <= 0:
+        # Dropping it silently would report success for a threshold never stored.
+        parser.error("--jump-percent must be greater than zero")
+    try:
+        preference = write_preferences(args.cadence, args.rule, args.jump_percent)
+    except ValueError as error:
+        # A rejected setting is a usage mistake, not a crash; exit 2 like argparse.
+        parser.error(str(error))
+    _print_cadence(preference)
+    if preference["cadence"] == "custom":
+        print("\nGive this to your coding agent:\n")
+        print(custom_rule_prompt(preference["custom_rule"]))
+
+
 def main(arguments: list[str] | None = None) -> None:
     command = sys.argv[1:] if arguments is None else arguments
+    if command and command[0] == "cadence":
+        cadence_main(command[1:])
+        return
     if command and command[0] == "telemetry":
         tracking_main(command[1:])
         return

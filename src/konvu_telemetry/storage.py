@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from functools import wraps
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -148,6 +150,40 @@ def collector_lock_path() -> Path:
 
 def quota_attribution_path() -> Path:
     return home_dir() / "quota-attribution.json"
+
+
+def custom_rule_module_path() -> Path:
+    """A user-owned rule, kept outside the package so upgrades cannot erase it."""
+    return home_dir() / "custom_rule.py"
+
+
+def preferences_path() -> Path:
+    return home_dir() / "preferences.json"
+
+
+@contextmanager
+def preferences_write_lock() -> Iterator[None]:
+    """Serialize preference updates across the command and the dashboard.
+
+    Both write the whole file after reading it, so without a cross-process lock
+    the slower writer silently reverts the faster one's change.
+    """
+    lock = home_dir() / "preferences.lock"
+    try:
+        ensure_private_directory(lock.parent)
+        handle = lock.open("a+")
+    except OSError:
+        # A lock we cannot take must not block the setting the user asked for.
+        yield
+        return
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
 
 
 def tracking_state_path() -> Path:

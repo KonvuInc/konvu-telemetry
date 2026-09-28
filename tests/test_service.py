@@ -34,13 +34,13 @@ from konvu_telemetry.config import (
 )
 from konvu_telemetry.collector import main as collector_main
 from konvu_telemetry.display import (
+    _session_tool_calls,
     claude_hook,
     claude_prompt_hook,
     codex_hook,
     codex_is_desktop,
     codex_prompt_hook,
     dashboard_line,
-    last_prompt_used_a_tool,
     money,
     payload_context_percent,
     percentage,
@@ -1581,6 +1581,11 @@ class ServiceTests(unittest.TestCase):
         environment = (
             {} if entrypoint is None else {"CLAUDE_CODE_ENTRYPOINT": entrypoint}
         )
+        # Pinned to an empty home so these assertions describe the default
+        # cadence, not whatever cadence the developer happens to have chosen.
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        environment["KONVU_LIVE_USAGE_HOME"] = home.name
         with (
             patch.dict(os.environ, environment, clear=True),
             patch.object(
@@ -1660,7 +1665,12 @@ class ServiceTests(unittest.TestCase):
         """Run a Codex hook against one recorded client and return its stdout."""
         session_id = "00000000-0000-0000-0000-000000000001"
         stdout = StringIO()
+        # Pinned to an empty home so these assertions describe the default
+        # cadence, not whatever cadence the developer happens to have chosen.
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
         with (
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": home.name}),
             patch.object(
                 sys,
                 "stdin",
@@ -1750,14 +1760,23 @@ class ServiceTests(unittest.TestCase):
             {"suppressOutput": True},
         )
 
-    def test_last_prompt_used_a_tool_accepts_only_a_positive_count(self) -> None:
-        self.assertTrue(last_prompt_used_a_tool({"last_task_tool_calls": 1}))
-        self.assertTrue(last_prompt_used_a_tool({"last_task_tool_calls": 12}))
-        for value in (0, -1, None, "1", 1.0, True, [1]):
-            self.assertFalse(
-                last_prompt_used_a_tool({"last_task_tool_calls": value}), repr(value)
-            )
-        self.assertFalse(last_prompt_used_a_tool({}))
+    def test_session_tool_calls_accepts_only_a_positive_count(self) -> None:
+        with patch("konvu_telemetry.display.refreshed_session") as lookup:
+            for value, expected in (
+                (1, 1),
+                (12, 12),
+                (0, 0),
+                (-3, 0),
+                ("1", 0),
+                (1.5, 0),
+                (True, 0),
+            ):
+                lookup.return_value = {"last_task_tool_calls": value}
+                self.assertEqual(
+                    _session_tool_calls("claude", "s"), expected, repr(value)
+                )
+            lookup.return_value = {}
+            self.assertEqual(_session_tool_calls("claude", "s"), 0)
 
     def usage_session(self, tool_calls: object) -> dict[str, object]:
         """Build a session that differs only in the field the display gate reads."""
@@ -1782,7 +1801,33 @@ class ServiceTests(unittest.TestCase):
         self.assertIsInstance(context, str)
         return str(context)
 
-    def test_desktop_boxes_show_only_when_the_last_prompt_used_a_tool(self) -> None:
+    def test_every_prompt_reaches_a_turn_that_called_no_tools(self) -> None:
+        """The cadence decides; no earlier tool-call check may pre-empt it."""
+        session = self.usage_session(0)
+        for cadence, expected in (("every-tool-call", False), ("every-prompt", True)):
+            with self.chosen_cadence(cadence):
+                claude = self.run_claude_hook(
+                    claude_prompt_hook, "claude-desktop", session
+                )
+                desktop = self.run_codex_hook(codex_prompt_hook, "desktop", session)
+                cli = self.run_codex_hook(codex_hook, "cli", session, turn_tool_calls=0)
+            for label, output in (
+                ("claude-desktop", claude),
+                ("codex-desktop", desktop),
+                ("codex-cli", cli),
+            ):
+                self.assertEqual(
+                    "CURRENT SPEND" in output, expected, f"{cadence} {label}"
+                )
+
+    def chosen_cadence(self, cadence: str) -> object:
+        """Run as if the user had picked one cadence."""
+        return patch(
+            "konvu_telemetry.display.read_preferences",
+            return_value={"cadence": cadence, "custom_rule": "", "jump_percent": 1.0},
+        )
+
+    def test_desktop_boxes_default_to_showing_only_after_a_tool_call(self) -> None:
         self.assertIn(
             "CURRENT SPEND",
             self.injected_context(
@@ -2179,7 +2224,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(render.call_count, 3)
         # The helper patches refreshed_session itself, so raise from the gate instead.
         with patch(
-            "konvu_telemetry.display.last_prompt_used_a_tool", side_effect=boom
+            "konvu_telemetry.display.should_show_usage", side_effect=boom
         ) as lookup:
             self.assertEqual(
                 self.run_claude_hook(claude_prompt_hook, "claude-desktop", session), ""
