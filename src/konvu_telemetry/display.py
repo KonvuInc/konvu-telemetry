@@ -20,6 +20,7 @@ from .parsers import (
     codex_hook_transcript,
     codex_turn_tool_calls,
 )
+from .provider_limits import stored_provider_quotas
 from .service import load_health
 from .storage import session_path, snapshot_path, valid_session_id
 
@@ -147,8 +148,7 @@ def quota_usage_text(snapshot: dict[str, object], provider: str) -> str:
 
 def recorded_quota_usage_text(provider: str) -> str:
     """Read the collector's latest quota windows for a provider hook."""
-    snapshot = recorded_snapshot()
-    return quota_usage_text(snapshot, provider) if snapshot is not None else ""
+    return quota_usage_text({"account_quotas": stored_provider_quotas()}, provider)
 
 
 def subagent_usage_text(session: dict[str, object]) -> str:
@@ -352,7 +352,7 @@ def claude_statusline_rows(
     usage_mode = session.get("usage_mode")
     dashboard = cli_dashboard_line()
     if usage_mode == "included":
-        quotas = claude_quota_values(recorded_snapshot())
+        quotas = claude_quota_values({"account_quotas": stored_provider_quotas()})
         context = context_percent
         if context is None:
             raw_context, raw_window = (

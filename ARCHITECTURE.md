@@ -6,12 +6,12 @@ Konvu Telemetry is one Python package with a single resident process. The proces
 
 - The collector never modifies provider transcripts.
 - The dashboard server binds only to IPv4 loopback and rejects non-local `Host` and `Origin` values.
-- The package has no runtime Python dependencies. The collector makes credential-backed provider requests every two minutes to fetch account limits: Claude calls Anthropic's usage endpoint directly, while a validated installed Codex app-server contacts OpenAI. The Claude credential remains in memory for one request; the Codex credential never enters Konvu Telemetry. Only normalized limits are persisted. Authentication failures clear the provider immediately; transient failures keep the last provider result for at most ten minutes with an explicit stale status and back off without blocking transcript collection.
+- The package has no runtime Python dependencies. The collector is the only Konvu component that fetches or writes account limits: Claude calls Anthropic's usage endpoint every ten minutes, while every two minutes a validated installed Codex app-server contacts OpenAI. The Claude credential remains in memory for one request; the Codex credential never enters Konvu Telemetry. Only normalized limits are persisted. Authentication failures clear the provider immediately; transient failures retain unexpired provider windows with an explicit stale status. Claude rate limits back off for fifteen minutes without blocking transcript collection.
 - A separate outbound client sends a small allowlisted set of anonymous product events to PostHog with a 500 ms timeout. Setup durably queues its event before the setup process exits; network delivery and resident-process events run in a background thread.
 - Product analytics uses a random install ID. It does not create person profiles and sends no transcripts, prompts, code, paths, command arguments, usage data, raw errors, environment variables, account IDs, or workspace IDs.
 - Browser notifications require an open dashboard tab and browser permission.
 - A paid session is marked hot when it was active in the last twenty minutes, its cost is complete, and its next-ten-prompt forecast reaches `ALERT_FORECAST_USD`. Browser-local state controls notification cooldowns.
-- Every usage number a hook prints comes from a precomputed session file; no hook recomputes usage from a transcript. The Codex hooks additionally read the current rollout file for two gating facts that must be current rather than as of the last collection: the firing turn's tool calls and the recorded client.
+- Every usage number a hook prints comes from collector-owned session and account-quota files; no hook fetches provider limits or recomputes usage from a transcript. The Codex hooks additionally read the current rollout file for two gating facts that must be current rather than as of the last collection: the firing turn's tool calls and the recorded client.
 - Each client reports usage in exactly one place: the Claude Code CLI in its status line, Claude Desktop in a box appended to the reply, the Codex CLI in its `Stop` hook, and Codex Desktop in a box appended to the reply.
 - All four surfaces render the same rows from `display.usage_rows()`, which returns unframed content and knows nothing about presentation. The three hook surfaces wrap each row in the `╭─ Konvu usage` / `│ ` / `╰─` frame; the status line prints the rows flat. The two things that legitimately differ are parameters, not branches inside it: the quota string each surface sourced, and an optional context percentage the Claude status line passes because `context_window.used_percentage` in its hook payload is fresher than the snapshot's own figure. An absent, boolean, or non-finite payload percentage falls back to the snapshot.
 - Desktop clients collapse a hook `systemMessage` into a hidden notice, so the desktop path uses a `UserPromptSubmit` hook returning `hookSpecificOutput.additionalContext` that asks the model to end its reply with the usage box.
@@ -28,7 +28,7 @@ Konvu Telemetry is one Python package with a single resident process. The proces
 4. `parsers.py` converts provider records into the provider-neutral types in `models.py`.
 5. `pricing.py` applies the bundled local price table; `codex_credit_rates.py` calculates Codex credit equivalents from its published rate table. Both mark missing rates explicitly.
 6. `analytics.py` derives prompt series, the provider-level sparse-session forecast fallback, compaction state, and the current hot-session flag. Expired valid forecast fallbacks remain usable while one background refresh rebuilds them.
-7. `snapshot.py` writes a bounded dashboard summary plus detailed per-session documents. Unchanged detail documents are not rewritten.
+7. `snapshot.py` writes a bounded dashboard summary plus detailed per-session documents; `provider_limits.py` independently writes the normalized account quota snapshot. Unchanged documents are not rewritten.
 8. `display.py` builds one set of usage rows from a per-session document and reads `service.load_health()` for the closing dashboard line, then frames them for the Codex `Stop` hook and both providers' desktop `UserPromptSubmit` context, or prints them flat for the Claude status line.
 9. `dashboard/` contains static HTML, CSS, JavaScript, and images served by the local process.
 
@@ -38,6 +38,7 @@ Konvu Telemetry is one Python package with a single resident process. The proces
 | --- | --- | --- |
 | `~/.konvu/telemetry/konvu-launcher` | Absolute-path integration launcher | `0700` |
 | `~/.konvu/telemetry/live-sessions.json` | Bounded summary of sessions active in the dashboard's 20-minute window | `0600` |
+| `~/.konvu/telemetry/account-quotas.json` | Latest normalized provider limits and transient failure state | `0600` |
 | `~/.konvu/telemetry/sessions/*.json` | Per-session detail loaded on demand by the dashboard | `0600` |
 | `~/.konvu/telemetry/baselines.json` | Provider-level sparse-session forecast fallback | `0600` |
 | `~/.konvu/telemetry/health.json` | Collector freshness and last error | `0600` |
