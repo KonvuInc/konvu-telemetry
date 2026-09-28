@@ -233,6 +233,9 @@ function subagentLabel(a) {
     .replace(/_/g, " ");
   return label.charAt(0).toUpperCase() + label.slice(1);
 }
+function subagentContext(a) {
+  return nonnegative(a.context_tokens) ? a.context_tokens : a.entry_context_tokens;
+}
 function subagentNode(a, index = null, showCosts = true) {
   const id = typeof a.id === "string" ? a.id : "",
     label = subagentLabel(a) + (index === null ? "" : " " + (index + 1));
@@ -248,19 +251,20 @@ function subagentNode(a, index = null, showCosts = true) {
     '"></i>' +
     (a.live === true ? "Live" : "Inactive") +
     (id ? " · " + esc(id.slice(0, 13)) : "") +
+    (typeof a.description === "string" && a.description ? " · " + esc(a.description) : "") +
     '</small></div><div class="agent-context">' +
-    tokens(a.entry_context_tokens) +
+    tokens(subagentContext(a)) +
     "<small>" +
-    (nonnegative(a.entry_context_tokens) ? "tokens" : "Not recorded") +
+    (nonnegative(subagentContext(a)) ? "current context" : "Not recorded") +
     '</small></div>' +
-    (showCosts ? '<div class="agent-cost">' + money(a.cost_usd) + "<small>" + (nonnegative(a.cost_usd) ? "recorded" : "Not recorded") + "</small></div>" : "") +
+    (showCosts ? '<div class="agent-cost">' + money(a.cost_usd) + "<small>" + (nonnegative(a.cost_usd) ? "API-equivalent" : "Not recorded") + "</small></div>" : "") +
     "</div>"
   );
 }
 function subagentDetails(s) {
   const agents = Array.isArray(s.subagents) ? s.subagents.filter((a) => a && typeof a === "object") : [];
   if (!agents.length) return "";
-  const showCosts = showsMoney(s);
+  const showCosts = true;
   const grouped = new Map();
   for (const agent of agents) {
     const key = String(agent.label || "Subagent");
@@ -281,7 +285,7 @@ function subagentDetails(s) {
       if (children.length === 1) return '<div class="agent-branch">' + subagentNode(children[0], null, showCosts) + "</div>";
       const key = keyOf(s) + "|" + label,
         live = children.filter((a) => a.live === true).length,
-        contexts = children.map((a) => a.entry_context_tokens).filter(nonnegative),
+        contexts = children.map(subagentContext).filter(nonnegative),
         priced = children.filter((a) => nonnegative(a.cost_usd));
       const contextRange = contexts.length
         ? Math.min(...contexts) === Math.max(...contexts)
@@ -290,12 +294,12 @@ function subagentDetails(s) {
         : "—";
       const contextNote =
         contexts.length === children.length
-          ? "tokens each"
+          ? "current context each"
           : contexts.length
-            ? "tokens · " + contexts.length + "/" + children.length + " recorded"
+            ? "current context · " + contexts.length + "/" + children.length + " recorded"
             : "Not recorded";
       const costLabel = priced.length ? money(priced.reduce((sum, a) => sum + a.cost_usd, 0)) : "—",
-        costNote = priced.length === children.length ? "total" : priced.length ? priced.length + "/" + children.length + " priced" : "Not recorded";
+        costNote = priced.length === children.length ? "API-equivalent total" : priced.length ? priced.length + "/" + children.length + " estimated" : "Not recorded";
       return (
         '<details class="agent-branch agent-group" data-agent-group="' +
         esc(key) +
@@ -684,7 +688,7 @@ function subagentCell(s) {
     '">' +
     live +
     '</strong> live</span>' +
-    (showsMoney(s) ? '<small title="Recorded subagent cost from the local collector">' + money(s.subagent_cost_usd) + " spent</small>" : "") +
+    (nonnegative(s.subagent_cost_usd) ? '<small title="API-equivalent subagent cost estimated from recorded local token usage">' + money(s.subagent_cost_usd) + " API-equivalent</small>" : "") +
     "</div>"
   );
 }

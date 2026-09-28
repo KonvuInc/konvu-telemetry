@@ -66,6 +66,7 @@ from konvu_telemetry.parsers import (
     assistant_event,
     claude_client_in_file,
     claude_hook_transcript,
+    claude_subagent_metadata,
     codex_events_in_file,
     codex_hook_transcript,
     codex_subagent_parent,
@@ -94,6 +95,7 @@ from konvu_telemetry.service import (
     write_health,
 )
 from konvu_telemetry.snapshot import (
+    _claude_subagent_display,
     build_snapshot,
     sampled_rows,
     sampled_rows_with_tail,
@@ -752,6 +754,43 @@ class ServiceTests(unittest.TestCase):
                 {("session", "agent"): 1767225600.0},
             )
 
+    def test_claude_child_metadata_reads_its_type_and_task(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / "session.jsonl"
+            transcript.write_text("{}\n", encoding="utf-8")
+            metadata_path = transcript.parent / transcript.stem / "subagents"
+            metadata_path.mkdir(parents=True)
+            (metadata_path / "agent-agent.meta.json").write_text(
+                json.dumps(
+                    {
+                        "agentType": "general-purpose",
+                        "description": "Review the attribution reset behavior.",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                claude_subagent_metadata(transcript),
+                {
+                    "agent": {
+                        "agent_type": "general-purpose",
+                        "description": "Review the attribution reset behavior.",
+                    }
+                },
+            )
+
+    def test_claude_child_display_prefers_its_task_over_agent_type(self) -> None:
+        self.assertEqual(
+            _claude_subagent_display(
+                {
+                    "agent_type": "general-purpose",
+                    "description": "Review the attribution reset behavior.",
+                },
+                "Older spawned task",
+            ),
+            ("Review the attribution reset behavior.", "general-purpose"),
+        )
+
     def test_codex_subagent_prefers_nickname_over_technical_path(self) -> None:
         parent_id = "00000000-0000-0000-0000-000000000001"
         child_id = "00000000-0000-0000-0000-000000000002"
@@ -779,7 +818,7 @@ class ServiceTests(unittest.TestCase):
         parent_id = "00000000-0000-0000-0000-000000000001"
         child_id = "00000000-0000-0000-0000-000000000002"
 
-        def token_count(timestamp: str) -> dict[str, object]:
+        def token_count(timestamp: str, input_tokens: int = 1) -> dict[str, object]:
             return {
                 "timestamp": timestamp,
                 "type": "event_msg",
@@ -788,14 +827,14 @@ class ServiceTests(unittest.TestCase):
                     "info": {
                         "model": "model",
                         "total_token_usage": {
-                            "total_tokens": 1,
-                            "input_tokens": 1,
+                            "total_tokens": input_tokens,
+                            "input_tokens": input_tokens,
                             "cached_input_tokens": 0,
                             "cache_write_input_tokens": 0,
                             "output_tokens": 0,
                         },
                         "last_token_usage": {
-                            "input_tokens": 1,
+                            "input_tokens": input_tokens,
                             "cached_input_tokens": 0,
                             "cache_write_input_tokens": 0,
                             "output_tokens": 0,
@@ -845,6 +884,7 @@ class ServiceTests(unittest.TestCase):
                             },
                         },
                         token_count("2026-01-01T00:00:20Z"),
+                        token_count("2026-01-01T00:00:21Z", 5),
                     ]
                 ),
                 encoding="utf-8",
@@ -872,11 +912,12 @@ class ServiceTests(unittest.TestCase):
             ):
                 snapshot = build_snapshot(1767225630.0)
         session = snapshot["sessions"][0]
-        self.assertEqual(session["last_activity_at"], "2026-01-01T00:00:20+00:00")
+        self.assertEqual(session["last_activity_at"], "2026-01-01T00:00:21+00:00")
         self.assertEqual(session["subagents"][0]["label"], "Hubble")
-        self.assertEqual(session["subagents"][0]["cost_usd"], 1.0)
-        self.assertEqual(session["subagent_cost_usd"], 1.0)
-        self.assertEqual(session["total_cost_usd"], 2.0)
+        self.assertEqual(session["subagents"][0]["context_tokens"], 5)
+        self.assertEqual(session["subagents"][0]["cost_usd"], 6.0)
+        self.assertEqual(session["subagent_cost_usd"], 6.0)
+        self.assertEqual(session["total_cost_usd"], 7.0)
         self.assertTrue(
             {
                 "iterations",
