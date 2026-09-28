@@ -1584,9 +1584,9 @@ class ServiceTests(unittest.TestCase):
         context = payload["hookSpecificOutput"]["additionalContext"]
         self.assertIn("verbatim as the very last thing in your reply", context)
         self.assertNotIn("```", context)
-        self.assertIn("╭─ Konvu usage", context)
+        self.assertIn("╭─ KONVU USAGE", context)
         self.assertIn(
-            "│ 💸 $25.0 API-equivalent total · $5.0 API-equivalent for the next 10 prompts",
+            "│ 💸 CURRENT SPEND $25.0  ━━━▶  $30.0 FORECASTED IN NEXT 10 PROMPTS",
             context,
         )
         self.assertTrue(context.endswith("╰─"))
@@ -1652,14 +1652,14 @@ class ServiceTests(unittest.TestCase):
             "context_tokens": 650,
             "context_window_tokens": 1000,
         }
-        # Byte-for-byte: quota rides the context line rather than appearing on one of its
-        # own, and the dashboard row is the last line inside the frame.
+        # The text-only hook mirrors the CLI HUD with a meter and forecast arrow.
         self.assertEqual(
             json.loads(self.run_codex_hook(codex_hook, "cli", session)),
             {
-                "systemMessage": "\n╭─ Konvu usage\n"
-                "│ 💸 $25.4 API-equivalent total · $4.9 API-equivalent for the next 10 prompts\n"
-                "│ 🧠 65.0% context · 3.0% weekly limit\n"
+                "systemMessage": "\n╭─ KONVU USAGE\n"
+                "│ 🔴 PAYING\n"
+                "│ ⏱️ WEEK [░░░░░░░] 3.0%  CONTEXT [█████░░] 65.0%\n"
+                "│ 💸 CURRENT SPEND $25.4  ━━━▶  $30.3 FORECASTED IN NEXT 10 PROMPTS\n"
                 "│ 🔗 run konvu-telemetry setup to start the dashboard\n"
                 "╰─"
             },
@@ -1690,7 +1690,7 @@ class ServiceTests(unittest.TestCase):
         self.assertNotIn("systemMessage", payload)
         context = payload["hookSpecificOutput"]["additionalContext"]
         self.assertIn("verbatim as the very last thing in your reply", context)
-        self.assertIn("│ 🧠 65.0% context · 3.0% weekly limit", context)
+        self.assertIn("│ ⏱️ WEEK [░░░░░░░] 3.0%  CONTEXT [█████░░] 65.0%", context)
         for client in ("cli", "unknown"):
             self.assertEqual(
                 json.loads(self.run_codex_hook(codex_prompt_hook, client, session)),
@@ -1735,7 +1735,7 @@ class ServiceTests(unittest.TestCase):
 
     def test_desktop_boxes_show_only_when_the_last_prompt_used_a_tool(self) -> None:
         self.assertIn(
-            "💸 ",
+            "CURRENT SPEND",
             self.injected_context(
                 self.run_claude_hook(
                     claude_prompt_hook, "claude-desktop", self.usage_session(1)
@@ -1743,7 +1743,7 @@ class ServiceTests(unittest.TestCase):
             ),
         )
         self.assertIn(
-            "💸 ",
+            "CURRENT SPEND",
             self.injected_context(
                 self.run_codex_hook(codex_prompt_hook, "desktop", self.usage_session(1))
             ),
@@ -1766,7 +1766,7 @@ class ServiceTests(unittest.TestCase):
         # This hook counts the exact turn it fires on rather than the snapshot field.
         session = self.usage_session(0)
         self.assertIn(
-            "╭─ Konvu usage",
+            "╭─ KONVU USAGE",
             json.loads(
                 self.run_codex_hook(codex_hook, "cli", session, turn_tool_calls=1)
             )["systemMessage"],
@@ -1815,7 +1815,7 @@ class ServiceTests(unittest.TestCase):
             {"status": "healthy"},
             retained=retained,
         )
-        self.assertIn("🟢 Included", output)
+        self.assertIn("● INCLUDED", output)
         self.assertNotIn("collector starting", output)
 
     def surface_outputs(self, health: object) -> dict[str, str]:
@@ -1844,15 +1844,22 @@ class ServiceTests(unittest.TestCase):
         self,
     ) -> None:
         # The port comes from configuration, so an overridden one reaches every surface.
-        with patch("konvu_telemetry.display.DASHBOARD_PORT", 9999):
+        with (
+            patch("konvu_telemetry.display.DASHBOARD_PORT", 9999),
+            patch.dict(os.environ, {"NO_COLOR": "1"}),
+        ):
             outputs = self.surface_outputs({"status": "healthy"})
-        link = "🔗 dashboard: http://127.0.0.1:9999/"
+        link = "http://127.0.0.1:9999/"
         for surface, output in outputs.items():
             self.assertIn(link, output, surface)
             self.assertNotIn("konvu-telemetry setup", output, surface)
         for surface in ("claude_desktop", "codex_desktop", "codex_cli"):
-            self.assertIn(f"│ {link}\n╰─", outputs[surface], surface)
-        self.assertTrue(outputs["statusline"].endswith(f"{link}\n"))
+            self.assertIn(
+                f"│ 🔗 OPEN LIVE DASHBOARD {link}\n╰─", outputs[surface], surface
+            )
+        self.assertTrue(
+            outputs["statusline"].endswith(f"🔗 OPEN LIVE DASHBOARD {link}\n")
+        )
 
     def test_every_usage_surface_points_at_setup_when_the_collector_is_not_healthy(
         self,
@@ -1996,38 +2003,36 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(rows[0], "⚪ Subscription limit unavailable")
         self.assertNotIn("$", "\n".join(rows))
 
-    def test_the_usage_box_is_the_shared_rows_inside_a_frame(self) -> None:
+    def test_the_usage_box_is_a_text_only_hud_inside_a_frame(self) -> None:
         session = self.shared_row_session()
         with health_patch({"status": "stale"}):
             lines = usage_box_lines(session, "3.0% weekly limit")
-            rows = usage_rows(session, "3.0% weekly limit")
-        self.assertEqual(lines[0], "╭─ Konvu usage")
+        self.assertEqual(lines[0], "╭─ KONVU USAGE")
         self.assertEqual(lines[-1], "╰─")
-        self.assertEqual(lines[1:-1], [f"│ {row}" for row in rows])
+        self.assertIn("│ ⏱️ WEEK [░░░░░░░] 3.0%  CONTEXT [████░░░] 50.0%", lines)
 
-    def test_the_status_line_uses_collector_quotas_instead_of_stale_payload(
+    def test_the_status_line_renders_current_spend_and_forecast(
         self,
     ) -> None:
-        # Mutation guard: a status line that renders its own rows again fails here.
         session = self.shared_row_session()
         stale_quotas = {
             "five_hour": {"utilization": 0.11},
             "seven_day": {"utilization": 0.52},
         }
         current_quotas = "6.0% 5-hour limit · 51.0% weekly limit"
-        output = self.run_statusline(
-            session,
-            {"status": "stale"},
-            {
-                "rate_limits": stale_quotas,
-                "context_window": {"used_percentage": 87.4},
-            },
-            current_quotas,
-        )
-        with health_patch({"status": "stale"}):
-            rows = usage_rows(session, current_quotas, 87.4)
-        self.assertEqual(output, "".join(f"{row}\n" for row in rows))
-        self.assertIn("6.0% 5-hour limit · 51.0% weekly limit\n", output)
+        with patch.dict(os.environ, {"NO_COLOR": "1"}):
+            output = self.run_statusline(
+                session,
+                {"status": "stale"},
+                {
+                    "rate_limits": stale_quotas,
+                    "context_window": {"used_percentage": 87.4},
+                },
+                current_quotas,
+            )
+        self.assertIn("● PAYING\n", output)
+        self.assertIn("CURRENT SPEND $25.4 ━━━▶ $30.3", output)
+        self.assertIn("FORECASTED IN NEXT 10 PROMPTS", output)
         self.assertNotIn("11.0% 5-hour limit", output)
         self.assertNotIn("52.0% weekly limit", output)
         self.assertNotIn("│", output)
@@ -2035,13 +2040,14 @@ class ServiceTests(unittest.TestCase):
 
     def test_the_status_line_prefers_the_payload_context_percentage(self) -> None:
         # Claude reports the live window to the status line; the snapshot lags a turn.
-        session = self.shared_row_session()
+        session = {**self.shared_row_session(), "usage_mode": "included"}
         output = self.run_statusline(
             session, {"status": "stale"}, {"context_window": {"used_percentage": 87.4}}
         )
-        self.assertIn("🧠 87.4% context\n", output)
+        self.assertIn("CONTEXT", output)
+        self.assertIn("87%", output)
         with health_patch({"status": "stale"}):
-            self.assertIn("│ 🧠 50.0% context", usage_box_lines(session, ""))
+            self.assertIn("│ ⏱️ CONTEXT [████░░░] 50.0%", usage_box_lines(session, ""))
 
     def test_an_unusable_payload_context_falls_back_to_the_snapshot(self) -> None:
         for context_window in (None, {}, {"used_percentage": True}, "50%"):
@@ -2050,11 +2056,12 @@ class ServiceTests(unittest.TestCase):
                 repr(context_window),
             )
             output = self.run_statusline(
-                self.shared_row_session(),
+                {**self.shared_row_session(), "usage_mode": "included"},
                 {"status": "stale"},
                 {"context_window": context_window},
             )
-            self.assertIn("🧠 50.0% context\n", output, repr(context_window))
+            self.assertIn("CONTEXT", output, repr(context_window))
+            self.assertIn("50%", output, repr(context_window))
         self.assertIsNone(payload_context_percent({}))
         for value in (float("nan"), float("inf")):
             self.assertIsNone(

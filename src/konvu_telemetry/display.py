@@ -6,6 +6,7 @@ from functools import wraps
 import json
 import math
 import os
+import re
 import sys
 import time
 from decimal import Decimal, ROUND_HALF_UP
@@ -29,6 +30,7 @@ PROMPT_BOX_INSTRUCTION = (
     "Write them as ordinary italic text, not as a code block or a quote."
 )
 SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def one_decimal(value: int | float) -> str:
@@ -236,6 +238,188 @@ def quota_forecast_text(session: dict[str, object]) -> str:
     return ""
 
 
+def terminal_style(text: str, code: str) -> str:
+    """Apply ANSI color unless the terminal explicitly disables it."""
+    if os.environ.get("NO_COLOR") or os.environ.get("TERM") == "dumb":
+        return text
+    return f"\x1b[{code}m{text}\x1b[0m"
+
+
+def terminal_link(text: str, url: str) -> str:
+    """Wrap text in an OSC 8 terminal hyperlink when supported."""
+    if os.environ.get("NO_COLOR") or os.environ.get("TERM") == "dumb":
+        return text
+    return f"\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\"
+
+
+def percentage_color(value: float) -> str:
+    """Choose a legible terminal color for a bounded percentage."""
+    return "38;5;203" if value >= 85 else "38;5;221" if value >= 60 else "38;5;78"
+
+
+def battery_meter(value: float, width: int = 7) -> str:
+    """Render the compact battery cells used by the Claude CLI HUD."""
+    filled = round(min(100.0, max(0.0, value)) / 100 * width)
+    return terminal_style("■" * filled, percentage_color(value)) + terminal_style(
+        "□" * (width - filled), "38;5;240"
+    )
+
+
+def statusline_width() -> int:
+    """Read Claude's width hint with a conservative fallback."""
+    try:
+        columns = int(os.environ.get("COLUMNS", "80"))
+    except ValueError:
+        return 76
+    return max(32, columns - 4)
+
+
+def quota_window_value(
+    session: dict[str, object], period: str, key: str
+) -> float | None:
+    """Read one estimated quota value for a provider window."""
+    attribution = session.get("quota_attribution")
+    windows = attribution.get("windows") if isinstance(attribution, dict) else None
+    for window in windows if isinstance(windows, list) else []:
+        if not isinstance(window, dict) or window.get("period") != period:
+            continue
+        value = window.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+    return None
+
+
+def claude_quota_values(snapshot: dict[str, object] | None) -> dict[str, float]:
+    """Read the five-hour and weekly Claude account percentages."""
+    accounts = snapshot.get("account_quotas") if isinstance(snapshot, dict) else None
+    account = accounts.get("claude") if isinstance(accounts, dict) else None
+    windows = account.get("windows") if isinstance(account, dict) else None
+    values: dict[str, float] = {}
+    for window in windows if isinstance(windows, list) else []:
+        if not isinstance(window, dict):
+            continue
+        period, used = window.get("period"), window.get("used_percent")
+        if period in {"five_hour", "weekly"} and isinstance(used, (int, float)):
+            values[str(period)] = min(100.0, max(0.0, float(used)))
+    return values
+
+
+def meter_segment(label: str, value: float, width: int) -> str:
+    """Render one labeled responsive status meter."""
+    return (
+        terminal_style(label, "38;5;245")
+        + " "
+        + battery_meter(value, width)
+        + " "
+        + terminal_style(f"{value:.0f}%", f"1;{percentage_color(value)}")
+    )
+
+
+def wrap_statusline_segments(segments: list[str], width: int) -> list[str]:
+    """Wrap complete HUD cells without dropping context on narrow terminals."""
+    separator = terminal_style("  ·  ", "38;5;245")
+    rows: list[str] = []
+    current = ""
+    for segment in segments:
+        candidate = segment if not current else current + separator + segment
+        if current and len(ANSI_ESCAPE.sub("", candidate)) > width:
+            rows.append(current)
+            current = segment
+        else:
+            current = candidate
+    if current:
+        rows.append(current)
+    return rows
+
+
+def cli_dashboard_line() -> str:
+    """Render a styled dashboard link only while the local collector is healthy."""
+    line = dashboard_line()
+    prefix = "🔗 dashboard: "
+    if not line.startswith(prefix):
+        return line
+    url = line.removeprefix(prefix)
+    label = terminal_style("🔗 OPEN LIVE DASHBOARD", "38;5;245")
+    if os.environ.get("NO_COLOR") or os.environ.get("TERM") == "dumb":
+        return f"{label} {url}"
+    return terminal_link(label, url)
+
+
+def claude_statusline_rows(
+    session: dict[str, object], context_percent: float | None
+) -> list[str]:
+    """Render the responsive Claude CLI-only usage HUD from real session data."""
+    usage_mode = session.get("usage_mode")
+    dashboard = cli_dashboard_line()
+    if usage_mode == "included":
+        quotas = claude_quota_values(recorded_snapshot())
+        context = context_percent
+        if context is None:
+            raw_context, raw_window = (
+                session.get("context_tokens"),
+                session.get("context_window_tokens"),
+            )
+            if (
+                isinstance(raw_context, int)
+                and isinstance(raw_window, int)
+                and raw_window > 0
+            ):
+                context = raw_context / raw_window * 100
+        width = statusline_width()
+        cells = 4 if width < 62 else 6 if width < 84 else 8
+        segments = [terminal_style("● INCLUDED", "1;38;5;78")]
+        for label, period in (("5H", "five_hour"), ("WEEK", "weekly")):
+            value = quotas.get(period)
+            if value is not None:
+                segments.append(meter_segment(label, value, cells))
+        if context is not None:
+            segments.append(meter_segment("CONTEXT", context, cells))
+        rows = wrap_statusline_segments(segments, width)
+        attribution = quota_window_value(session, "five_hour", "estimated_percent")
+        forecast = quota_window_value(session, "five_hour", "projected_next_10_percent")
+        if attribution is not None and forecast is not None:
+            projected = min(100.0, attribution + forecast)
+            forecast_row = (
+                terminal_style("THIS SESSION", "38;5;245")
+                + " "
+                + terminal_style(f"{attribution:.1f}%", "1;38;5;255")
+                + " "
+                + terminal_style("OF 5H LIMIT", "38;5;245")
+                + " "
+                + terminal_style("━━━▶", "1;38;5;141")
+                + " "
+                + terminal_style(f"{projected:.1f}%", "1;38;5;255")
+                + " "
+                + terminal_style("FORECASTED IN NEXT 10 PROMPTS", "38;5;245")
+            )
+            rows.append(forecast_row)
+        if width >= 45:
+            rows.append(dashboard)
+        return rows
+    if usage_mode in {"api_billed", "exhausted"}:
+        paid = session.get("total_cost_usd")
+        out_of_plan = session.get("out_of_plan_spend_usd")
+        if usage_mode == "exhausted" and isinstance(out_of_plan, (int, float)):
+            paid = out_of_plan
+        paid_forecast = session.get("projected_next_10_tasks_usd")
+        rows = [terminal_style("● PAYING", "1;38;5;203")]
+        if isinstance(paid, (int, float)) and isinstance(paid_forecast, (int, float)):
+            rows.append(
+                terminal_style("CURRENT SPEND", "38;5;245")
+                + " "
+                + terminal_style(money(paid), "1;38;5;255")
+                + " "
+                + terminal_style("━━━▶", "1;38;5;141")
+                + " "
+                + terminal_style(money(paid + paid_forecast), "1;38;5;255")
+                + " "
+                + terminal_style("FORECASTED IN NEXT 10 PROMPTS", "38;5;245")
+            )
+        rows.append(dashboard)
+        return rows
+    return usage_rows(session, recorded_quota_usage_text("claude"), context_percent)
+
+
 def usage_rows(
     session: dict[str, object],
     quota_text: str,
@@ -332,11 +516,7 @@ def statusline() -> None:
         print("Konvu live usage: collector starting")
         return
     # Claude's context is live, but its rate-limit payload can lag the provider API.
-    rows = usage_rows(
-        session,
-        recorded_quota_usage_text("claude"),
-        payload_context_percent(payload),
-    )
+    rows = claude_statusline_rows(session, payload_context_percent(payload))
     for row in rows:
         print(row)
 
@@ -351,10 +531,76 @@ def codex_is_desktop(transcript: Path | None) -> bool:
     return transcript is not None and codex_client_in_file(transcript) == "desktop"
 
 
+def meter(value: object, width: int = 10) -> str:
+    """Render a compact monochrome percentage meter for hook-only output."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "░" * width
+    bounded = min(100.0, max(0.0, float(value)))
+    filled = min(width, max(0, round(bounded / 100 * width)))
+    return "█" * filled + "░" * (width - filled)
+
+
+def hook_quota_meters(quota_text: str) -> str:
+    """Convert recorded provider limit text into small, readable box meters."""
+    labels = {"5-hour": "5H", "weekly": "WEEK", "monthly": "MONTH"}
+    matches = re.findall(r"(\d+(?:\.\d+)?)% (5-hour|weekly|monthly) limit", quota_text)
+    return "  ".join(
+        f"{labels[label]} [{meter(float(used), 7)}] {percentage(float(used))}"
+        for used, label in matches
+    )
+
+
+def hook_forecast_row(session: dict[str, object]) -> str:
+    """Render the same session-to-forecast arrow used by the terminal HUD."""
+    usage_mode = session.get("usage_mode")
+    if usage_mode in {"api_billed", "exhausted"}:
+        current = session.get("total_cost_usd")
+        out_of_plan = session.get("out_of_plan_spend_usd")
+        if usage_mode == "exhausted" and isinstance(out_of_plan, (int, float)):
+            current = out_of_plan
+        forecast = session.get("projected_next_10_tasks_usd")
+        if isinstance(current, (int, float)) and isinstance(forecast, (int, float)):
+            return (
+                f"💸 CURRENT SPEND {money(current)}  ━━━▶  {money(current + forecast)} "
+                "FORECASTED IN NEXT 10 PROMPTS"
+            )
+        return "💸 FORECAST UNAVAILABLE"
+    attribution = session.get("quota_attribution")
+    windows = attribution.get("windows") if isinstance(attribution, dict) else None
+    target = "weekly" if session.get("provider") == "codex" else "five_hour"
+    label = "WEEKLY" if target == "weekly" else "5H"
+    for window in windows if isinstance(windows, list) else []:
+        if not isinstance(window, dict) or window.get("period") != target:
+            continue
+        current = window.get("estimated_percent")
+        forecast = window.get("projected_next_10_percent")
+        if isinstance(current, (int, float)) and isinstance(forecast, (int, float)):
+            projected_total = min(100.0, current + forecast)
+            return (
+                f"📈 THIS SESSION {percentage(current)} OF {label} LIMIT  ━━━▶  "
+                f"{percentage(projected_total)} FORECASTED IN NEXT 10 PROMPTS"
+            )
+    return "📈 SUBSCRIPTION FORECAST UNAVAILABLE"
+
+
 def usage_box_lines(session: dict[str, object], quota_text: str) -> list[str]:
-    """Frame the shared usage rows for the Codex Stop hook and both prompt hooks."""
-    rows = usage_rows(session, quota_text)
-    return ["╭─ Konvu usage", *(f"│ {row}" for row in rows), "╰─"]
+    """Frame text-only meters and forecast data for Codex and desktop hooks."""
+    included = session.get("usage_mode") == "included"
+    rows = ["🟢 INCLUDED" if included else "🔴 PAYING"]
+    context = context_usage_text(session)
+    context_percent = session.get("context_tokens")
+    window = session.get("context_window_tokens")
+    if isinstance(context_percent, int) and isinstance(window, int) and window > 0:
+        used = context_percent / window * 100
+        context_row = f"CONTEXT [{meter(used, 7)}] {percentage(used)}"
+    else:
+        context_row = f"CONTEXT {context}"
+    quota_meters = hook_quota_meters(quota_text)
+    meter_row = f"{quota_meters}  {context_row}" if quota_meters else context_row
+    rows.append(f"⏱️ {meter_row}")
+    rows.append(hook_forecast_row(session))
+    rows.append(dashboard_line().replace("dashboard:", "OPEN LIVE DASHBOARD"))
+    return ["╭─ KONVU USAGE", *(f"│ {row}" for row in rows), "╰─"]
 
 
 def prompt_box_context(provider: str, session_id: str) -> str | None:

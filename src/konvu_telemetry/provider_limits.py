@@ -22,6 +22,7 @@ from .storage import snapshot_path
 
 
 CLAUDE_USAGE_ENDPOINT = "https://api.anthropic.com/api/oauth/usage"
+CODEX_USAGE_ENDPOINT = "https://chatgpt.com/backend-api/wham/usage"
 CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 POLL_INTERVAL_SECONDS = 120.0
 RESULT_GRACE_SECONDS = 10 * 60.0
@@ -65,6 +66,12 @@ class FetchResult:
 class RPCResponse:
     result: dict[str, object] | None = None
     error_code: int | None = None
+
+
+@dataclass(frozen=True)
+class CodexCredentials:
+    access_token: str
+    account_id: str | None
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -281,6 +288,46 @@ def decode_codex_usage(body: object, captured_at: str) -> dict[str, object] | No
     return snapshot
 
 
+def decode_codex_wham_usage(body: object, captured_at: str) -> dict[str, object] | None:
+    """Normalize Codex's direct ChatGPT subscription-usage response."""
+    if not isinstance(body, dict):
+        return None
+    rate_limit = body.get("rate_limit")
+    if not isinstance(rate_limit, dict):
+        return None
+    windows: list[dict[str, object]] = []
+    for name in ("primary_window", "secondary_window"):
+        raw = rate_limit.get(name)
+        if not isinstance(raw, dict):
+            continue
+        used = _percentage(raw.get("used_percent"))
+        seconds = raw.get("limit_window_seconds")
+        if (
+            used is None
+            or isinstance(seconds, bool)
+            or not isinstance(seconds, (int, float))
+            or seconds <= 0
+        ):
+            continue
+        minutes = float(seconds) / 60.0
+        windows.append(
+            _window(
+                _period(minutes),
+                used,
+                _iso_reset(raw.get("reset_at")),
+                minutes,
+                "codex",
+            )
+        )
+    if not windows:
+        return None
+    return {
+        "observed_at": captured_at,
+        "source": "provider_api",
+        "windows": windows,
+    }
+
+
 def _secure_file(path: Path) -> str | None:
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -359,6 +406,32 @@ def read_claude_access_token() -> str | None:
     """Read the provider-owned access token without copying or refreshing it."""
     token = _claude_token(_secure_file(Path.home() / ".claude" / ".credentials.json"))
     return token if token is not None else _claude_token(_keychain_credential())
+
+
+def _codex_credentials(raw: str | None) -> CodexCredentials | None:
+    if raw is None:
+        return None
+    try:
+        payload = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("auth_mode") != "chatgpt":
+        return None
+    tokens = payload.get("tokens")
+    if not isinstance(tokens, dict):
+        return None
+    token = tokens.get("access_token")
+    if not isinstance(token, str) or not token:
+        return None
+    account_id = tokens.get("account_id")
+    return CodexCredentials(
+        token, account_id if isinstance(account_id, str) and account_id else None
+    )
+
+
+def read_codex_credentials() -> CodexCredentials | None:
+    """Read the private Codex CLI OAuth credential without refreshing or storing it."""
+    return _codex_credentials(_secure_file(Path.home() / ".codex" / "auth.json"))
 
 
 def _retry_after(headers: object) -> float | None:
@@ -493,8 +566,55 @@ def _response(
     return None
 
 
-def fetch_codex_limits(now: float | None = None) -> FetchResult:
-    """Ask Codex's local app-server for account limits without reading its token."""
+def fetch_codex_direct_limits(
+    now: float | None = None,
+    opener: OpenURL = _open_url,
+    credential_reader: Callable[[], CodexCredentials | None] = read_codex_credentials,
+) -> FetchResult:
+    """Fetch Codex's weekly quota directly with the existing local credential."""
+    credentials = credential_reader()
+    if credentials is None:
+        return FetchResult(None, unavailable=True, failure="credentials_unavailable")
+    headers = {
+        "Authorization": f"Bearer {credentials.access_token}",
+        "Accept": "application/json",
+        "User-Agent": "konvu-telemetry",
+    }
+    if credentials.account_id is not None:
+        headers["ChatGPT-Account-Id"] = credentials.account_id
+    request = Request(CODEX_USAGE_ENDPOINT, headers=headers)
+    try:
+        with opener(request, REQUEST_TIMEOUT_SECONDS) as response:
+            raw = response.read(MAX_RESPONSE_BYTES + 1)
+            if len(raw) > MAX_RESPONSE_BYTES:
+                return FetchResult(None, failure="invalid_response")
+            body = json.loads(raw)
+        captured = time.time() if now is None else now
+        snapshot = decode_codex_wham_usage(body, _iso_now(captured))
+        return FetchResult(
+            snapshot,
+            failure=None if snapshot is not None else "invalid_response",
+        )
+    except HTTPError as error:
+        return FetchResult(
+            None,
+            _retry_after(error.headers) if error.code == 429 else None,
+            unavailable=error.code in {401, 403},
+            failure="rate_limited"
+            if error.code == 429
+            else "authentication_failed"
+            if error.code in {401, 403}
+            else "provider_error",
+            error_code=error.code,
+        )
+    except (URLError, OSError, TimeoutError):
+        return FetchResult(None, failure="network_error")
+    except (UnicodeError, json.JSONDecodeError, ValueError):
+        return FetchResult(None, failure="invalid_response")
+
+
+def fetch_codex_app_server_limits(now: float | None = None) -> FetchResult:
+    """Ask Codex's local app-server for its complete account-limit snapshot."""
     executable = _codex_executable()
     if executable is None:
         return FetchResult(None, unavailable=True, failure="service_unavailable")
@@ -515,7 +635,7 @@ def fetch_codex_limits(now: float | None = None) -> FetchResult:
                 "id": 1,
                 "method": "initialize",
                 "params": {
-                    "clientInfo": {"name": "konvu-telemetry", "version": "0.2"},
+                    "clientInfo": {"name": "konvu-telemetry", "version": "0.3"},
                     "capabilities": {"experimentalApi": True},
                 },
             },
@@ -529,7 +649,7 @@ def fetch_codex_limits(now: float | None = None) -> FetchResult:
             {
                 "id": 2,
                 "method": "account/read",
-                "params": {"refreshToken": True},
+                "params": {"refreshToken": False},
             },
         )
         account_response = _response(process, 2, deadline)
@@ -546,9 +666,10 @@ def fetch_codex_limits(now: float | None = None) -> FetchResult:
                 ),
                 error_code=account_response.error_code,
             )
-        account = account_response.result.get("account")
-        requires_auth = account_response.result.get("requiresOpenaiAuth") is True
-        if account is None and requires_auth:
+        if (
+            account_response.result.get("account") is None
+            and account_response.result.get("requiresOpenaiAuth") is True
+        ):
             return FetchResult(
                 None,
                 unavailable=True,
@@ -590,6 +711,14 @@ def fetch_codex_limits(now: float | None = None) -> FetchResult:
                     process.wait(timeout=1)
                 except (OSError, subprocess.TimeoutExpired):
                     pass
+
+
+def fetch_codex_limits(now: float | None = None) -> FetchResult:
+    """Prefer Codex's complete local snapshot and fall back to direct weekly quota."""
+    app_server = fetch_codex_app_server_limits(now)
+    if app_server.snapshot is not None:
+        return app_server
+    return fetch_codex_direct_limits(now)
 
 
 class ProviderLimitPoller:
