@@ -5,5 +5,5 @@ LiteLLM pricing data: https://github.com/BerriAI/litellm
 LiteLLM is distributed under the MIT License: https://github.com/BerriAI/litellm/blob/main/LICENSE
 
 The bundled snapshot is `src/konvu_telemetry/pricing.json`.
-SHA-256: e567614465f2231a7d4037a10eff019e313c867fc5844a7eb892385507b9f868
+SHA-256: 22c7fe17bc4501dc414bc803a1bf58cdcbd1d38947d372b6a909b3de9e5cf633
 It is local estimate data, not a provider billing ledger.
