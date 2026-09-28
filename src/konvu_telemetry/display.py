@@ -165,7 +165,9 @@ def subagent_usage_text(session: dict[str, object]) -> str:
     """Summarise the live and total child-agent footprint in one short line."""
     total = session.get("subagent_total")
     live = session.get("active_subagents")
-    handed = session.get("subagent_entry_context_tokens")
+    handed = session.get(
+        "subagent_context_tokens", session.get("subagent_entry_context_tokens")
+    )
     context = session.get("context_tokens")
     if not isinstance(total, int) or total == 0:
         return ""
