@@ -6,10 +6,12 @@ import argparse
 import json
 import sys
 
+from . import keymenu
 from .collector import main as collector_main
 from .installer import service_status, setup, uninstall, uninstall_homebrew_package
 from .preferences import (
     CADENCES,
+    MAX_CUSTOM_RULE_LENGTH,
     Preferences,
     custom_rule_prompt,
     read_preferences,
@@ -86,15 +88,55 @@ def _save_cadence(
     return True
 
 
+CADENCE_PROMPT = "How often should Konvu show the usage box inside a turn?"
+
+
 def _choose_cadence_interactively(
     rule: str = "", jump_percent: float | None = None
 ) -> None:
-    """Offer the same options the dashboard shows, numbered for the terminal."""
+    """Pick a cadence with the arrow keys, or from a numbered list without a terminal."""
     options = list(CADENCES.items())
     current = read_preferences()
-    print("How often should Konvu show the usage box inside a turn?\n")
-    for index, (key, label) in enumerate(options, start=1):
-        marker = " (current)" if key == current["cadence"] else ""
+    current_row = next(
+        (i for i, (key, _) in enumerate(options) if key == current["cadence"]), None
+    )
+    custom_row = next(
+        (i for i, (key, _) in enumerate(options) if key == "custom"), None
+    )
+    if not keymenu.interactive():
+        _choose_cadence_from_a_list(options, current_row, rule, jump_percent)
+        return
+    print(CADENCE_PROMPT)
+    print("Arrows to move, type to describe a custom rule, Enter to save.\n")
+    picker = keymenu.Picker(
+        [label for _, label in options],
+        selected=current_row or 0,
+        editable_row=custom_row,
+        field=rule or (current["custom_rule"] if not rule else rule),
+        placeholder="describe your rule",
+        current_row=current_row,
+        field_limit=MAX_CUSTOM_RULE_LENGTH,
+    )
+    chosen = picker.run()
+    print()
+    if chosen is None:
+        print("Nothing changed.")
+        return
+    row, typed = chosen
+    cadence = options[row][0]
+    _save_cadence(cadence, typed if cadence == "custom" else "", jump_percent)
+
+
+def _choose_cadence_from_a_list(
+    options: list[tuple[str, str]],
+    current_row: int | None,
+    rule: str,
+    jump_percent: float | None,
+) -> None:
+    """The same choice over a pipe, where single keypresses cannot be read."""
+    print(CADENCE_PROMPT + "\n")
+    for index, (_, label) in enumerate(options, start=1):
+        marker = " (current)" if index - 1 == current_row else ""
         print(f"  {index}. {label}{marker}")
     print()
     try:
