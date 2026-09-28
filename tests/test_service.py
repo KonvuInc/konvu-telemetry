@@ -1679,7 +1679,7 @@ class ServiceTests(unittest.TestCase):
         context = payload["hookSpecificOutput"]["additionalContext"]
         self.assertIn("verbatim as the very last thing in your reply", context)
         self.assertNotIn("```", context)
-        self.assertIn("╭─ Konvu usage", context)
+        self.assertIn("╭─\n", context)
         self.assertIn(
             "│ 💸 Current spend $25.0  ━━━▶  $30.0 forecasted in next 10 prompts",
             context,
@@ -1756,7 +1756,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(
             json.loads(self.run_codex_hook(codex_hook, "cli", session)),
             {
-                "systemMessage": "\n╭─ Konvu usage\n"
+                "systemMessage": "\n╭─\n"
                 "│ 🔴 Paying\n"
                 "│ ⏱️ Week [░░░░░░░] 3.0%  Context [█████░░] 65.0%\n"
                 "│ 💸 Current spend $25.4  ━━━▶  $30.3 forecasted in next 10 prompts\n"
@@ -1901,7 +1901,7 @@ class ServiceTests(unittest.TestCase):
         # This hook counts the exact turn it fires on rather than the snapshot field.
         session = self.usage_session(0)
         self.assertIn(
-            "╭─ Konvu usage",
+            "╭─",
             json.loads(
                 self.run_codex_hook(codex_hook, "cli", session, turn_tool_calls=1)
             )["systemMessage"],
@@ -2143,7 +2143,7 @@ class ServiceTests(unittest.TestCase):
         session = self.shared_row_session()
         with health_patch({"status": "stale"}):
             lines = usage_box_lines(session, "3.0% weekly limit")
-        self.assertEqual(lines[0], "╭─ Konvu usage")
+        self.assertEqual(lines[0], "╭─")
         self.assertEqual(lines[-1], "╰─")
         self.assertIn("│ ⏱️ Week [░░░░░░░] 3.0%  Context [████░░░] 50.0%", lines)
 

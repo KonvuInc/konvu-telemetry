@@ -612,7 +612,7 @@ def usage_box_lines(session: dict[str, object], quota_text: str) -> list[str]:
     rows.append(f"⏱️ {meter_row}")
     rows.append(hook_forecast_row(session))
     rows.append(dashboard_line().replace("dashboard:", "Open live dashboard"))
-    return ["╭─ Konvu usage", *(f"│ {row}" for row in rows), "╰─"]
+    return ["╭─", *(f"│ {row}" for row in rows), "╰─"]
 
 
 def prompt_box_context(provider: str, session_id: str) -> str | None:
