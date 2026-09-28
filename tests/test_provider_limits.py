@@ -303,9 +303,9 @@ class ProviderLimitsTests(unittest.TestCase):
         poller = ProviderLimitPoller(claude, codex)
 
         self.assertEqual(set(poller.refresh(100)), {"claude", "codex"})
-        poller.refresh(699)
+        poller.refresh(219)
         self.assertEqual(claude.call_count, 1)
-        snapshots = poller.refresh(700)
+        snapshots = poller.refresh(220)
         self.assertEqual(
             snapshots["claude"],
             {
@@ -440,8 +440,8 @@ class ProviderLimitsTests(unittest.TestCase):
         )
 
         poller.refresh(100)
-        self.assertEqual(poller.refresh(700)["claude"]["status"], "stale")
-        unavailable = poller.refresh(820)["claude"]
+        self.assertEqual(poller.refresh(220)["claude"]["status"], "stale")
+        unavailable = poller.refresh(340)["claude"]
         self.assertEqual(
             unavailable,
             {
@@ -453,7 +453,7 @@ class ProviderLimitsTests(unittest.TestCase):
             },
         )
 
-    def test_poller_retains_a_valid_window_beyond_ten_minutes(self) -> None:
+    def test_poller_retains_a_valid_window_during_transient_failures(self) -> None:
         claude = Mock(
             side_effect=[
                 FetchResult({"windows": [{"used_percent": 7.0}]}),
@@ -467,10 +467,10 @@ class ProviderLimitsTests(unittest.TestCase):
         )
 
         poller.refresh(100)
-        stale = poller.refresh(700)["claude"]
+        stale = poller.refresh(220)["claude"]
         self.assertEqual(stale["status"], "stale")
         self.assertEqual(stale["windows"], [{"used_percent": 7.0}])
-        stale = poller.refresh(820)["claude"]
+        stale = poller.refresh(340)["claude"]
         self.assertEqual(stale["status"], "stale")
         self.assertEqual(stale["windows"], [{"used_percent": 7.0}])
 
@@ -498,13 +498,13 @@ class ProviderLimitsTests(unittest.TestCase):
         )
 
         poller.refresh(100)
-        unavailable = poller.refresh(700)["claude"]
+        unavailable = poller.refresh(220)["claude"]
         self.assertEqual(unavailable["status"], "unavailable")
         self.assertEqual(unavailable["windows"], [])
         self.assertNotIn("ordinary_usage_allowed", unavailable)
         self.assertNotIn("limit_states", unavailable)
 
-    def test_successful_claude_fetches_are_ten_minutes_apart(self) -> None:
+    def test_successful_claude_fetches_are_two_minutes_apart(self) -> None:
         claude = Mock(return_value=FetchResult({"windows": []}))
         poller = ProviderLimitPoller(
             claude,
@@ -512,12 +512,12 @@ class ProviderLimitsTests(unittest.TestCase):
         )
 
         poller.refresh(100)
-        poller.refresh(699)
+        poller.refresh(219)
         self.assertEqual(claude.call_count, 1)
-        poller.refresh(700)
+        poller.refresh(220)
         self.assertEqual(claude.call_count, 2)
 
-    def test_rate_limits_back_off_immediately_for_fifteen_minutes(self) -> None:
+    def test_claude_rate_limits_back_off_immediately_for_one_hour(self) -> None:
         claude = Mock(
             return_value=FetchResult(None, failure="rate_limited", error_code=429)
         )
@@ -526,11 +526,61 @@ class ProviderLimitsTests(unittest.TestCase):
             Mock(return_value=FetchResult(None, unavailable=True)),
         )
 
-        poller.refresh(100)
-        poller.refresh(999)
-        self.assertEqual(claude.call_count, 1)
-        poller.refresh(1000)
-        self.assertEqual(claude.call_count, 2)
+        with patch("konvu_telemetry.provider_limits.random.uniform", return_value=60.0):
+            poller.refresh(100)
+            poller.refresh(3759)
+            self.assertEqual(claude.call_count, 1)
+            poller.refresh(3760)
+            self.assertEqual(claude.call_count, 2)
+
+    def test_claude_rate_limit_does_not_retry_before_cached_window_reset(
+        self,
+    ) -> None:
+        claude = Mock(
+            side_effect=[
+                FetchResult(
+                    {
+                        "windows": [
+                            {
+                                "used_percent": 7.0,
+                                "resets_at": "1970-01-01T02:46:40+00:00",
+                            }
+                        ]
+                    }
+                ),
+                FetchResult(None, failure="rate_limited", error_code=429),
+                FetchResult(None, failure="rate_limited", error_code=429),
+            ]
+        )
+        poller = ProviderLimitPoller(
+            claude,
+            Mock(return_value=FetchResult(None, unavailable=True)),
+        )
+
+        with patch("konvu_telemetry.provider_limits.random.uniform", return_value=0.0):
+            poller.refresh(100)
+            poller.refresh(220)
+            poller.refresh(9999)
+            self.assertEqual(claude.call_count, 2)
+            poller.refresh(10000)
+            self.assertEqual(claude.call_count, 3)
+
+    def test_repeated_claude_rate_limits_back_off_exponentially(self) -> None:
+        claude = Mock(
+            return_value=FetchResult(None, failure="rate_limited", error_code=429)
+        )
+        poller = ProviderLimitPoller(
+            claude,
+            Mock(return_value=FetchResult(None, unavailable=True)),
+        )
+
+        with patch("konvu_telemetry.provider_limits.random.uniform", return_value=0.0):
+            poller.refresh(100)
+            poller.refresh(3700)
+            poller.refresh(10_899)
+            self.assertEqual(claude.call_count, 2)
+            poller.refresh(10_900)
+            self.assertEqual(claude.call_count, 3)
 
     def test_poller_respects_provider_retry_after(self) -> None:
         claude = Mock(return_value=FetchResult(None, 300))
@@ -538,7 +588,7 @@ class ProviderLimitsTests(unittest.TestCase):
         poller = ProviderLimitPoller(claude, codex)
 
         poller.refresh(100)
-        poller.refresh(220)
+        poller.refresh(399)
         self.assertEqual(claude.call_count, 1)
         poller.refresh(400)
         self.assertEqual(claude.call_count, 2)

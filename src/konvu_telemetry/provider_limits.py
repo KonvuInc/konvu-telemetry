@@ -9,6 +9,7 @@ import json
 import math
 import os
 from pathlib import Path
+import random
 import selectors
 import stat
 import subprocess
@@ -29,8 +30,12 @@ CLAUDE_USAGE_ENDPOINT = "https://api.anthropic.com/api/oauth/usage"
 CODEX_USAGE_ENDPOINT = "https://chatgpt.com/backend-api/wham/usage"
 CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 POLL_INTERVAL_SECONDS = 120.0
-CLAUDE_POLL_INTERVAL_SECONDS = 10 * 60.0
+CLAUDE_POLL_INTERVAL_SECONDS = POLL_INTERVAL_SECONDS
 RATE_LIMIT_BACKOFF_SECONDS = 15 * 60.0
+CLAUDE_RATE_LIMIT_BACKOFF_SECONDS = 60 * 60.0
+CLAUDE_RATE_LIMIT_MAX_BACKOFF_SECONDS = 6 * 60 * 60.0
+RATE_LIMIT_JITTER_FRACTION = 0.1
+RATE_LIMIT_MAX_JITTER_SECONDS = 5 * 60.0
 REQUEST_TIMEOUT_SECONDS = 10.0
 MAX_RESPONSE_BYTES = 256 * 1024
 
@@ -745,6 +750,37 @@ def fetch_codex_limits(now: float | None = None) -> FetchResult:
     return fetch_codex_direct_limits(now)
 
 
+def _seconds_until_next_reset(
+    snapshot: dict[str, object] | None, now: float
+) -> float | None:
+    windows = snapshot.get("windows") if isinstance(snapshot, dict) else None
+    resets = [
+        datetime.fromisoformat(reset).timestamp()
+        for window in (windows if isinstance(windows, list) else [])
+        if isinstance(window, dict)
+        and (reset := _iso_reset(window.get("resets_at"))) is not None
+        and datetime.fromisoformat(reset).timestamp() > now
+    ]
+    return min(resets) - now if resets else None
+
+
+def _claude_rate_limit_delay(
+    failures: int,
+    snapshot: dict[str, object] | None,
+    now: float,
+    retry_after_seconds: float | None,
+) -> float:
+    exponent = min(max(0, failures - 1), 3)
+    delay: float = min(
+        CLAUDE_RATE_LIMIT_MAX_BACKOFF_SECONDS,
+        CLAUDE_RATE_LIMIT_BACKOFF_SECONDS * float(2**exponent),
+    )
+    until_reset = _seconds_until_next_reset(snapshot, now)
+    delay = max(delay, until_reset or 0.0, retry_after_seconds or 0.0)
+    jitter = min(delay * RATE_LIMIT_JITTER_FRACTION, RATE_LIMIT_MAX_JITTER_SECONDS)
+    return delay + float(random.uniform(0.0, jitter))
+
+
 class ProviderLimitPoller:
     """Poll each provider while safely retaining the latest authoritative result."""
 
@@ -869,8 +905,19 @@ class ProviderLimitPoller:
                             POLL_INTERVAL_SECONDS
                             * (2 ** max(0, self._failures[provider] - 1)),
                         )
+                        if provider == "claude":
+                            failure_delay = max(
+                                failure_delay, CLAUDE_POLL_INTERVAL_SECONDS
+                            )
                         if result.failure == "rate_limited":
                             failure_delay = RATE_LIMIT_BACKOFF_SECONDS
+                            if provider == "claude":
+                                failure_delay = _claude_rate_limit_delay(
+                                    self._failures[provider],
+                                    self._snapshots.get("claude"),
+                                    now,
+                                    result.retry_after_seconds,
+                                )
                         delay = max(
                             POLL_INTERVAL_SECONDS,
                             failure_delay,
