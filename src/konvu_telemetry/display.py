@@ -21,7 +21,14 @@ from .parsers import (
     codex_turn_tool_calls,
 )
 from .service import load_health
-from .storage import session_path, snapshot_path, valid_session_id
+from .preferences import read_preferences
+from .storage import (
+    home_dir,
+    session_path,
+    snapshot_path,
+    valid_session_id,
+    write_private_json,
+)
 
 # Desktop clients hide hook system messages, so the box has to ride in as model context instead.
 PROMPT_BOX_INSTRUCTION = (
@@ -642,6 +649,79 @@ def last_prompt_used_a_tool(session: dict[str, object]) -> bool:
     return tool_calls > 0
 
 
+def _last_shown_path(provider: str, session_id: str) -> Path:
+    return home_dir() / "shown" / f"{provider}-{session_id}.json"
+
+
+def _read_last_shown(provider: str, session_id: str) -> dict[str, object]:
+    try:
+        value = json.loads(_last_shown_path(provider, session_id).read_text())
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _record_shown(provider: str, session_id: str, state: dict[str, object]) -> None:
+    try:
+        path = _last_shown_path(provider, session_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_private_json(path, state)
+    except (OSError, ValueError):
+        return
+
+
+def _current_usage_percent(provider: str) -> float | None:
+    snapshot = recorded_snapshot()
+    if not isinstance(snapshot, dict):
+        return None
+    quotas = snapshot.get("account_quotas")
+    account = quotas.get(provider) if isinstance(quotas, dict) else None
+    windows = account.get("windows") if isinstance(account, dict) else None
+    if not isinstance(windows, list):
+        return None
+    period = "weekly" if provider == "codex" else "five_hour"
+    for window in windows:
+        if isinstance(window, dict) and window.get("period") == period:
+            used = window.get("used_percent")
+            if isinstance(used, (int, float)) and not isinstance(used, bool):
+                return float(used)
+    return None
+
+
+def should_show_usage(provider: str, session_id: str, tool_calls: int = 0) -> bool:
+    """Decide whether this turn should display the usage box.
+
+    The status line is deliberately not gated here: it is ambient and always
+    reflects the present, so suppressing it would show stale numbers rather
+    than fewer of them.
+    """
+    preference = read_preferences()
+    cadence = preference["cadence"]
+    if cadence == "never":
+        return False
+    if cadence in {"every-prompt", "custom"}:
+        # A custom rule is implemented by the user's own agent; until then the
+        # safe behaviour is the default, not silence.
+        return True
+    if cadence == "every-tool-call":
+        return tool_calls > 0
+    if cadence == "usage-jump":
+        current = _current_usage_percent(provider)
+        if current is None:
+            return True
+        shown = _read_last_shown(provider, session_id).get("usage_percent")
+        previous = (
+            shown
+            if isinstance(shown, (int, float)) and not isinstance(shown, bool)
+            else None
+        )
+        if previous is None or current - previous >= preference["jump_percent"]:
+            _record_shown(provider, session_id, {"usage_percent": current})
+            return True
+        return False
+    return True
+
+
 def silent_hook(hook: Callable[[], None]) -> Callable[[], None]:
     """Keep a failed usage display from blocking the prompt that triggered it."""
 
@@ -670,6 +750,11 @@ def codex_hook() -> None:
         or transcript is None
         or codex_turn_tool_calls(transcript, turn_id) <= 0
         or codex_is_desktop(transcript)
+    ):
+        print(SUPPRESS_OUTPUT)
+        return
+    if not should_show_usage(
+        "codex", session_id, codex_turn_tool_calls(transcript, turn_id)
     ):
         print(SUPPRESS_OUTPUT)
         return
@@ -702,6 +787,8 @@ def claude_prompt_hook() -> None:
     session_id = payload.get("session_id")
     if not isinstance(session_id, str) or not valid_session_id(session_id):
         return
+    if not should_show_usage("claude", session_id):
+        return
     context = prompt_box_context("claude", session_id)
     if context is not None:
         print(context)
@@ -716,6 +803,9 @@ def codex_prompt_hook() -> None:
         return
     payload, session_id = request
     if not codex_is_desktop(codex_hook_transcript(payload, session_id)):
+        print(SUPPRESS_OUTPUT)
+        return
+    if not should_show_usage("codex", session_id):
         print(SUPPRESS_OUTPUT)
         return
     context = prompt_box_context("codex", session_id)
