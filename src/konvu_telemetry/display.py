@@ -670,7 +670,10 @@ def _record_shown(provider: str, session_id: str, state: dict[str, object]) -> N
 
 
 def _binding_quota_window(provider: str) -> tuple[str, float] | None:
-    """The limit window closest to cutting this provider off, with its identity.
+    """The busiest window of the period this provider is watched on, with its identity.
+
+    One period per provider: five-hour for Claude, weekly for Codex. Movement in
+    any other window is invisible here.
 
     Codex reports one window per limit bucket, so a percentage is only comparable
     with another reading of the same bucket. The identity travels with the value
@@ -708,7 +711,7 @@ def _binding_quota_window(provider: str) -> tuple[str, float] | None:
 
 
 def _current_usage_percent(provider: str) -> float | None:
-    """Percent of the binding limit window used, for a custom rule's context."""
+    """Percent of the watched limit window used, for a custom rule's context."""
     binding = _binding_quota_window(provider)
     return None if binding is None else binding[1]
 
@@ -790,12 +793,14 @@ def should_show_usage(
     return True
 
 
+# Stands in for the window identity while the provider's figures are unavailable,
+# so an outage shows the box once rather than on every turn until it ends.
+UNKNOWN_WINDOW = "unknown"
+
+
 def _usage_jumped(provider: str, session_id: str, jump_percent: float) -> bool:
-    """Whether the binding limit has moved far enough since the last box."""
-    binding = _binding_quota_window(provider)
-    if binding is None:
-        return True
-    key, current = binding
+    """Whether the busiest limit has moved far enough since the last box."""
+    key, current = _binding_quota_window(provider) or (UNKNOWN_WINDOW, 0.0)
     last = _read_last_shown(provider, session_id)
     previous = last.get("usage_percent")
     if (
@@ -818,10 +823,7 @@ def record_usage_shown(provider: str, session_id: str) -> None:
     """
     if read_preferences()["cadence"] != "usage-jump":
         return
-    binding = _binding_quota_window(provider)
-    if binding is None:
-        return
-    key, current = binding
+    key, current = _binding_quota_window(provider) or (UNKNOWN_WINDOW, 0.0)
     _record_shown(provider, session_id, {"window": key, "usage_percent": current})
 
 

@@ -172,6 +172,7 @@ def preferences_write_lock() -> Iterator[None]:
     try:
         ensure_private_directory(lock.parent)
         handle = lock.open("a+")
+        os.chmod(lock, 0o600)
     except OSError:
         # A lock we cannot take must not block the setting the user asked for.
         yield
