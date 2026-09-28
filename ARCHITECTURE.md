@@ -23,7 +23,7 @@ Konvu Telemetry is one Python package with a single resident process. The proces
 - The `usage-jump` cadence watches one window per provider: the five-hour window for Claude and the weekly one for Codex, taking the busiest limit bucket when the provider reports several. Movement in any other window does not trigger it.
 - Its baseline is recorded once the hook has emitted the box rather than when the gate decided to, so a turn that decided to show and then rendered nothing does not consume the jump. The two desktop surfaces inject the box as model context, so "emitted" there means handed to the model, which may still decline to render it.
 - Each stored figure carries the identity of the window it came from — provider, period, limit bucket and reset time — so a rolled-over window, a different bucket, or a provider outage re-arms the box instead of silencing it. While the provider's figures are unavailable the box shows once and then waits, rather than firing every turn.
-- A custom rule is the user's own `custom_rule.py`, executed on every turn. It lives outside the package so an upgrade cannot replace it, and any failure to import or run it shows the box: staying silent is the worse failure.
+- A custom rule is the user's own `custom_rule.py`, executed on every turn. It lives outside the package so an upgrade cannot replace it, and any failure to import or run it shows the box: staying silent is the worse failure. Hooks pass the current prompt to this rule in memory when available; Konvu does not persist it.
 
 ## Runtime flow
 

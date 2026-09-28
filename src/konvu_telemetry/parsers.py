@@ -425,6 +425,44 @@ def codex_turn_tool_calls(file_path: Path, turn_id: str) -> int:
     return count
 
 
+def codex_turn_user_prompt(file_path: Path, turn_id: str) -> str | None:
+    """Read the user prompt belonging to one exact Codex turn."""
+    prompt: str | None = None
+    try:
+        with file_path.open("r", encoding="utf-8", errors="replace") as transcript:
+            for line in transcript:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                payload = record.get("payload") if isinstance(record, dict) else None
+                if not isinstance(payload, dict) or record.get("type") != "event_msg":
+                    continue
+                if (
+                    payload.get("type") != "item_completed"
+                    or payload.get("turn_id") != turn_id
+                ):
+                    continue
+                item = payload.get("item")
+                if not isinstance(item, dict) or item.get("type") != "UserMessage":
+                    continue
+                content = item.get("content")
+                if not isinstance(content, list):
+                    continue
+                parts: list[str] = []
+                for part in content:
+                    if not isinstance(part, dict) or part.get("type") != "text":
+                        continue
+                    text = part.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+                if parts:
+                    prompt = "\n".join(parts)
+    except OSError:
+        return None
+    return prompt
+
+
 def codex_hook_transcript(payload: dict[str, object], session_id: str) -> Path | None:
     """Locate the transcript for the exact Codex hook invocation."""
     if not valid_session_id(session_id):

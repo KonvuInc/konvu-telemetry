@@ -96,6 +96,20 @@ class PreferencesTests(unittest.TestCase):
         self.assertTrue(should_show_usage("claude", "session-a"))
         self.assertFalse(should_show_usage("codex", "session-a"))
 
+    def test_a_custom_rule_can_decide_from_the_current_prompt(self) -> None:
+        write_preferences("custom", "only when the prompt ends with 67")
+        path = custom_rule_module_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "def should_show(context):\n"
+            "    prompt = context.get('prompt')\n"
+            "    return True if not isinstance(prompt, str) else "
+            "prompt.rstrip().endswith('67')\n"
+        )
+        self.assertTrue(should_show_usage("claude", "session-a", prompt="hi67"))
+        self.assertFalse(should_show_usage("claude", "session-a", prompt="hi68"))
+        self.assertTrue(should_show_usage("claude", "session-a"))
+
     def test_a_broken_rule_file_shows_rather_than_hides(self) -> None:
         write_preferences("custom", "anything at all")
         path = custom_rule_module_path()
@@ -314,6 +328,7 @@ class PreferencesTests(unittest.TestCase):
         for pointer in (
             "~/.konvu/telemetry/custom_rule.py",
             "def should_show(context: dict) -> bool:",
+            "prompt",
             "usage_percent",
             "Return True when unsure",
         ):

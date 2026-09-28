@@ -71,6 +71,7 @@ from konvu_telemetry.parsers import (
     codex_hook_transcript,
     codex_subagent_parent,
     codex_task_starts,
+    codex_turn_user_prompt,
     events_in_file,
     has_usage_fields,
     is_human_claude_prompt,
@@ -1615,6 +1616,7 @@ class ServiceTests(unittest.TestCase):
         entrypoint: str | None,
         session: dict[str, object] | None,
         health: object = None,
+        prompt: str | None = None,
     ) -> str:
         """Run a Claude hook against one client entrypoint and return its stdout."""
         session_id = "00000000-0000-0000-0000-000000000001"
@@ -1630,7 +1632,16 @@ class ServiceTests(unittest.TestCase):
         with (
             patch.dict(os.environ, environment, clear=True),
             patch.object(
-                sys, "stdin", StringIO(json.dumps({"session_id": session_id}))
+                sys,
+                "stdin",
+                StringIO(
+                    json.dumps(
+                        {
+                            "session_id": session_id,
+                            **({"prompt": prompt} if prompt else {}),
+                        }
+                    )
+                ),
             ),
             patch.object(sys, "stdout", stdout),
             patch("konvu_telemetry.display.refreshed_session", return_value=session),
@@ -1702,6 +1713,7 @@ class ServiceTests(unittest.TestCase):
         session: dict[str, object] | None,
         turn_tool_calls: int = 1,
         health: object = None,
+        prompt: str | None = None,
     ) -> str:
         """Run a Codex hook against one recorded client and return its stdout."""
         session_id = "00000000-0000-0000-0000-000000000001"
@@ -1726,6 +1738,10 @@ class ServiceTests(unittest.TestCase):
                 "konvu_telemetry.display.codex_turn_tool_calls",
                 return_value=turn_tool_calls,
             ),
+            patch(
+                "konvu_telemetry.display.codex_turn_user_prompt",
+                return_value=prompt,
+            ),
             patch("konvu_telemetry.display.codex_client_in_file", return_value=client),
             patch("konvu_telemetry.display.refreshed_session", return_value=session),
             patch(
@@ -1736,6 +1752,59 @@ class ServiceTests(unittest.TestCase):
         ):
             hook()
         return stdout.getvalue()
+
+    def test_prompt_hooks_pass_the_current_prompt_to_the_cadence_gate(self) -> None:
+        session = self.usage_session(1)
+        with patch(
+            "konvu_telemetry.display.should_show_usage", return_value=False
+        ) as gate:
+            self.run_claude_hook(
+                claude_prompt_hook, "claude-desktop", session, prompt="hi67"
+            )
+        self.assertEqual(gate.call_args.kwargs["prompt"], "hi67")
+
+        with (
+            self.chosen_cadence("custom"),
+            patch(
+                "konvu_telemetry.display.should_show_usage", return_value=False
+            ) as gate,
+        ):
+            self.run_codex_hook(codex_hook, "cli", session, prompt="hi67")
+        self.assertEqual(gate.call_args.args[3], "hi67")
+
+    def test_codex_turn_prompt_is_scoped_to_the_exact_turn(self) -> None:
+        records = [
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "turn_id": "other",
+                    "item": {
+                        "type": "UserMessage",
+                        "content": [{"type": "text", "text": "wrong67"}],
+                    },
+                },
+            },
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "turn_id": "turn",
+                    "item": {
+                        "type": "UserMessage",
+                        "content": [
+                            {"type": "text", "text": "hello"},
+                            {"type": "text", "text": "67"},
+                        ],
+                    },
+                },
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / "rollout.jsonl"
+            transcript.write_text("\n".join(json.dumps(record) for record in records))
+            self.assertEqual(codex_turn_user_prompt(transcript, "turn"), "hello\n67")
+            self.assertIsNone(codex_turn_user_prompt(transcript, "missing"))
 
     def test_codex_stop_hook_keeps_cli_output_and_suppresses_the_desktop_app(
         self,

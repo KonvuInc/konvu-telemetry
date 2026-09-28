@@ -147,6 +147,7 @@ Return True to show the usage box for this turn, False to stay quiet.
 What context contains
   - provider:      "claude" or "codex"
   - session_id:    the current session's id
+  - prompt:        the current user prompt, or None if the hook cannot provide it
   - tool_calls:    tool calls in the most recent turn (int)
   - rule:          the rule text above, as I typed it
   - usage_percent: percent of the active limit window used account-wide, or

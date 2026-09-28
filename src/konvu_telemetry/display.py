@@ -21,6 +21,7 @@ from .parsers import (
     codex_client_in_file,
     codex_hook_transcript,
     codex_turn_tool_calls,
+    codex_turn_user_prompt,
 )
 from .provider_limits import stored_provider_quotas
 from .service import load_health
@@ -729,7 +730,12 @@ def _session_tool_calls(provider: str, session_id: str) -> int:
     return max(0, value)
 
 
-def _custom_rule_allows(provider: str, session_id: str, tool_calls: int | None) -> bool:
+def _custom_rule_allows(
+    provider: str,
+    session_id: str,
+    tool_calls: int | None,
+    prompt: str | None,
+) -> bool:
     """Run the user's own rule, if they have written one.
 
     The rule lives in ~/.konvu/telemetry/custom_rule.py rather than inside the
@@ -751,6 +757,7 @@ def _custom_rule_allows(provider: str, session_id: str, tool_calls: int | None) 
         context = {
             "provider": provider,
             "session_id": session_id,
+            "prompt": prompt,
             "tool_calls": tool_calls
             if tool_calls is not None
             else _session_tool_calls(provider, session_id),
@@ -764,7 +771,10 @@ def _custom_rule_allows(provider: str, session_id: str, tool_calls: int | None) 
 
 
 def should_show_usage(
-    provider: str, session_id: str, tool_calls: int | None = None
+    provider: str,
+    session_id: str,
+    tool_calls: int | None = None,
+    prompt: str | None = None,
 ) -> bool:
     """Decide whether this turn should display the usage box.
 
@@ -777,7 +787,7 @@ def should_show_usage(
     if cadence == "never":
         return False
     if cadence == "custom":
-        return _custom_rule_allows(provider, session_id, tool_calls)
+        return _custom_rule_allows(provider, session_id, tool_calls, prompt)
     if cadence == "every-prompt":
         return True
     if cadence == "every-tool-call":
@@ -861,8 +871,14 @@ def codex_hook() -> None:
     ):
         print(SUPPRESS_OUTPUT)
         return
+    prompt = payload.get("prompt")
+    if not isinstance(prompt, str) and read_preferences()["cadence"] == "custom":
+        prompt = codex_turn_user_prompt(transcript, turn_id)
     if not should_show_usage(
-        "codex", session_id, codex_turn_tool_calls(transcript, turn_id)
+        "codex",
+        session_id,
+        codex_turn_tool_calls(transcript, turn_id),
+        prompt if isinstance(prompt, str) else None,
     ):
         print(SUPPRESS_OUTPUT)
         return
@@ -896,7 +912,10 @@ def claude_prompt_hook() -> None:
     session_id = payload.get("session_id")
     if not isinstance(session_id, str) or not valid_session_id(session_id):
         return
-    if not should_show_usage("claude", session_id):
+    prompt = payload.get("prompt")
+    if not should_show_usage(
+        "claude", session_id, prompt=prompt if isinstance(prompt, str) else None
+    ):
         return
     context = prompt_box_context("claude", session_id)
     if context is not None:
@@ -912,10 +931,22 @@ def codex_prompt_hook() -> None:
         print(SUPPRESS_OUTPUT)
         return
     payload, session_id = request
-    if not codex_is_desktop(codex_hook_transcript(payload, session_id)):
+    transcript = codex_hook_transcript(payload, session_id)
+    if not codex_is_desktop(transcript):
         print(SUPPRESS_OUTPUT)
         return
-    if not should_show_usage("codex", session_id):
+    prompt = payload.get("prompt")
+    turn_id = payload.get("turn_id")
+    if (
+        not isinstance(prompt, str)
+        and isinstance(turn_id, str)
+        and transcript is not None
+        and read_preferences()["cadence"] == "custom"
+    ):
+        prompt = codex_turn_user_prompt(transcript, turn_id)
+    if not should_show_usage(
+        "codex", session_id, prompt=prompt if isinstance(prompt, str) else None
+    ):
         print(SUPPRESS_OUTPUT)
         return
     context = prompt_box_context("codex", session_id)

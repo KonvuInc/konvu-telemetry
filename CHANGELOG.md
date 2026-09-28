@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Let custom cadence rules inspect the current user prompt without persisting it.
+
 ## 0.3.3 - 2026-09-28
 
 - Let people choose how often the usage box appears, from `konvu-telemetry cadence`
