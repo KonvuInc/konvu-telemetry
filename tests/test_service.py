@@ -1745,9 +1745,9 @@ class ServiceTests(unittest.TestCase):
         context = payload["hookSpecificOutput"]["additionalContext"]
         self.assertIn("verbatim as the very last thing in your reply", context)
         self.assertNotIn("```", context)
-        self.assertIn("╭─ KONVU USAGE", context)
+        self.assertIn("╭─\n", context)
         self.assertIn(
-            "│ 💸 CURRENT SPEND $25.0  ━━━▶  $30.0 FORECASTED IN NEXT 10 PROMPTS",
+            "│ 💸 Current spend $25.0  ━━━▶  $30.0 forecasted in next 10 prompts",
             context,
         )
         self.assertTrue(context.endswith("╰─"))
@@ -1822,10 +1822,10 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(
             json.loads(self.run_codex_hook(codex_hook, "cli", session)),
             {
-                "systemMessage": "\n╭─ KONVU USAGE\n"
-                "│ 🔴 PAYING\n"
-                "│ ⏱️ WEEK [░░░░░░░] 3.0%  CONTEXT [█████░░] 65.0%\n"
-                "│ 💸 CURRENT SPEND $25.4  ━━━▶  $30.3 FORECASTED IN NEXT 10 PROMPTS\n"
+                "systemMessage": "\n╭─\n"
+                "│ 🔴 Paying\n"
+                "│ ⏱️ Week [░░░░░░░] 3.0%  Context [█████░░] 65.0%\n"
+                "│ 💸 Current spend $25.4  ━━━▶  $30.3 forecasted in next 10 prompts\n"
                 "│ 🔗 run konvu-telemetry setup to start the dashboard\n"
                 "╰─"
             },
@@ -1856,7 +1856,7 @@ class ServiceTests(unittest.TestCase):
         self.assertNotIn("systemMessage", payload)
         context = payload["hookSpecificOutput"]["additionalContext"]
         self.assertIn("verbatim as the very last thing in your reply", context)
-        self.assertIn("│ ⏱️ WEEK [░░░░░░░] 3.0%  CONTEXT [█████░░] 65.0%", context)
+        self.assertIn("│ ⏱️ Week [░░░░░░░] 3.0%  Context [█████░░] 65.0%", context)
         for client in ("cli", "unknown"):
             self.assertEqual(
                 json.loads(self.run_codex_hook(codex_prompt_hook, client, session)),
@@ -1924,7 +1924,7 @@ class ServiceTests(unittest.TestCase):
                 ("codex-cli", cli),
             ):
                 self.assertEqual(
-                    "CURRENT SPEND" in output, expected, f"{cadence} {label}"
+                    "Current spend" in output, expected, f"{cadence} {label}"
                 )
 
     def chosen_cadence(self, cadence: str) -> object:
@@ -1936,7 +1936,7 @@ class ServiceTests(unittest.TestCase):
 
     def test_desktop_boxes_default_to_showing_only_after_a_tool_call(self) -> None:
         self.assertIn(
-            "CURRENT SPEND",
+            "Current spend",
             self.injected_context(
                 self.run_claude_hook(
                     claude_prompt_hook, "claude-desktop", self.usage_session(1)
@@ -1944,7 +1944,7 @@ class ServiceTests(unittest.TestCase):
             ),
         )
         self.assertIn(
-            "CURRENT SPEND",
+            "Current spend",
             self.injected_context(
                 self.run_codex_hook(codex_prompt_hook, "desktop", self.usage_session(1))
             ),
@@ -1967,7 +1967,7 @@ class ServiceTests(unittest.TestCase):
         # This hook counts the exact turn it fires on rather than the snapshot field.
         session = self.usage_session(0)
         self.assertIn(
-            "╭─ KONVU USAGE",
+            "╭─",
             json.loads(
                 self.run_codex_hook(codex_hook, "cli", session, turn_tool_calls=1)
             )["systemMessage"],
@@ -2017,7 +2017,7 @@ class ServiceTests(unittest.TestCase):
             {"status": "healthy"},
             retained=retained,
         )
-        self.assertIn("● INCLUDED", output)
+        self.assertIn("● Included", output)
         self.assertNotIn("collector starting", output)
 
     def surface_outputs(self, health: object) -> dict[str, str]:
@@ -2057,10 +2057,10 @@ class ServiceTests(unittest.TestCase):
             self.assertNotIn("konvu-telemetry setup", output, surface)
         for surface in ("claude_desktop", "codex_desktop", "codex_cli"):
             self.assertIn(
-                f"│ 🔗 OPEN LIVE DASHBOARD {link}\n╰─", outputs[surface], surface
+                f"│ 🔗 Open live dashboard {link}\n╰─", outputs[surface], surface
             )
         self.assertTrue(
-            outputs["statusline"].endswith(f"🔗 OPEN LIVE DASHBOARD {link}\n")
+            outputs["statusline"].endswith(f"🔗 Open live dashboard {link}\n")
         )
 
     def test_every_usage_surface_points_at_setup_when_the_collector_is_not_healthy(
@@ -2209,9 +2209,9 @@ class ServiceTests(unittest.TestCase):
         session = self.shared_row_session()
         with health_patch({"status": "stale"}):
             lines = usage_box_lines(session, "3.0% weekly limit")
-        self.assertEqual(lines[0], "╭─ KONVU USAGE")
+        self.assertEqual(lines[0], "╭─")
         self.assertEqual(lines[-1], "╰─")
-        self.assertIn("│ ⏱️ WEEK [░░░░░░░] 3.0%  CONTEXT [████░░░] 50.0%", lines)
+        self.assertIn("│ ⏱️ Week [░░░░░░░] 3.0%  Context [████░░░] 50.0%", lines)
 
     def test_the_status_line_renders_current_spend_and_forecast(
         self,
@@ -2232,9 +2232,9 @@ class ServiceTests(unittest.TestCase):
                 },
                 current_quotas,
             )
-        self.assertIn("● PAYING\n", output)
-        self.assertIn("CURRENT SPEND $25.4 ━━━▶ $30.3", output)
-        self.assertIn("FORECASTED IN NEXT 10 PROMPTS", output)
+        self.assertIn("● Paying\n", output)
+        self.assertIn("Current spend $25.4 ━━━▶ $30.3", output)
+        self.assertIn("forecasted in next 10 prompts", output)
         self.assertNotIn("11.0% 5-hour limit", output)
         self.assertNotIn("52.0% weekly limit", output)
         self.assertNotIn("│", output)
@@ -2246,10 +2246,10 @@ class ServiceTests(unittest.TestCase):
         output = self.run_statusline(
             session, {"status": "stale"}, {"context_window": {"used_percentage": 87.4}}
         )
-        self.assertIn("CONTEXT", output)
+        self.assertIn("Context", output)
         self.assertIn("87%", output)
         with health_patch({"status": "stale"}):
-            self.assertIn("│ ⏱️ CONTEXT [████░░░] 50.0%", usage_box_lines(session, ""))
+            self.assertIn("│ ⏱️ Context [████░░░] 50.0%", usage_box_lines(session, ""))
 
     def test_an_unusable_payload_context_falls_back_to_the_snapshot(self) -> None:
         for context_window in (None, {}, {"used_percentage": True}, "50%"):
@@ -2262,7 +2262,7 @@ class ServiceTests(unittest.TestCase):
                 {"status": "stale"},
                 {"context_window": context_window},
             )
-            self.assertIn("CONTEXT", output, repr(context_window))
+            self.assertIn("Context", output, repr(context_window))
             self.assertIn("50%", output, repr(context_window))
         self.assertIsNone(payload_context_percent({}))
         for value in (float("nan"), float("inf")):

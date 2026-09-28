@@ -1472,7 +1472,7 @@ function renderFreshness(stale) {
   button.classList.toggle("stale", Boolean(stale));
 }
 /* ============ settings: display cadence ============
-   The cadence governs the Konvu usage box drawn inside a turn, in Codex CLI,
+   The cadence governs the usage box drawn inside a turn, in Codex CLI,
    Codex desktop and Claude desktop. A custom rule
    needs code, so the dashboard stores the wording and hands back a prompt for
    the user's own agent rather than pretending it took effect. */
