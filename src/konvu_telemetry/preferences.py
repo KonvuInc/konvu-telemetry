@@ -1,4 +1,4 @@
-"""User preferences for how often usage is shown in the CLI hooks."""
+"""User preferences for how often the Konvu usage box is shown."""
 
 from __future__ import annotations
 
@@ -7,8 +7,9 @@ from typing import TypedDict
 
 from .storage import preferences_path, write_private_json
 
-# How often the usage box is injected into a CLI turn. The status line is
-# separate: it is ambient and always current, so it is not gated here.
+# How often the Konvu usage box is drawn inside a turn, in Codex CLI, Codex
+# desktop and Claude desktop. The Claude CLI status line is separate: it is
+# ambient and always current, so it is not gated here.
 CADENCES: dict[str, str] = {
     "every-prompt": "After every prompt",
     "every-tool-call": "After every tool call",
@@ -16,9 +17,14 @@ CADENCES: dict[str, str] = {
     "never": "Never",
     "custom": "Custom rule",
 }
-DEFAULT_CADENCE = "every-prompt"
+# After a tool call is the useful default: a turn that called tools is the one
+# where usage actually moved.
+DEFAULT_CADENCE = "every-tool-call"
 # A provider reports whole percentages, so one point is the smallest real move.
 DEFAULT_JUMP_PERCENT = 1.0
+# A custom cadence with no rule saves a setting that cannot do anything, so it
+# is refused rather than accepted and quietly ignored.
+MIN_CUSTOM_RULE_LENGTH = 3
 
 
 class Preferences(TypedDict):
@@ -62,6 +68,8 @@ def write_preferences(
     """Store a cadence choice. An unknown cadence is rejected, not coerced."""
     if cadence not in CADENCES:
         raise ValueError("Unknown cadence: " + cadence)
+    if cadence == "custom" and len(custom_rule.strip()) < MIN_CUSTOM_RULE_LENGTH:
+        raise ValueError("A custom cadence needs a rule to follow")
     current = read_preferences()
     value: Preferences = {
         "cadence": cadence,
@@ -77,13 +85,50 @@ def write_preferences(
 
 
 def custom_rule_prompt(rule: str) -> str:
-    """The text a user hands to a coding agent to implement their own rule."""
-    return (
-        "In the Konvu telemetry CLI, change when the usage box is shown in the "
-        "CLI hooks so that it follows this rule:\n\n"
-        f"    {rule.strip() or '(describe your rule here)'}\n\n"
-        "The gate lives in konvu_telemetry/display.py, in should_show_usage(). "
-        "It reads preferences from konvu_telemetry/preferences.py and is called "
-        "by the prompt hooks before they print. Keep the existing cadences "
-        "working, and add tests covering the new rule."
-    )
+    """A prompt a coding agent can act on without reading the codebase first.
+
+    It points at a file in the user's home directory rather than at the
+    installed package: editing the package would work until the next upgrade
+    replaced it, silently reverting the rule.
+    """
+    return f"""Write a Konvu telemetry rule that decides when the usage box appears
+in the Claude and Codex CLI hooks. The rule I want:
+
+    "{rule.strip() or "describe your rule here"}"
+
+Create this file — do not edit the installed Konvu package, because upgrading
+replaces it and would silently delete your rule:
+
+    ~/.konvu/telemetry/custom_rule.py
+
+It must define one function:
+
+    def should_show(context: dict) -> bool:
+        ...
+
+Return True to show the usage box for this turn, False to stay quiet.
+
+What context contains
+  - provider:      "claude" or "codex"
+  - session_id:    the current session's id
+  - tool_calls:    tool calls in the most recent turn (int)
+  - rule:          the rule text above, as I typed it
+  - usage_percent: percent of the active limit window used account-wide, or
+                   None if it is not known yet. The window is the 5-hour one
+                   for Claude and the weekly one for Codex.
+  - session:       the full session record from the collector, or None. It
+                   carries context_tokens, context_window_tokens, task_count,
+                   total_cost_usd, projected_next_10_tasks_usd and
+                   quota_attribution.
+
+Rules to respect
+  - Return True when unsure. Silently suppressing output is the worse failure,
+    and any exception is already treated as True.
+  - Keep it quick: this runs on every turn, before my prompt is answered.
+  - It has no access to Konvu internals beyond context, so do not import from
+    konvu_telemetry.
+
+To check it, set the cadence to custom and run a turn:
+
+    konvu-telemetry cadence custom --rule "{rule.strip() or "..."}"
+"""

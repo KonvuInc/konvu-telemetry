@@ -3224,8 +3224,9 @@ select {
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  width: min(560px, calc(100vw - 32px));
-  max-height: calc(100vh - 64px);
+  /* Wide enough that neither usage-box preview wraps or clips. */
+  width: min(900px, calc(100vw - 32px));
+  max-height: calc(100vh - 40px);
   overflow-y: auto;
   background: var(--white);
   border: 1px solid var(--line);
@@ -3251,7 +3252,7 @@ select {
   color: var(--mist);
 }
 .settings-body {
-  padding: 16px 18px 20px;
+  padding: 20px 22px 24px;
 }
 .settings-body h3 {
   margin: 0 0 5px;
@@ -3264,58 +3265,113 @@ select {
   color: var(--mist);
   line-height: 1.5;
 }
+/* Rows, not cards: a hairline list reads faster than six boxes. */
 .cadence-options {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  overflow: hidden;
 }
 .cadence-option {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 8px;
   width: 100%;
-  padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-radius: 5px;
+  padding: 8px 11px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
   text-align: left;
   font-size: 12px;
+  background: var(--white);
+}
+.cadence-option:last-child {
+  border-bottom: 0;
+}
+.cadence-option:hover {
+  background: var(--soft);
 }
 .cadence-option:before {
   content: "";
-  width: 12px;
-  height: 12px;
+  width: 10px;
+  height: 10px;
   flex: none;
   border-radius: 50%;
   border: 1px solid var(--muted);
 }
 .cadence-option[aria-checked="true"] {
-  border-color: var(--purple);
   background: color-mix(in srgb, var(--purple) 5%, var(--white));
-}
-.cadence-option[aria-checked="true"]:before {
-  border-color: var(--purple);
-  border-width: 4px;
-}
-.cadence-option b {
   font-weight: 600;
 }
-.cadence-custom {
-  margin-top: 12px;
+.cadence-option[aria-checked="true"]:before {
+  /* Filled with an inset ring rather than a thicker border: changing
+     border-width would resize the marker and nudge the label sideways. */
+  border-color: var(--purple);
+  background: var(--purple);
+  box-shadow: inset 0 0 0 2px var(--white);
 }
-.cadence-custom label {
-  display: block;
-  font-size: 10.5px;
-  color: var(--mist);
-  margin-bottom: 5px;
+/* The custom row carries its own field, so typing is the choice. */
+.cadence-custom-row {
+  cursor: text;
+  padding-top: 6px;
+  padding-bottom: 6px;
 }
-.cadence-custom textarea {
-  width: 100%;
-  padding: 9px 10px;
-  border: 1px solid var(--line);
-  border-radius: 5px;
+.cadence-custom-row > input {
+  margin-left: 2px;
+}
+#cadence-rule {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid transparent;
+  border-radius: 4px;
   font: inherit;
-  font-size: 12px;
-  resize: vertical;
+  font-size: 11.5px;
+  font-weight: 400;
+  background: var(--soft);
+  color: var(--ink);
+}
+#cadence-rule::placeholder {
+  color: var(--muted);
+}
+#cadence-rule:hover {
+  border-color: var(--line);
+}
+#cadence-rule:focus {
+  outline: none;
+  background: var(--white);
+  border-color: var(--purple);
+}
+#prompt-backdrop {
+  position: fixed;
+  inset: 0;
+  background: #180c3159;
+  z-index: 320;
+}
+#prompt-modal {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(720px, calc(100vw - 32px));
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+  background: var(--white);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 18px 48px #180c3129;
+  z-index: 330;
+}
+#cadence-prompt-text {
+  margin: 0 0 14px;
+  padding: 12px 13px;
+  background: var(--soft);
+  border-radius: 5px;
+  font-size: 10.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 .settings-actions {
   display: flex;
@@ -3342,23 +3398,62 @@ select {
   font-size: 10.5px;
   color: var(--mist);
 }
-.cadence-prompt {
-  margin-top: 16px;
-  padding-top: 14px;
-  border-top: 1px solid var(--line);
+
+
+.settings-primary[disabled] {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
-.cadence-prompt p {
-  margin: 0 0 8px;
-  font-size: 11px;
+
+/* ---------- usage-box preview ---------- */
+.box-preview {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin: 0 0 16px;
+}
+.box-preview figure {
+  margin: 0;
+  min-width: 0;
+}
+.box-preview figcaption {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
   color: var(--mist);
+  margin-bottom: 5px;
 }
-.cadence-prompt pre {
-  margin: 0 0 10px;
-  padding: 11px 12px;
-  background: var(--soft);
+/* The frame is drawn in CSS rather than with │ characters: a text border can
+   only stay unbroken at line-height 1, which leaves the rows too tight. */
+.box-frame {
+  padding: 12px 14px;
   border-radius: 5px;
-  font-size: 10.5px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-word;
+  background: #1d1230;
+  overflow-x: auto;
+}
+.box-frame b {
+  display: block;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: #8f83b0;
+  margin-bottom: 8px;
+}
+.box-frame pre {
+  margin: 0;
+  padding-left: 10px;
+  border-left: 1px solid #4a3a6b;
+  color: #d9d2ea;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 9.5px;
+  line-height: 1.75;
+  white-space: pre;
+}
+
+@media (max-width: 520px) {
+  .box-preview {
+    grid-template-columns: 1fr;
+  }
 }

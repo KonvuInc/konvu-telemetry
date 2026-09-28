@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib.util
+
 from functools import wraps
 import json
 import math
@@ -23,6 +25,7 @@ from .parsers import (
 from .service import load_health
 from .preferences import read_preferences
 from .storage import (
+    custom_rule_module_path,
     home_dir,
     session_path,
     snapshot_path,
@@ -671,11 +674,8 @@ def _record_shown(provider: str, session_id: str, state: dict[str, object]) -> N
 
 
 def _current_usage_percent(provider: str) -> float | None:
-    snapshot = recorded_snapshot()
-    if not isinstance(snapshot, dict):
-        return None
-    quotas = snapshot.get("account_quotas")
-    account = quotas.get(provider) if isinstance(quotas, dict) else None
+    """Percent of the live limit window used, from the provider's own figures."""
+    account = stored_provider_quotas().get(provider)
     windows = account.get("windows") if isinstance(account, dict) else None
     if not isinstance(windows, list):
         return None
@@ -688,7 +688,54 @@ def _current_usage_percent(provider: str) -> float | None:
     return None
 
 
-def should_show_usage(provider: str, session_id: str, tool_calls: int = 0) -> bool:
+def _session_tool_calls(provider: str, session_id: str) -> int:
+    """Tool calls in the most recent turn, read from the collector's snapshot."""
+    session = refreshed_session(provider, session_id)
+    if not isinstance(session, dict):
+        return 0
+    value = session.get("last_task_tool_calls")
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return max(0, value)
+
+
+def _custom_rule_allows(provider: str, session_id: str, tool_calls: int | None) -> bool:
+    """Run the user's own rule, if they have written one.
+
+    The rule lives in ~/.konvu/telemetry/custom_rule.py rather than inside the
+    package, so upgrading Konvu cannot silently delete it. A missing or broken
+    rule shows the box: silently suppressing output is the worse failure.
+    """
+    path = custom_rule_module_path()
+    try:
+        if not path.is_file():
+            return True
+        spec = importlib.util.spec_from_file_location("konvu_custom_rule", path)
+        if spec is None or spec.loader is None:
+            return True
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        decide = getattr(module, "should_show", None)
+        if not callable(decide):
+            return True
+        context = {
+            "provider": provider,
+            "session_id": session_id,
+            "tool_calls": tool_calls
+            if tool_calls is not None
+            else _session_tool_calls(provider, session_id),
+            "rule": read_preferences()["custom_rule"],
+            "session": refreshed_session(provider, session_id),
+            "usage_percent": _current_usage_percent(provider),
+        }
+        return bool(decide(context))
+    except Exception:
+        return True
+
+
+def should_show_usage(
+    provider: str, session_id: str, tool_calls: int | None = None
+) -> bool:
     """Decide whether this turn should display the usage box.
 
     The status line is deliberately not gated here: it is ambient and always
@@ -699,12 +746,20 @@ def should_show_usage(provider: str, session_id: str, tool_calls: int = 0) -> bo
     cadence = preference["cadence"]
     if cadence == "never":
         return False
-    if cadence in {"every-prompt", "custom"}:
-        # A custom rule is implemented by the user's own agent; until then the
-        # safe behaviour is the default, not silence.
+    if cadence == "custom":
+        return _custom_rule_allows(provider, session_id, tool_calls)
+    if cadence == "every-prompt":
         return True
     if cadence == "every-tool-call":
-        return tool_calls > 0
+        # A caller that already counted this turn's tool calls passes them in.
+        # The prompt hooks cannot, so the count is read from the snapshot;
+        # without it this cadence would silently never fire for them.
+        count = (
+            tool_calls
+            if tool_calls is not None
+            else _session_tool_calls(provider, session_id)
+        )
+        return count > 0
     if cadence == "usage-jump":
         current = _current_usage_percent(provider)
         if current is None:

@@ -146,6 +146,11 @@ def quota_attribution_path() -> Path:
     return home_dir() / "quota-attribution.json"
 
 
+def custom_rule_module_path() -> Path:
+    """A user-owned rule, kept outside the package so upgrades cannot erase it."""
+    return home_dir() / "custom_rule.py"
+
+
 def preferences_path() -> Path:
     return home_dir() / "preferences.json"
 

@@ -13,7 +13,7 @@
       <div class="top-actions">
         <button class="freshness" id="freshness" type="button"></button>
         <button id="settings-open" class="settings-button" type="button" aria-label="Settings" title="Settings">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 9 19.4a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 4.6 9a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1Z" /></svg>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h10M18 18h2" /><circle cx="16" cy="6" r="2" /><circle cx="10" cy="12" r="2" /><circle cx="16" cy="18" r="2" /></svg>
         </button>
         <div class="notification-wrap">
           <button
@@ -73,25 +73,43 @@
         <button id="settings-close" aria-label="Close settings">×</button>
       </div>
       <div class="settings-body">
-        <h3>When to show usage in your CLI</h3>
+        <h3>When to show the usage box</h3>
         <p class="settings-note">
-          Controls the usage box injected into a Claude or Codex turn. The status line is
-          always current and is not affected.
+          The Konvu usage box shown inside a turn, in Codex CLI, Codex desktop and Claude
+          desktop. The Claude CLI status line is always current and is not affected.
         </p>
-        <div id="cadence-options" class="cadence-options" role="radiogroup" aria-label="Display cadence"></div>
-        <div id="cadence-custom" class="cadence-custom" hidden>
-          <label for="cadence-rule">Describe your rule</label>
-          <textarea id="cadence-rule" rows="3" placeholder="e.g. only when I am over 80% of my weekly limit"></textarea>
+        <div class="box-preview" aria-label="What the usage box looks like">
+          <figure>
+            <figcaption>Inside your plan</figcaption>
+            <div class="box-frame"><b>KONVU USAGE</b><pre>🟢 INCLUDED
+⏱️ 5H [██░░░░░] 24.0%  WEEK [███░░░░] 38.0%  CONTEXT [████░░░] 63.0%
+📈 THIS SESSION 12.0% OF 5H ━━━▶ 16.0% NEXT 10 PROMPTS
+🔗 OPEN LIVE DASHBOARD</pre></div>
+          </figure>
+          <figure>
+            <figcaption>Beyond your plan</figcaption>
+            <div class="box-frame"><b>KONVU USAGE</b><pre>🔴 PAYING
+⏱️ CONTEXT [██████░] 91.0%
+💸 CURRENT SPEND $8.4 ━━━▶ $26.8 NEXT 10 PROMPTS
+🔗 OPEN LIVE DASHBOARD</pre></div>
+          </figure>
         </div>
+        <div id="cadence-options" class="cadence-options" role="radiogroup" aria-label="Display cadence"></div>
         <div class="settings-actions">
           <button id="cadence-save" class="settings-primary" type="button">Save</button>
           <span id="cadence-status" role="status"></span>
         </div>
-        <div id="cadence-prompt" class="cadence-prompt" hidden>
-          <p>A custom rule needs code. Give this to your coding agent:</p>
-          <pre id="cadence-prompt-text"></pre>
-          <button id="cadence-copy" class="settings-secondary" type="button">Copy</button>
-        </div>
+      </div>
+    </section>
+    <div id="prompt-backdrop" hidden></div>
+    <section id="prompt-modal" role="dialog" aria-modal="true" aria-labelledby="prompt-modal-title" hidden>
+      <div class="settings-top"><h2 id="prompt-modal-title">Give this to your coding agent</h2></div>
+      <div class="settings-body">
+        <p class="settings-note">
+          A custom rule needs code. Copying this prompt closes the dialog.
+        </p>
+        <pre id="cadence-prompt-text"></pre>
+        <button id="cadence-copy" class="settings-primary" type="button">Copy and close</button>
       </div>
     </section>
     <div id="graph-tooltip" role="tooltip" hidden></div>

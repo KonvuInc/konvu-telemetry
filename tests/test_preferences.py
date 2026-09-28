@@ -4,8 +4,10 @@ import unittest
 from unittest.mock import patch
 
 from konvu_telemetry.display import should_show_usage
+from konvu_telemetry.storage import custom_rule_module_path
 from konvu_telemetry.preferences import (
     CADENCES,
+    DEFAULT_CADENCE,
     custom_rule_prompt,
     read_preferences,
     write_preferences,
@@ -21,11 +23,19 @@ class PreferencesTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def test_defaults_apply_when_nothing_is_stored(self) -> None:
-        self.assertEqual(read_preferences()["cadence"], "every-prompt")
+        self.assertEqual(read_preferences()["cadence"], DEFAULT_CADENCE)
 
     def test_an_unknown_cadence_is_rejected_rather_than_coerced(self) -> None:
         with self.assertRaises(ValueError):
             write_preferences("whenever-i-feel-like-it")
+
+    def test_a_custom_cadence_without_a_rule_is_refused(self) -> None:
+        # Saving it would store a setting that cannot do anything.
+        for empty in ("", "   ", "ab"):
+            with self.assertRaises(ValueError):
+                write_preferences("custom", empty)
+        write_preferences("custom", "only above 80%")
+        self.assertEqual(read_preferences()["cadence"], "custom")
 
     def test_a_custom_rule_is_dropped_when_leaving_the_custom_cadence(self) -> None:
         write_preferences("custom", "only above 80%")
@@ -43,10 +53,42 @@ class PreferencesTests(unittest.TestCase):
         self.assertFalse(should_show_usage("claude", "session-a", 0))
         self.assertTrue(should_show_usage("claude", "session-a", 2))
 
-    def test_custom_falls_back_to_showing_rather_than_hiding(self) -> None:
-        # The rule is not implemented until the user's agent writes it, so the
-        # safe behaviour is the default, not silence.
+    def test_every_tool_call_reads_the_snapshot_when_no_count_is_passed(self) -> None:
+        # The prompt hooks cannot count a turn's tool calls, so the gate looks
+        # them up. Without this the cadence would silently never fire there.
+        write_preferences("every-tool-call")
+        with patch(
+            "konvu_telemetry.display.refreshed_session",
+            return_value={"last_task_tool_calls": 3},
+        ):
+            self.assertTrue(should_show_usage("claude", "session-a"))
+        with patch(
+            "konvu_telemetry.display.refreshed_session",
+            return_value={"last_task_tool_calls": 0},
+        ):
+            self.assertFalse(should_show_usage("claude", "session-a"))
+
+    def test_custom_falls_back_to_showing_when_no_rule_file_exists(self) -> None:
         write_preferences("custom", "only when I ask")
+        self.assertTrue(should_show_usage("claude", "session-a"))
+
+    def test_a_user_rule_file_decides_and_survives_upgrades(self) -> None:
+        # The rule lives in the user's home directory, not in the package, so
+        # replacing the package on upgrade cannot delete it.
+        write_preferences("custom", "never on codex")
+        path = custom_rule_module_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "def should_show(context):\n    return context['provider'] != 'codex'\n"
+        )
+        self.assertTrue(should_show_usage("claude", "session-a"))
+        self.assertFalse(should_show_usage("codex", "session-a"))
+
+    def test_a_broken_rule_file_shows_rather_than_hides(self) -> None:
+        write_preferences("custom", "anything at all")
+        path = custom_rule_module_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("this is not valid python (((")
         self.assertTrue(should_show_usage("claude", "session-a"))
 
     def test_usage_jump_shows_once_then_waits_for_the_next_jump(self) -> None:
@@ -57,10 +99,18 @@ class PreferencesTests(unittest.TestCase):
         with patch("konvu_telemetry.display._current_usage_percent", return_value=12.0):
             self.assertTrue(should_show_usage("claude", "session-a"))
 
-    def test_the_agent_prompt_names_the_rule_and_where_to_change_it(self) -> None:
+    def test_the_agent_prompt_is_actionable_without_reading_the_codebase(self) -> None:
         prompt = custom_rule_prompt("only above 80% weekly")
         self.assertIn("only above 80% weekly", prompt)
-        self.assertIn("should_show_usage()", prompt)
+        for pointer in (
+            "~/.konvu/telemetry/custom_rule.py",
+            "def should_show(context: dict) -> bool:",
+            "usage_percent",
+            "Return True when unsure",
+        ):
+            self.assertIn(pointer, prompt)
+        # Editing the package would be reverted by the next upgrade.
+        self.assertIn("do not edit the installed Konvu package", prompt)
 
     def test_every_cadence_has_a_human_label(self) -> None:
         for key, label in CADENCES.items():

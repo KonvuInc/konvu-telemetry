@@ -67,7 +67,7 @@ def _choose_cadence_interactively() -> None:
     """Offer the same options the dashboard shows, numbered for the terminal."""
     options = list(CADENCES.items())
     current = read_preferences()
-    print("How often should Konvu show usage in your CLI hooks?\n")
+    print("How often should Konvu show the usage box inside a turn?\n")
     for index, (key, label) in enumerate(options, start=1):
         marker = " (current)" if key == current["cadence"] else ""
         print(f"  {index}. {label}{marker}")
@@ -97,7 +97,7 @@ def _choose_cadence_interactively() -> None:
 
 def cadence_main(arguments: list[str]) -> None:
     parser = argparse.ArgumentParser(
-        description="Choose how often usage is shown in the CLI hooks"
+        description="Choose how often the Konvu usage box is shown inside a turn"
     )
     parser.add_argument(
         "cadence",
