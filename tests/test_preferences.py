@@ -1,9 +1,15 @@
+from contextlib import contextmanager
 import os
 import tempfile
+from typing import Iterator
 import unittest
 from unittest.mock import patch
 
-from konvu_telemetry.display import should_show_usage
+from konvu_telemetry.display import (
+    _current_usage_percent,
+    record_usage_shown,
+    should_show_usage,
+)
 from konvu_telemetry.storage import custom_rule_module_path
 from konvu_telemetry.preferences import (
     CADENCES,
@@ -93,11 +99,87 @@ class PreferencesTests(unittest.TestCase):
 
     def test_usage_jump_shows_once_then_waits_for_the_next_jump(self) -> None:
         write_preferences("usage-jump", jump_percent=2.0)
-        with patch("konvu_telemetry.display._current_usage_percent", return_value=10.0):
+        with self.binding_window("w1", 10.0):
             self.assertTrue(should_show_usage("claude", "session-a"))
+            # Deciding to show is not showing: the baseline only moves once the
+            # caller has actually printed the box.
+            self.assertTrue(should_show_usage("claude", "session-a"))
+            record_usage_shown("claude", "session-a")
             self.assertFalse(should_show_usage("claude", "session-a"))
-        with patch("konvu_telemetry.display._current_usage_percent", return_value=12.0):
+        with self.binding_window("w1", 11.0):
+            self.assertFalse(should_show_usage("claude", "session-a"))
+        with self.binding_window("w1", 12.0):
             self.assertTrue(should_show_usage("claude", "session-a"))
+
+    def test_a_new_limit_window_re_arms_the_jump_instead_of_silencing_it(self) -> None:
+        write_preferences("usage-jump", jump_percent=2.0)
+        with self.binding_window("w1", 90.0):
+            self.assertTrue(should_show_usage("claude", "session-a"))
+            record_usage_shown("claude", "session-a")
+            self.assertFalse(should_show_usage("claude", "session-a"))
+        # The window rolls over and the provider restarts near zero. Comparing
+        # against the old peak would silence the box for the whole new window.
+        with self.binding_window("w2", 2.0):
+            self.assertTrue(should_show_usage("claude", "session-a"))
+            record_usage_shown("claude", "session-a")
+            self.assertFalse(should_show_usage("claude", "session-a"))
+        with self.binding_window("w2", 4.5):
+            self.assertTrue(should_show_usage("claude", "session-a"))
+
+    def test_the_jump_tracks_the_busiest_limit_bucket(self) -> None:
+        """Codex reports one window per bucket; the binding one is what matters."""
+        quotas = {
+            "codex": {
+                "windows": [
+                    {
+                        "period": "weekly",
+                        "limit_id": "codex-mini",
+                        "used_percent": 2.0,
+                        "resets_at": "w1",
+                    },
+                    {
+                        "period": "weekly",
+                        "limit_id": "gpt-5-codex",
+                        "used_percent": 45.0,
+                        "resets_at": "w1",
+                    },
+                ]
+            }
+        }
+        reversed_quotas = {
+            "codex": {"windows": list(reversed(quotas["codex"]["windows"]))}
+        }
+        with patch(
+            "konvu_telemetry.display.stored_provider_quotas", return_value=quotas
+        ):
+            self.assertEqual(_current_usage_percent("codex"), 45.0)
+        # The same account serialized the other way round must read identically,
+        # or a reorder alone would look like a jump.
+        with patch(
+            "konvu_telemetry.display.stored_provider_quotas",
+            return_value=reversed_quotas,
+        ):
+            self.assertEqual(_current_usage_percent("codex"), 45.0)
+
+    @contextmanager
+    def binding_window(self, resets_at: str, used_percent: float) -> Iterator[None]:
+        """Pretend the provider reports one limit window at a given usage."""
+        quotas = {
+            "claude": {
+                "windows": [
+                    {
+                        "period": "five_hour",
+                        "limit_id": "default",
+                        "used_percent": used_percent,
+                        "resets_at": resets_at,
+                    }
+                ]
+            }
+        }
+        with patch(
+            "konvu_telemetry.display.stored_provider_quotas", return_value=quotas
+        ):
+            yield
 
     def test_the_agent_prompt_is_actionable_without_reading_the_codebase(self) -> None:
         prompt = custom_rule_prompt("only above 80% weekly")

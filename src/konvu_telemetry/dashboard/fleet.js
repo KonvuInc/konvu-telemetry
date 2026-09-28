@@ -1497,8 +1497,10 @@ function renderSaveState() {
   const blocked = cadenceState.cadence === "custom" && !customRuleIsUsable();
   save.disabled = blocked;
   const status = $("#cadence-status");
-  if (status && blocked) status.textContent = "Describe your rule first";
-  else if (status && status.textContent === "Describe your rule first") status.textContent = "";
+  // Flagged on the element rather than recognised by its text, so an unrelated
+  // message (a failed save) is never mistaken for this one and cleared.
+  if (status && blocked) { status.textContent = "Describe your rule first"; status.dataset.hint = "blocked"; }
+  else if (status && status.dataset.hint === "blocked") { status.textContent = ""; delete status.dataset.hint; }
 }
 function renderCadenceOptions() {
   const host = $("#cadence-options");
@@ -1515,11 +1517,14 @@ function renderCadenceOptions() {
     )
     .join("");
   // The custom row is a field, not a label: typing in it is the clearest
-  // signal that custom is what you want, so it selects itself.
+  // signal that custom is what you want, so it selects itself. Its label still
+  // comes from the server so it cannot drift from the command's wording.
+  const customLabel =
+    cadenceState.options.find((option) => option.id === "custom")?.label || "Custom rule";
   const custom =
     '<div class="cadence-option cadence-custom-row" role="radio" data-cadence="custom" aria-checked="' +
-    String(cadenceState.cadence === "custom") + '">Custom' +
-    '<input id="cadence-rule" type="text" autocomplete="off" placeholder="describe your rule" value="' +
+    String(cadenceState.cadence === "custom") + '">' + esc(customLabel) +
+    '<input id="cadence-rule" type="text" autocomplete="off" maxlength="2000" placeholder="describe your rule" value="' +
     esc(cadenceState.custom_rule || "") + '"></div>';
   host.innerHTML = rows + custom;
   if (focusWasInRule) {

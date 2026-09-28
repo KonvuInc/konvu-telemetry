@@ -5,7 +5,11 @@ from __future__ import annotations
 import json
 from typing import TypedDict
 
-from .storage import preferences_path, write_private_json
+from .storage import (
+    preferences_path,
+    preferences_write_lock,
+    write_private_json,
+)
 
 # How often the Konvu usage box is drawn inside a turn, in Codex CLI, Codex
 # desktop and Claude desktop. The Claude CLI status line is separate: it is
@@ -25,6 +29,9 @@ DEFAULT_JUMP_PERCENT = 1.0
 # A custom cadence with no rule saves a setting that cannot do anything, so it
 # is refused rather than accepted and quietly ignored.
 MIN_CUSTOM_RULE_LENGTH = 3
+# Long enough for any rule a person writes by hand. An over-long one is refused
+# rather than cut down, so the stored rule is always the rule that was typed.
+MAX_CUSTOM_RULE_LENGTH = 2000
 
 
 class Preferences(TypedDict):
@@ -42,24 +49,44 @@ def _default() -> Preferences:
 
 
 def read_preferences() -> Preferences:
-    """Read preferences, falling back to defaults for anything unreadable."""
+    """Read preferences, falling back to defaults for anything unreadable.
+
+    A hand-edited file can hold anything, so every field is re-validated with the
+    same rules the write path enforces, and a decoding failure yields the default
+    rather than escaping into a hook or an HTTP handler.
+    """
     try:
-        raw = json.loads(preferences_path().read_text())
-    except (OSError, json.JSONDecodeError):
+        # errors="replace" keeps a stray non-UTF-8 byte from raising out of here.
+        text = preferences_path().read_bytes().decode("utf-8", errors="replace")
+        raw = json.loads(text)
+    except (OSError, ValueError):
         return _default()
     if not isinstance(raw, dict):
         return _default()
     value = _default()
+    rule = raw.get("custom_rule")
+    if isinstance(rule, str) and len(rule) <= MAX_CUSTOM_RULE_LENGTH:
+        value["custom_rule"] = rule
     cadence = raw.get("cadence")
     if isinstance(cadence, str) and cadence in CADENCES:
         value["cadence"] = cadence
-    rule = raw.get("custom_rule")
-    if isinstance(rule, str):
-        value["custom_rule"] = rule[:2000]
+    # A stored custom cadence whose rule did not survive validation would mean
+    # "always show", the one outcome write_preferences refuses to save.
+    if value["cadence"] == "custom" and not _rule_is_usable(value["custom_rule"]):
+        value["cadence"] = DEFAULT_CADENCE
+    if value["cadence"] != "custom":
+        value["custom_rule"] = ""
     jump = raw.get("jump_percent")
     if isinstance(jump, (int, float)) and not isinstance(jump, bool) and jump > 0:
         value["jump_percent"] = float(jump)
     return value
+
+
+def _rule_is_usable(rule: str) -> bool:
+    return (
+        MIN_CUSTOM_RULE_LENGTH <= len(rule.strip())
+        and len(rule) <= MAX_CUSTOM_RULE_LENGTH
+    )
 
 
 def write_preferences(
@@ -68,19 +95,28 @@ def write_preferences(
     """Store a cadence choice. An unknown cadence is rejected, not coerced."""
     if cadence not in CADENCES:
         raise ValueError("Unknown cadence: " + cadence)
-    if cadence == "custom" and len(custom_rule.strip()) < MIN_CUSTOM_RULE_LENGTH:
-        raise ValueError("A custom cadence needs a rule to follow")
-    current = read_preferences()
-    value: Preferences = {
-        "cadence": cadence,
-        # A custom rule is only meaningful for the custom cadence; keeping a
-        # stale one around would misrepresent what is in force.
-        "custom_rule": custom_rule[:2000] if cadence == "custom" else "",
-        "jump_percent": float(jump_percent)
-        if isinstance(jump_percent, (int, float)) and jump_percent > 0
-        else current["jump_percent"],
-    }
-    write_private_json(preferences_path(), value)
+    if cadence == "custom":
+        if len(custom_rule.strip()) < MIN_CUSTOM_RULE_LENGTH:
+            raise ValueError("A custom cadence needs a rule to follow")
+        if len(custom_rule) > MAX_CUSTOM_RULE_LENGTH:
+            # Storing a cut-down rule would report success for a rule nobody wrote.
+            raise ValueError(
+                f"A custom rule must be {MAX_CUSTOM_RULE_LENGTH} characters or fewer"
+            )
+    # Two writers (the command and the dashboard) share this file, so the
+    # read-modify-write that carries jump_percent forward runs under a lock.
+    with preferences_write_lock():
+        current = read_preferences()
+        value: Preferences = {
+            "cadence": cadence,
+            # A custom rule is only meaningful for the custom cadence; keeping a
+            # stale one around would misrepresent what is in force.
+            "custom_rule": custom_rule if cadence == "custom" else "",
+            "jump_percent": float(jump_percent)
+            if isinstance(jump_percent, (int, float)) and jump_percent > 0
+            else current["jump_percent"],
+        }
+        write_private_json(preferences_path(), value)
     return value
 
 

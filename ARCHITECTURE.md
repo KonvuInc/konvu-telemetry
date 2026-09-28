@@ -18,7 +18,10 @@ Konvu Telemetry is one Python package with a single resident process. The proces
 - Claude installs no `Stop` hook. Setup removes the one earlier versions installed and leaves every other `Stop` entry in the file alone; `claude-hook` remains a silent no-op so settings written by an older version keep working.
 - Claude is identified as desktop by `CLAUDE_CODE_ENTRYPOINT=claude-desktop` in the hook environment; Codex by its recorded client (Desktop app or VS Code) as opposed to the TUI, read from the rollout's `session_meta` record. An absent, unreadable, or unrecognized client means CLI, so the desktop path is never entered by accident.
 - Every usage summary ends with one dashboard line: the `DASHBOARD_PORT` loopback URL when `service.load_health()` reports `healthy`, and otherwise the `konvu-telemetry setup` command that installs and starts the collector serving it. Only `healthy` counts as reachable; `stale`, `starting`, a missing or unreadable health record, and a failed read all show the command, because a dead link costs more than a redundant hint. No surface opens a socket to decide this.
-- A usage box is shown when, and only when, the last prompt used a tool. The prompt hooks read the rendered session's `last_task_tool_calls`; the Codex `Stop` hook counts tool calls on the exact turn it fires on, which is more precise for that one hook. A missing, zero, or non-integer count shows nothing. There is no cost floor, prompt-count floor, or rate limit.
+- When a usage box is shown is the user's choice, stored in `preferences.json` and read fresh on every turn. The choices are after every prompt, after every tool call (the default), only when the binding limit has moved by `jump_percent`, never, and a custom rule. No check outside that choice suppresses a box: the cadence is the only gate, so a widening choice actually widens. The Claude CLI status line is deliberately exempt, because it is ambient and always current.
+- Tool counts feed the cadence rather than gating ahead of it. The prompt hooks read the rendered session's `last_task_tool_calls`; the Codex `Stop` hook counts tool calls on the exact turn it fires on, which is more precise for that one hook. A missing or non-integer count reads as zero.
+- The `usage-jump` cadence compares against the last figure a box actually displayed, recorded after printing rather than when the decision was made, so a turn that decided to show but rendered nothing does not consume the jump. Each stored figure carries the identity of the window it came from — provider, period, limit bucket and reset time — so a rolled-over window or a different Codex bucket re-arms the box instead of silencing it.
+- A custom rule is the user's own `custom_rule.py`, executed on every turn. It lives outside the package so an upgrade cannot replace it, and any failure to import or run it shows the box: staying silent is the worse failure.
 
 ## Runtime flow
 
@@ -45,6 +48,10 @@ Konvu Telemetry is one Python package with a single resident process. The proces
 | `~/.konvu/telemetry/tracking-state.json` | Anonymous install ID and local analytics preference | `0600` |
 | `~/.konvu/telemetry/tracking-queue.json` | At most 100 pending anonymous analytics events | `0600` |
 | `~/.konvu/telemetry/tracking.lock` | Cross-process lock for analytics state and queue | `0600` |
+| `~/.konvu/telemetry/preferences.json` | Chosen display cadence, custom rule text and jump threshold | `0600` |
+| `~/.konvu/telemetry/preferences.lock` | Cross-process lock so the command and dashboard cannot revert each other | `0600` |
+| `~/.konvu/telemetry/custom_rule.py` | User-authored `should_show(context)` rule, kept outside the package so upgrades cannot erase it | User-owned |
+| `~/.konvu/telemetry/shown/*.json` | Per-session record of the usage figure the last box displayed | `0600` |
 | `~/.konvu/telemetry/collector*.log` | LaunchAgent stdout and stderr | User-owned |
 | `~/Library/LaunchAgents/com.konvu.telemetry.plist` | Per-user service definition | User-owned |
 | `~/.claude/settings.json` | Optional Claude status line plus `UserPromptSubmit` hook merge | `0600` after write |
@@ -71,7 +78,7 @@ Setup enables anonymous product analytics by default and preserves an existing c
 - Unknown billable models mark the session partial; their iterations are omitted from forecasts while complete iterations remain usable.
 - Oversized transcript records are scanned with bounded prefix and suffix buffers; large payload text is not retained.
 - Dashboard responses use ETags, and the browser fetches detailed history only for the open session.
-- Hooks only read the collector's existing session output; they never force collection.
+- Hooks read the collector's existing session output and never force collection. Their only writes are the per-session `shown/` record, and only under the `usage-jump` cadence. Under the custom cadence they also execute the user's own `custom_rule.py`.
 - Failed analytics delivery retains stable event IDs and uses exponential backoff capped at 24 hours.
 - A second server cannot bind the same port and exits before starting another collector loop.
 

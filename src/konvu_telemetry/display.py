@@ -614,9 +614,13 @@ def usage_box_lines(session: dict[str, object], quota_text: str) -> list[str]:
 
 
 def prompt_box_context(provider: str, session_id: str) -> str | None:
-    """Serialize the usage box as UserPromptSubmit context, or None when it stays hidden."""
+    """Serialize the usage box as UserPromptSubmit context, or None when it stays hidden.
+
+    Whether a tool-free turn qualifies is the cadence's call, not this function's,
+    so the only check left here is that there is a session to describe.
+    """
     session = refreshed_session(provider, session_id)
-    if not isinstance(session, dict) or not last_prompt_used_a_tool(session):
+    if not isinstance(session, dict):
         return None
     body = "\n".join(usage_box_lines(session, recorded_quota_usage_text(provider)))
     return json.dumps(
@@ -644,14 +648,6 @@ def codex_hook_request() -> tuple[dict[str, object], str] | None:
     return None
 
 
-def last_prompt_used_a_tool(session: dict[str, object]) -> bool:
-    """Show the usage box only for a prompt that actually put the model to work."""
-    tool_calls = session.get("last_task_tool_calls")
-    if isinstance(tool_calls, bool) or not isinstance(tool_calls, int):
-        return False
-    return tool_calls > 0
-
-
 def _last_shown_path(provider: str, session_id: str) -> Path:
     return home_dir() / "shown" / f"{provider}-{session_id}.json"
 
@@ -673,19 +669,48 @@ def _record_shown(provider: str, session_id: str, state: dict[str, object]) -> N
         return
 
 
-def _current_usage_percent(provider: str) -> float | None:
-    """Percent of the live limit window used, from the provider's own figures."""
+def _binding_quota_window(provider: str) -> tuple[str, float] | None:
+    """The limit window closest to cutting this provider off, with its identity.
+
+    Codex reports one window per limit bucket, so a percentage is only comparable
+    with another reading of the same bucket. The identity travels with the value
+    so a later comparison can tell "the meter moved" from "we changed meters".
+    """
     account = stored_provider_quotas().get(provider)
     windows = account.get("windows") if isinstance(account, dict) else None
     if not isinstance(windows, list):
         return None
     period = "weekly" if provider == "codex" else "five_hour"
+    candidates: list[tuple[float, str]] = []
     for window in windows:
-        if isinstance(window, dict) and window.get("period") == period:
-            used = window.get("used_percent")
-            if isinstance(used, (int, float)) and not isinstance(used, bool):
-                return float(used)
-    return None
+        if not isinstance(window, dict) or window.get("period") != period:
+            continue
+        used = window.get("used_percent")
+        if isinstance(used, bool) or not isinstance(used, (int, float)):
+            continue
+        limit_id = window.get("limit_id")
+        resets_at = window.get("resets_at")
+        key = json.dumps(
+            [
+                provider,
+                period,
+                limit_id if isinstance(limit_id, str) else "default",
+                # A new window instance restarts near zero, so its reset time is
+                # part of its identity; without it a rollover reads as a drop.
+                resets_at if isinstance(resets_at, str) else "",
+            ]
+        )
+        candidates.append((float(used), key))
+    if not candidates:
+        return None
+    used, key = max(candidates, key=lambda pair: (pair[0], pair[1]))
+    return key, used
+
+
+def _current_usage_percent(provider: str) -> float | None:
+    """Percent of the binding limit window used, for a custom rule's context."""
+    binding = _binding_quota_window(provider)
+    return None if binding is None else binding[1]
 
 
 def _session_tool_calls(provider: str, session_id: str) -> int:
@@ -761,20 +786,43 @@ def should_show_usage(
         )
         return count > 0
     if cadence == "usage-jump":
-        current = _current_usage_percent(provider)
-        if current is None:
-            return True
-        shown = _read_last_shown(provider, session_id).get("usage_percent")
-        previous = (
-            shown
-            if isinstance(shown, (int, float)) and not isinstance(shown, bool)
-            else None
-        )
-        if previous is None or current - previous >= preference["jump_percent"]:
-            _record_shown(provider, session_id, {"usage_percent": current})
-            return True
-        return False
+        return _usage_jumped(provider, session_id, preference["jump_percent"])
     return True
+
+
+def _usage_jumped(provider: str, session_id: str, jump_percent: float) -> bool:
+    """Whether the binding limit has moved far enough since the last box."""
+    binding = _binding_quota_window(provider)
+    if binding is None:
+        return True
+    key, current = binding
+    last = _read_last_shown(provider, session_id)
+    previous = last.get("usage_percent")
+    if (
+        last.get("window") != key
+        or isinstance(previous, bool)
+        or not isinstance(previous, (int, float))
+        or current < previous
+    ):
+        # A different window, a missing baseline, or a figure that went backwards
+        # all mean the old baseline describes a meter we are no longer reading.
+        return True
+    return current - float(previous) >= jump_percent
+
+
+def record_usage_shown(provider: str, session_id: str) -> None:
+    """Note the usage a box actually displayed, so the next jump is measured from it.
+
+    Callers invoke this after printing, never before: a turn that decided to show
+    but then found nothing to render must not consume the jump it never surfaced.
+    """
+    if read_preferences()["cadence"] != "usage-jump":
+        return
+    binding = _binding_quota_window(provider)
+    if binding is None:
+        return
+    key, current = binding
+    _record_shown(provider, session_id, {"window": key, "usage_percent": current})
 
 
 def silent_hook(hook: Callable[[], None]) -> Callable[[], None]:
@@ -800,10 +848,11 @@ def codex_hook() -> None:
     payload, session_id = request
     turn_id = payload.get("turn_id")
     transcript = codex_hook_transcript(payload, session_id)
+    # Whether a tool-free turn earns a box is the cadence's call, so the count is
+    # handed to the gate rather than used to suppress the box ahead of it.
     if (
         not isinstance(turn_id, str)
         or transcript is None
-        or codex_turn_tool_calls(transcript, turn_id) <= 0
         or codex_is_desktop(transcript)
     ):
         print(SUPPRESS_OUTPUT)
@@ -819,6 +868,7 @@ def codex_hook() -> None:
         return
     lines = usage_box_lines(session, recorded_quota_usage_text("codex"))
     print(json.dumps({"systemMessage": "\n" + "\n".join(lines)}))
+    record_usage_shown("codex", session_id)
 
 
 @silent_hook
@@ -847,6 +897,7 @@ def claude_prompt_hook() -> None:
     context = prompt_box_context("claude", session_id)
     if context is not None:
         print(context)
+        record_usage_shown("claude", session_id)
 
 
 @silent_hook
@@ -865,6 +916,8 @@ def codex_prompt_hook() -> None:
         return
     context = prompt_box_context("codex", session_id)
     print(SUPPRESS_OUTPUT if context is None else context)
+    if context is not None:
+        record_usage_shown("codex", session_id)
 
 
 def refreshed_session(provider: str, session_id: str) -> dict[str, object] | None:

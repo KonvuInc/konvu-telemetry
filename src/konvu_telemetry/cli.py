@@ -77,10 +77,16 @@ def _choose_cadence_interactively() -> None:
     except (EOFError, KeyboardInterrupt):
         print()
         return
-    if not answer.isdigit() or not 1 <= int(answer) <= len(options):
+    try:
+        # Parsed rather than pre-matched: str.isdigit() accepts digits int() rejects.
+        choice = int(answer)
+    except ValueError:
         print("Not a listed choice; nothing changed.")
         return
-    cadence = options[int(answer) - 1][0]
+    if not 1 <= choice <= len(options):
+        print("Not a listed choice; nothing changed.")
+        return
+    cadence = options[choice - 1][0]
     if cadence != "custom":
         _print_cadence(write_preferences(cadence))
         return
@@ -110,10 +116,15 @@ def cadence_main(arguments: list[str]) -> None:
         "--jump-percent",
         type=float,
         default=None,
-        help="Percent a limit must move before showing usage, with 'usage-jump'.",
+        help=(
+            "Percent a limit must move before showing usage, with 'usage-jump'. "
+            "Must be greater than zero."
+        ),
     )
     parser.add_argument(
-        "--status", action="store_true", help="Print the current choice."
+        "--status",
+        action="store_true",
+        help="Print the current choice and exit without changing it.",
     )
     args = parser.parse_args(arguments)
     if args.status:
@@ -122,7 +133,14 @@ def cadence_main(arguments: list[str]) -> None:
     if args.cadence is None:
         _choose_cadence_interactively()
         return
-    preference = write_preferences(args.cadence, args.rule, args.jump_percent)
+    if args.jump_percent is not None and args.jump_percent <= 0:
+        # Dropping it silently would report success for a threshold never stored.
+        parser.error("--jump-percent must be greater than zero")
+    try:
+        preference = write_preferences(args.cadence, args.rule, args.jump_percent)
+    except ValueError as error:
+        # A rejected setting is a usage mistake, not a crash; exit 2 like argparse.
+        parser.error(str(error))
     _print_cadence(preference)
     if preference["cadence"] == "custom":
         print("\nGive this to your coding agent:\n")

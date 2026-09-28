@@ -71,6 +71,7 @@ def main(arguments: list[str] | None = None) -> None:
             "backtest-next-ten",
             "dashboard",
             "telemetry",
+            "cadence",
         ],
     )
     parser.add_argument("--interval", type=int, default=60)
