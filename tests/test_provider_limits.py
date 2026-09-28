@@ -27,6 +27,7 @@ from konvu_telemetry.provider_limits import (
     stored_provider_quotas,
     write_provider_quotas,
 )
+from konvu_telemetry import provider_limits
 from konvu_telemetry.fleet_telemetry import enrich_snapshot
 
 
@@ -517,55 +518,8 @@ class ProviderLimitsTests(unittest.TestCase):
         poller.refresh(220)
         self.assertEqual(claude.call_count, 2)
 
-    def test_claude_rate_limits_back_off_immediately_for_one_hour(self) -> None:
-        claude = Mock(
-            return_value=FetchResult(None, failure="rate_limited", error_code=429)
-        )
-        poller = ProviderLimitPoller(
-            claude,
-            Mock(return_value=FetchResult(None, unavailable=True)),
-        )
-
-        with patch("konvu_telemetry.provider_limits.random.uniform", return_value=60.0):
-            poller.refresh(100)
-            poller.refresh(3759)
-            self.assertEqual(claude.call_count, 1)
-            poller.refresh(3760)
-            self.assertEqual(claude.call_count, 2)
-
-    def test_claude_rate_limit_does_not_retry_before_cached_window_reset(
-        self,
-    ) -> None:
-        claude = Mock(
-            side_effect=[
-                FetchResult(
-                    {
-                        "windows": [
-                            {
-                                "used_percent": 7.0,
-                                "resets_at": "1970-01-01T02:46:40+00:00",
-                            }
-                        ]
-                    }
-                ),
-                FetchResult(None, failure="rate_limited", error_code=429),
-                FetchResult(None, failure="rate_limited", error_code=429),
-            ]
-        )
-        poller = ProviderLimitPoller(
-            claude,
-            Mock(return_value=FetchResult(None, unavailable=True)),
-        )
-
-        with patch("konvu_telemetry.provider_limits.random.uniform", return_value=0.0):
-            poller.refresh(100)
-            poller.refresh(220)
-            poller.refresh(9999)
-            self.assertEqual(claude.call_count, 2)
-            poller.refresh(10000)
-            self.assertEqual(claude.call_count, 3)
-
-    def test_repeated_claude_rate_limits_back_off_exponentially(self) -> None:
+    def test_a_rate_limit_retries_in_seconds_rather_than_hours(self) -> None:
+        """A 429 throttles the endpoint; it does not mean the figures stopped."""
         claude = Mock(
             return_value=FetchResult(None, failure="rate_limited", error_code=429)
         )
@@ -576,11 +530,56 @@ class ProviderLimitsTests(unittest.TestCase):
 
         with patch("konvu_telemetry.provider_limits.random.uniform", return_value=0.0):
             poller.refresh(100)
-            poller.refresh(3700)
-            poller.refresh(10_899)
+            poller.refresh(119)
+            self.assertEqual(claude.call_count, 1, "20s backoff has not elapsed")
+            poller.refresh(120)
+            self.assertEqual(claude.call_count, 2, "retried 20s later, not an hour")
+
+    def test_a_run_of_rate_limits_doubles_the_wait_up_to_a_ceiling(self) -> None:
+        claude = Mock(
+            return_value=FetchResult(None, failure="rate_limited", error_code=429)
+        )
+        poller = ProviderLimitPoller(
+            claude,
+            Mock(return_value=FetchResult(None, unavailable=True)),
+        )
+
+        with patch("konvu_telemetry.provider_limits.random.uniform", return_value=0.0):
+            poller.refresh(0)  # first refusal, wait 20s
+            poller.refresh(20)  # second, wait 40s
+            poller.refresh(59)
             self.assertEqual(claude.call_count, 2)
-            poller.refresh(10_900)
+            poller.refresh(60)  # third, wait 80s
             self.assertEqual(claude.call_count, 3)
+            poller.refresh(139)
+            self.assertEqual(claude.call_count, 3)
+            poller.refresh(140)
+            self.assertEqual(claude.call_count, 4)
+
+    @patch("konvu_telemetry.provider_limits.random.uniform", return_value=0.0)
+    def test_the_backoff_never_exceeds_its_ceiling(self, _jitter: Mock) -> None:
+        self.assertEqual(provider_limits._rate_limit_delay(1, None), 20.0)
+        self.assertEqual(provider_limits._rate_limit_delay(2, None), 40.0)
+        for failures in (20, 100):
+            self.assertLessEqual(
+                provider_limits._rate_limit_delay(failures, None),
+                provider_limits.RATE_LIMIT_MAX_BACKOFF_SECONDS
+                + provider_limits.RATE_LIMIT_MAX_JITTER_SECONDS,
+            )
+
+    def test_a_longer_retry_after_wins_but_a_shorter_one_does_not(self) -> None:
+        """The provider's own wait is a floor, never a ceiling."""
+        with patch("konvu_telemetry.provider_limits.random.uniform", return_value=0.0):
+            self.assertEqual(provider_limits._rate_limit_delay(1, 300.0), 300.0)
+            self.assertEqual(provider_limits._rate_limit_delay(1, 5.0), 20.0)
+
+    def test_rate_limit_retries_are_jittered(self) -> None:
+        """Several machines on one account must not retry in lockstep."""
+        with patch(
+            "konvu_telemetry.provider_limits.random.uniform", return_value=1.5
+        ) as jitter:
+            self.assertEqual(provider_limits._rate_limit_delay(1, None), 21.5)
+        jitter.assert_called_once_with(0.0, 2.0)
 
     def test_poller_respects_provider_retry_after(self) -> None:
         claude = Mock(return_value=FetchResult(None, 300))

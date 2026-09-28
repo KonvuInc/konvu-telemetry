@@ -31,9 +31,13 @@ CODEX_USAGE_ENDPOINT = "https://chatgpt.com/backend-api/wham/usage"
 CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 POLL_INTERVAL_SECONDS = 120.0
 CLAUDE_POLL_INTERVAL_SECONDS = POLL_INTERVAL_SECONDS
-RATE_LIMIT_BACKOFF_SECONDS = 15 * 60.0
-CLAUDE_RATE_LIMIT_BACKOFF_SECONDS = 60 * 60.0
-CLAUDE_RATE_LIMIT_MAX_BACKOFF_SECONDS = 6 * 60 * 60.0
+# A 429 is a throttle on the usage endpoint, not a sign the figures stopped
+# moving, so the first retry comes quickly and only a run of refusals backs off.
+RATE_LIMIT_BACKOFF_SECONDS = 20.0
+RATE_LIMIT_MAX_BACKOFF_SECONDS = 30 * 60.0
+# A transient failure is a different case: nothing asked us to slow down, so it
+# keeps the ceiling it always had.
+TRANSIENT_FAILURE_MAX_BACKOFF_SECONDS = 15 * 60.0
 RATE_LIMIT_JITTER_FRACTION = 0.1
 RATE_LIMIT_MAX_JITTER_SECONDS = 5 * 60.0
 REQUEST_TIMEOUT_SECONDS = 10.0
@@ -750,33 +754,19 @@ def fetch_codex_limits(now: float | None = None) -> FetchResult:
     return fetch_codex_direct_limits(now)
 
 
-def _seconds_until_next_reset(
-    snapshot: dict[str, object] | None, now: float
-) -> float | None:
-    windows = snapshot.get("windows") if isinstance(snapshot, dict) else None
-    resets = [
-        datetime.fromisoformat(reset).timestamp()
-        for window in (windows if isinstance(windows, list) else [])
-        if isinstance(window, dict)
-        and (reset := _iso_reset(window.get("resets_at"))) is not None
-        and datetime.fromisoformat(reset).timestamp() > now
-    ]
-    return min(resets) - now if resets else None
+def _rate_limit_delay(failures: int, retry_after_seconds: float | None) -> float:
+    """Back off from 20 seconds, doubling per consecutive refusal, with jitter.
 
-
-def _claude_rate_limit_delay(
-    failures: int,
-    snapshot: dict[str, object] | None,
-    now: float,
-    retry_after_seconds: float | None,
-) -> float:
-    exponent = min(max(0, failures - 1), 3)
+    The provider's own Retry-After is a floor, never a ceiling: waiting longer
+    than asked only means showing figures that are staler than they need to be.
+    Jitter keeps several machines on one account from retrying in lockstep.
+    """
+    exponent = min(max(0, failures - 1), 12)
     delay: float = min(
-        CLAUDE_RATE_LIMIT_MAX_BACKOFF_SECONDS,
-        CLAUDE_RATE_LIMIT_BACKOFF_SECONDS * float(2**exponent),
+        RATE_LIMIT_MAX_BACKOFF_SECONDS,
+        RATE_LIMIT_BACKOFF_SECONDS * float(2**exponent),
     )
-    until_reset = _seconds_until_next_reset(snapshot, now)
-    delay = max(delay, until_reset or 0.0, retry_after_seconds or 0.0)
+    delay = max(delay, retry_after_seconds or 0.0)
     jitter = min(delay * RATE_LIMIT_JITTER_FRACTION, RATE_LIMIT_MAX_JITTER_SECONDS)
     return delay + float(random.uniform(0.0, jitter))
 
@@ -901,7 +891,7 @@ class ProviderLimitPoller:
                         )
                     else:
                         failure_delay = min(
-                            RATE_LIMIT_BACKOFF_SECONDS,
+                            TRANSIENT_FAILURE_MAX_BACKOFF_SECONDS,
                             POLL_INTERVAL_SECONDS
                             * (2 ** max(0, self._failures[provider] - 1)),
                         )
@@ -910,19 +900,18 @@ class ProviderLimitPoller:
                                 failure_delay, CLAUDE_POLL_INTERVAL_SECONDS
                             )
                         if result.failure == "rate_limited":
-                            failure_delay = RATE_LIMIT_BACKOFF_SECONDS
-                            if provider == "claude":
-                                failure_delay = _claude_rate_limit_delay(
-                                    self._failures[provider],
-                                    self._snapshots.get("claude"),
-                                    now,
-                                    result.retry_after_seconds,
-                                )
-                        delay = max(
-                            POLL_INTERVAL_SECONDS,
-                            failure_delay,
-                            result.retry_after_seconds or 0.0,
-                        )
+                            failure_delay = _rate_limit_delay(
+                                self._failures[provider], result.retry_after_seconds
+                            )
+                            # A throttled retry may come sooner than a healthy
+                            # poll, so the ordinary interval is not a floor here.
+                            delay = failure_delay
+                        else:
+                            delay = max(
+                                POLL_INTERVAL_SECONDS,
+                                failure_delay,
+                                result.retry_after_seconds or 0.0,
+                            )
                     self._next_at[provider] = now + delay
         return {
             provider: self._visible_snapshot(provider, now)
