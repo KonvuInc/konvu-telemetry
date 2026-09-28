@@ -19,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
+from .preferences import ensure_preferences_file
 from .service import load_health
 from .tracking import record_setup_completed as record_setup_event
 
@@ -547,6 +548,7 @@ def setup(
     ]
     try:
         install_launcher()
+        ensure_preferences_file()
         claude = install_claude_statusline(ensure_launcher=False, create_backup=False)
         # Older versions installed a Claude Stop hook; the status line covers the CLI now.
         claude_stop_removed = remove_claude_stop_hook(create_backup=False)

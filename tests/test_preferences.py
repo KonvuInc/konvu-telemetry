@@ -17,6 +17,7 @@ from konvu_telemetry.cli import cadence_main
 from konvu_telemetry.storage import custom_rule_module_path, preferences_path
 from konvu_telemetry.preferences import (
     CADENCES,
+    ensure_preferences_file,
     DEFAULT_CADENCE,
     DEFAULT_JUMP_PERCENT,
     MAX_CUSTOM_RULE_LENGTH,
@@ -307,6 +308,26 @@ class PreferencesTests(unittest.TestCase):
                 cadence_main(["never"])
         self.assertEqual(exit_code.exception.code, 2)
         self.assertIn("Could not save your choice", output.getvalue())
+
+    def test_setup_writes_the_default_so_nothing_is_only_implicit(self) -> None:
+        """The panel must never show a choice selected that was never stored."""
+        self.assertFalse(preferences_path().exists())
+        self.assertEqual(ensure_preferences_file()["cadence"], DEFAULT_CADENCE)
+        self.assertEqual(
+            json.loads(preferences_path().read_text())["cadence"], DEFAULT_CADENCE
+        )
+
+    def test_setup_never_overwrites_a_choice_already_made(self) -> None:
+        write_preferences("never")
+        ensure_preferences_file()
+        self.assertEqual(read_preferences()["cadence"], "never")
+
+    def test_an_unwritable_home_still_reports_the_cadence_in_force(self) -> None:
+        with patch(
+            "konvu_telemetry.preferences.write_private_json",
+            side_effect=OSError(13, "Permission denied"),
+        ):
+            self.assertEqual(ensure_preferences_file()["cadence"], DEFAULT_CADENCE)
 
     def test_the_agent_prompt_is_actionable_without_reading_the_codebase(self) -> None:
         prompt = custom_rule_prompt("only above 80% weekly")

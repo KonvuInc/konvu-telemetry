@@ -89,6 +89,25 @@ def _rule_is_usable(rule: str) -> bool:
     )
 
 
+def ensure_preferences_file() -> Preferences:
+    """Write the effective preferences to disk if nothing is stored yet.
+
+    Until a file exists the cadence is an implicit default: the settings panel
+    shows a choice selected that was never actually saved, so the only way to be
+    sure of what is in force is to press Save. Materialising it at setup makes
+    the displayed choice and the stored one the same thing from the first run.
+    """
+    current = read_preferences()
+    if preferences_path().exists():
+        return current
+    try:
+        write_private_json(preferences_path(), current)
+    except OSError:
+        # A preference that cannot be written still applies; it is the default.
+        pass
+    return current
+
+
 def write_preferences(
     cadence: str, custom_rule: str = "", jump_percent: float | None = None
 ) -> Preferences:
