@@ -12,12 +12,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from konvu_telemetry.provider_limits import (
     FetchResult,
     ProviderLimitPoller,
+    CodexCredentials,
     RPCResponse,
     _claude_token,
     _codex_executable,
     _secure_file,
     decode_claude_usage,
     decode_codex_usage,
+    fetch_codex_app_server_limits,
+    fetch_codex_direct_limits,
     fetch_claude_limits,
     fetch_codex_limits,
     read_claude_access_token,
@@ -157,45 +160,21 @@ class ProviderLimitsTests(unittest.TestCase):
             FetchResult(None, 90.0, failure="rate_limited", error_code=429),
         )
 
-    @patch("konvu_telemetry.provider_limits._response")
-    @patch("konvu_telemetry.provider_limits.subprocess.Popen")
-    @patch("konvu_telemetry.provider_limits._codex_executable")
     def test_codex_fetch_reports_missing_login_without_reading_credentials(
-        self, executable: Mock, popen: Mock, response: Mock
+        self,
     ) -> None:
-        executable.return_value = "/trusted/codex"
-        process = popen.return_value
-        process.poll.return_value = 0
-        response.side_effect = [
-            RPCResponse(result={}),
-            RPCResponse(result={"account": None, "requiresOpenaiAuth": True}),
-        ]
-
-        result = fetch_codex_limits()
-
+        result = fetch_codex_direct_limits(credential_reader=lambda: None)
         self.assertEqual(
             result,
-            FetchResult(
-                None,
-                unavailable=True,
-                failure="credentials_unavailable",
-            ),
+            FetchResult(None, unavailable=True, failure="credentials_unavailable"),
         )
-        self.assertEqual(process.stdin.write.call_count, 3)
 
-    @patch("konvu_telemetry.provider_limits._response")
-    @patch("konvu_telemetry.provider_limits.subprocess.Popen")
-    @patch("konvu_telemetry.provider_limits._codex_executable")
-    def test_codex_fetch_preserves_safe_auth_error_code(
-        self, executable: Mock, popen: Mock, response: Mock
-    ) -> None:
-        executable.return_value = "/trusted/codex"
-        process = popen.return_value
-        process.poll.return_value = 0
-        response.side_effect = [RPCResponse(result={}), RPCResponse(error_code=401)]
-
-        result = fetch_codex_limits()
-
+    def test_codex_fetch_preserves_safe_auth_error_code(self) -> None:
+        error = HTTPError("https://example.test", 401, "unauthorized", {}, None)
+        result = fetch_codex_direct_limits(
+            opener=lambda request, timeout: (_ for _ in ()).throw(error),
+            credential_reader=lambda: CodexCredentials("secret-token", "account"),
+        )
         self.assertEqual(
             result,
             FetchResult(
@@ -206,26 +185,73 @@ class ProviderLimitsTests(unittest.TestCase):
             ),
         )
 
-    @patch("konvu_telemetry.provider_limits._response")
-    @patch("konvu_telemetry.provider_limits.subprocess.Popen")
-    @patch("konvu_telemetry.provider_limits._codex_executable")
-    def test_codex_fetch_does_not_mislabel_rpc_failure_as_auth_failure(
-        self, executable: Mock, popen: Mock, response: Mock
+    def test_codex_fetch_does_not_mislabel_provider_failure_as_auth_failure(
+        self,
     ) -> None:
-        executable.return_value = "/trusted/codex"
-        process = popen.return_value
-        process.poll.return_value = 0
-        response.side_effect = [RPCResponse(result={}), RPCResponse(error_code=-32601)]
-
+        error = HTTPError("https://example.test", 500, "failure", {}, None)
         self.assertEqual(
-            fetch_codex_limits(),
-            FetchResult(None, failure="provider_error", error_code=-32601),
+            fetch_codex_direct_limits(
+                opener=lambda request, timeout: (_ for _ in ()).throw(error),
+                credential_reader=lambda: CodexCredentials("secret-token", None),
+            ),
+            FetchResult(None, failure="provider_error", error_code=500),
         )
 
+    def test_codex_fetch_reads_direct_quota_without_exposing_credentials(self) -> None:
+        requests: list[object] = []
+        result = fetch_codex_direct_limits(
+            1_767_225_600,
+            opener=lambda request, timeout: (
+                requests.append(request)
+                or FakeResponse(
+                    {
+                        "rate_limit": {
+                            "primary_window": {
+                                "used_percent": 12,
+                                "limit_window_seconds": 10_080 * 60,
+                                "reset_at": 1_767_830_400,
+                            }
+                        }
+                    }
+                )
+            ),
+            credential_reader=lambda: CodexCredentials("secret-token", "account-id"),
+        )
+        assert result.snapshot is not None
+        self.assertEqual(result.snapshot["windows"][0]["used_percent"], 12.0)
+        self.assertNotIn("secret-token", json.dumps(result.snapshot))
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0].get_header("Chatgpt-account-id"), "account-id")
+
+    @patch("konvu_telemetry.provider_limits.fetch_codex_direct_limits")
+    @patch("konvu_telemetry.provider_limits.fetch_codex_app_server_limits")
+    def test_codex_prefers_complete_app_server_limits(
+        self, app_server: Mock, direct: Mock
+    ) -> None:
+        app_server.return_value = FetchResult({"windows": [{"period": "monthly"}]})
+
+        result = fetch_codex_limits(1_767_225_600)
+
+        self.assertEqual(result, app_server.return_value)
+        direct.assert_not_called()
+
+    @patch("konvu_telemetry.provider_limits.fetch_codex_direct_limits")
+    @patch("konvu_telemetry.provider_limits.fetch_codex_app_server_limits")
+    def test_codex_falls_back_to_direct_weekly_limits(
+        self, app_server: Mock, direct: Mock
+    ) -> None:
+        app_server.return_value = FetchResult(None, failure="service_unavailable")
+        direct.return_value = FetchResult({"windows": [{"period": "weekly"}]})
+
+        result = fetch_codex_limits(1_767_225_600)
+
+        self.assertEqual(result, direct.return_value)
+        direct.assert_called_once_with(1_767_225_600)
+
     @patch("konvu_telemetry.provider_limits._response")
     @patch("konvu_telemetry.provider_limits.subprocess.Popen")
     @patch("konvu_telemetry.provider_limits._codex_executable")
-    def test_codex_fetch_checks_account_then_reads_limits(
+    def test_codex_app_server_does_not_refresh_the_login_token(
         self, executable: Mock, popen: Mock, response: Mock
     ) -> None:
         executable.return_value = "/trusted/codex"
@@ -233,29 +259,28 @@ class ProviderLimitsTests(unittest.TestCase):
         process.poll.return_value = 0
         response.side_effect = [
             RPCResponse(result={}),
-            RPCResponse(
-                result={
-                    "account": {"type": "chatgpt"},
-                    "requiresOpenaiAuth": True,
-                }
-            ),
+            RPCResponse(result={"account": {"type": "chatgpt"}}),
             RPCResponse(
                 result={
                     "rateLimits": {
-                        "primary": {
-                            "usedPercent": 12,
-                            "windowDurationMins": 10_080,
-                        }
+                        "primary": {"usedPercent": 12, "windowDurationMins": 10_080},
+                        "individualLimit": {"remainingPercent": 88},
                     }
                 }
             ),
         ]
 
-        result = fetch_codex_limits(1_767_225_600)
+        result = fetch_codex_app_server_limits(1_767_225_600)
 
         assert result.snapshot is not None
-        self.assertEqual(result.snapshot["windows"][0]["used_percent"], 12.0)
-        self.assertEqual(process.stdin.write.call_count, 4)
+        self.assertEqual(len(result.snapshot["windows"]), 2)
+        messages = [
+            json.loads(call.args[0]) for call in process.stdin.write.call_args_list
+        ]
+        self.assertIn(
+            {"id": 2, "method": "account/read", "params": {"refreshToken": False}},
+            messages,
+        )
 
     def test_credential_file_must_be_private_and_token_shape_is_exact(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
