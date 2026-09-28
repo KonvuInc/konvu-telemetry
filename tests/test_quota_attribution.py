@@ -199,6 +199,34 @@ class QuotaAttributionTests(unittest.TestCase):
                 5.0,
             )
 
+    def test_new_deadline_with_a_usage_drop_replaces_the_old_window(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+        ):
+            first = snapshot(20, [session("a", 100)])
+            first["generated_at"] = "2026-01-01T00:00:00+00:00"
+            apply_quota_attribution(first)
+            increased = snapshot(24, [session("a", 200)])
+            increased["generated_at"] = "2026-01-01T00:02:00+00:00"
+            apply_quota_attribution(increased)
+
+            replacement = snapshot(1, [session("a", 300)])
+            replacement["generated_at"] = "2026-01-01T00:04:00+00:00"
+            replacement["account_quotas"]["claude"]["windows"][0]["resets_at"] = (
+                "2026-01-01T10:00:00+00:00"
+            )
+            apply_quota_attribution(replacement)
+
+            self.assertEqual(
+                replacement["sessions"][0]["quota_attribution"],
+                {
+                    "state": "observing",
+                    "windows": [],
+                    "reason": "window_reset",
+                },
+            )
+
     def test_usage_drop_resets_when_the_current_deadline_is_unavailable(self) -> None:
         with (
             tempfile.TemporaryDirectory() as directory,

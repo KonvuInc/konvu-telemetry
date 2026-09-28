@@ -126,6 +126,10 @@ def snapshot_path() -> Path:
     return home_dir() / "live-sessions.json"
 
 
+def account_quotas_path() -> Path:
+    return home_dir() / "account-quotas.json"
+
+
 def normalized_events_path() -> Path:
     return home_dir() / "normalized-events.json"
 

@@ -121,7 +121,9 @@ def summary_snapshot(snapshot: dict[str, object]) -> dict[str, object]:
                 iterations, MAX_SUMMARY_ITERATION_POINTS, 6
             )
         sessions.append(summary)
-    return {**snapshot, "sessions": sessions}
+    summary = {**snapshot, "sessions": sessions}
+    summary.pop("account_quotas", None)
+    return summary
 
 
 def build_snapshot(

@@ -26,7 +26,11 @@ from .config import (
     LIVE_ACTIVITY_SECONDS,
 )
 from .live import IncrementalLiveState
-from .provider_limits import ProviderLimitPoller, stored_provider_quotas
+from .provider_limits import (
+    ProviderLimitPoller,
+    stored_provider_quotas,
+    write_provider_quotas,
+)
 from .snapshot import build_snapshot, write_snapshot
 from .preferences import (
     CADENCES,
@@ -35,6 +39,7 @@ from .preferences import (
     write_preferences,
 )
 from .storage import (
+    account_quotas_path,
     collector_lock_path,
     health_path,
     parse_timestamp,
@@ -246,8 +251,9 @@ def collect_forever(
             try:
                 provider_quotas = quota_poller.refresh(started_at)
             except Exception:
-                provider_quotas = {"claude": None, "codex": None}
+                provider_quotas = stored_provider_quotas()
             with snapshot_lock:
+                write_provider_quotas(provider_quotas)
                 snapshot = build_snapshot(
                     started_at,
                     live_state,
@@ -287,8 +293,10 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
         *,
         directory: str | os.PathLike[str] | None = None,
         refresh_coordinator: RefreshCoordinator | None = None,
+        snapshot_lock: Lock | None = None,
     ) -> None:
         self.refresh_coordinator = refresh_coordinator
+        self.snapshot_lock = snapshot_lock
         super().__init__(request, client_address, server, directory=directory)
 
     def _write_payload(self, payload: bytes) -> None:
@@ -333,7 +341,7 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
             self._write_payload(payload)
             return
         if path == "/api/live-sessions":
-            self._serve_json_file(snapshot_path())
+            self._serve_live_snapshot()
             return
         if path == "/api/preferences":
             self._send_json(
@@ -355,6 +363,69 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
             self._serve_json_file(session_path(provider, session_id))
             return
         super().do_GET()
+
+    def _serve_live_snapshot(self) -> None:
+        """Serve sessions with the independently persisted account quotas."""
+        snapshot_file = snapshot_path()
+        quotas_file = account_quotas_path()
+        try:
+            if self.snapshot_lock is None:
+                snapshot_stat, snapshot_payload, quota_stat, quota_payload = (
+                    DashboardRequestHandler._read_live_files(snapshot_file, quotas_file)
+                )
+            else:
+                with self.snapshot_lock:
+                    snapshot_stat, snapshot_payload, quota_stat, quota_payload = (
+                        DashboardRequestHandler._read_live_files(
+                            snapshot_file, quotas_file
+                        )
+                    )
+            etag_parts = [
+                f"{snapshot_stat.st_mtime_ns:x}",
+                f"{snapshot_stat.st_size:x}",
+            ]
+            if quota_stat is not None:
+                etag_parts.extend(
+                    [f"{quota_stat.st_mtime_ns:x}", f"{quota_stat.st_size:x}"]
+                )
+            etag = '"' + "-".join(etag_parts) + '"'
+            if self.headers.get("If-None-Match") == etag:
+                self.send_response(304)
+                self.send_header("ETag", etag)
+                self.end_headers()
+                return
+            snapshot = json.loads(snapshot_payload)
+            if not isinstance(snapshot, dict):
+                raise ValueError("invalid snapshot")
+            if quota_payload is not None:
+                quotas = json.loads(quota_payload)
+                if not isinstance(quotas, dict):
+                    raise ValueError("invalid account quotas")
+                snapshot["account_quotas"] = quotas
+            payload = json.dumps(snapshot, separators=(",", ":")).encode("utf-8")
+        except (OSError, json.JSONDecodeError, ValueError):
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self.send_header("ETag", etag)
+        self._secure_headers("application/json; charset=utf-8", len(payload))
+        self._write_payload(payload)
+
+    @staticmethod
+    def _read_live_files(
+        snapshot_file: Path, quotas_file: Path
+    ) -> tuple[os.stat_result, bytes, os.stat_result | None, bytes | None]:
+        with snapshot_file.open("rb") as snapshot_handle:
+            snapshot_stat = os.fstat(snapshot_handle.fileno())
+            snapshot_payload = snapshot_handle.read()
+        try:
+            with quotas_file.open("rb") as quota_handle:
+                quota_stat = os.fstat(quota_handle.fileno())
+                quota_payload = quota_handle.read()
+        except FileNotFoundError:
+            quota_stat = None
+            quota_payload = None
+        return snapshot_stat, snapshot_payload, quota_stat, quota_payload
 
     def do_POST(self) -> None:  # noqa: N802
         host = self.headers.get("Host", "")
@@ -465,6 +536,7 @@ def _run_local_service(interval_seconds: int, port: int) -> None:
         DashboardRequestHandler,
         directory=str(directory),
         refresh_coordinator=refresh_coordinator,
+        snapshot_lock=snapshot_lock,
     )
     try:
         server = ThreadingHTTPServer(("127.0.0.1", port), handler)

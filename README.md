@@ -47,7 +47,7 @@ Costs are estimates, not provider invoices. See [ACCURACY.md](ACCURACY.md) for t
 
 ## Privacy
 
-Konvu Telemetry stores derived usage data in `~/.konvu/telemetry`; provider transcript files are never changed. Every two minutes, the collector uses the provider-owned login already on the device to fetch current account limits: it calls Anthropic's usage endpoint for Claude, while Codex's installed local app-server contacts OpenAI using Codex's own login. Konvu Telemetry holds the Claude credential only for that request and never receives the Codex credential. Credentials, raw provider responses, and account IDs are never copied to Konvu files or logs; only normalized limit data is retained locally.
+Konvu Telemetry stores derived usage data in `~/.konvu/telemetry`; provider transcript files are never changed. The background collector uses the provider-owned login already on the device to fetch current account limits: every ten minutes it calls Anthropic's usage endpoint for Claude, while every two minutes Codex's installed local app-server contacts OpenAI using Codex's own login. Konvu Telemetry holds the Claude credential only for that request and never receives the Codex credential. Credentials, raw provider responses, and account IDs are never copied to Konvu files or logs; only normalized limit data is retained locally.
 
 Separately, setup enables a small amount of anonymous product telemetry to PostHog by default: successful setup, when the first dashboard-visible snapshot is ready, dashboard opens, one active-day event per day when data is visible, and collector failures, at most once per day. An existing telemetry choice remains unchanged.
 

@@ -200,17 +200,29 @@ def _stored_window(
     return window_key, stored if isinstance(stored, dict) else None
 
 
-def _reset_advanced(
-    stored: dict[str, object],
-    raw_window: dict[str, object],
-    observed_at: float | None,
+def _reset_timestamp_advanced(
+    stored: dict[str, object], raw_window: dict[str, object]
 ) -> bool:
+    """Return whether the provider identifies a later quota window."""
     previous = _reset_timestamp(stored.get("resets_at"))
     current = _reset_timestamp(raw_window.get("resets_at"))
     return (
         previous is not None
         and current is not None
         and current - previous > RESET_TIMESTAMP_JITTER_SECONDS
+    )
+
+
+def _reset_advanced(
+    stored: dict[str, object],
+    raw_window: dict[str, object],
+    observed_at: float | None,
+) -> bool:
+    """Return whether the previous quota window has reached its deadline."""
+    previous = _reset_timestamp(stored.get("resets_at"))
+    return (
+        _reset_timestamp_advanced(stored, raw_window)
+        and previous is not None
         and (
             observed_at is None
             or observed_at >= previous - RESET_TIMESTAMP_JITTER_SECONDS
@@ -396,7 +408,11 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
                 _reset_timestamp(raw_window.get("resets_at")) is not None
             )
             if _reset_advanced(old_window, raw_window, observed_at) or (
-                used < previous_used and not has_current_reset
+                used < previous_used
+                and (
+                    not has_current_reset
+                    or _reset_timestamp_advanced(old_window, raw_window)
+                )
             ):
                 _reset_window(old_window, raw_window, used)
                 reset_window_keys.add(window_key)
