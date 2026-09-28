@@ -143,6 +143,7 @@ class ServiceTests(unittest.TestCase):
             patch("konvu_telemetry.collector.time.time", return_value=100.0),
             patch("konvu_telemetry.collector.ProviderLimitPoller") as poller,
             patch("konvu_telemetry.collector.build_snapshot", return_value={}) as build,
+            patch("konvu_telemetry.collector.write_provider_quotas") as write_quotas,
             patch("konvu_telemetry.collector.write_snapshot"),
             patch("konvu_telemetry.collector.write_health"),
             patch(
@@ -153,6 +154,7 @@ class ServiceTests(unittest.TestCase):
             poller.return_value.refresh.return_value = quotas
             collector_main(["once"])
         build.assert_called_once_with(100.0, provider_quotas=quotas)
+        write_quotas.assert_called_once_with(quotas)
 
     def test_usage_completeness_rejects_boolean_token_counters(self) -> None:
         self.assertTrue(
@@ -1291,6 +1293,16 @@ class ServiceTests(unittest.TestCase):
         )
         self.assertEqual([session["id"] for session in summary["sessions"]], ["recent"])
 
+    def test_snapshot_summary_keeps_account_quotas_in_their_own_file(self) -> None:
+        summary = summary_snapshot(
+            {
+                "generated_at": "2026-01-01T00:00:00Z",
+                "sessions": [],
+                "account_quotas": {"claude": {"windows": []}},
+            }
+        )
+        self.assertNotIn("account_quotas", summary)
+
     def test_snapshot_is_not_published_when_detail_write_fails(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             destination = Path(directory) / "live-sessions.json"
@@ -1395,6 +1407,43 @@ class ServiceTests(unittest.TestCase):
             DashboardRequestHandler._serve_json_file(handler, snapshot)
             handler.send_response.assert_called_once_with(304)
             handler._write_payload.assert_not_called()
+
+    def test_dashboard_combines_session_and_quota_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot = root / "live-sessions.json"
+            quotas = root / "account-quotas.json"
+            snapshot.write_text('{"generated_at":"2026-01-01T00:00:00Z","sessions":[]}')
+            quotas.write_text('{"claude":{"source":"provider_api","windows":[]}}')
+            handler = Mock()
+            handler.headers = {}
+            handler.snapshot_lock = None
+            with (
+                patch("konvu_telemetry.service.snapshot_path", return_value=snapshot),
+                patch(
+                    "konvu_telemetry.service.account_quotas_path",
+                    return_value=quotas,
+                ),
+            ):
+                DashboardRequestHandler._serve_live_snapshot(handler)
+                etag = next(
+                    call.args[1]
+                    for call in handler.send_header.call_args_list
+                    if call.args[0] == "ETag"
+                )
+                handler.reset_mock()
+                handler.headers = {"If-None-Match": etag}
+                DashboardRequestHandler._serve_live_snapshot(handler)
+                handler.send_response.assert_called_once_with(304)
+                handler.reset_mock()
+                quotas.write_text('{"claude":{"source":"provider_api","windows":[{}]}}')
+                DashboardRequestHandler._serve_live_snapshot(handler)
+            payload = json.loads(handler._write_payload.call_args.args[0])
+        self.assertEqual(
+            payload["account_quotas"],
+            {"claude": {"source": "provider_api", "windows": [{}]}},
+        )
+        handler.send_response.assert_called_once_with(200)
 
     def test_dashboard_open_records_whether_visible_data_exists(self) -> None:
         handler = object.__new__(DashboardRequestHandler)
@@ -1803,6 +1852,7 @@ class ServiceTests(unittest.TestCase):
                 "konvu_telemetry.display.recorded_quota_usage_text",
                 return_value=quota_text,
             ),
+            patch("konvu_telemetry.display.stored_provider_quotas", return_value={}),
             health_patch(health),
         ):
             statusline()
@@ -2291,6 +2341,7 @@ class ServiceTests(unittest.TestCase):
                 "konvu_telemetry.service.build_snapshot", side_effect=OSError("full")
             ),
             patch("konvu_telemetry.service.write_health", side_effect=OSError("full")),
+            patch("konvu_telemetry.service.write_provider_quotas"),
             patch("konvu_telemetry.service.record_collector_failure") as recorded,
             self.assertLogs("konvu_telemetry.service", level="ERROR"),
             self.assertRaises(StopIteration),
@@ -2383,6 +2434,7 @@ class ServiceTests(unittest.TestCase):
                 },
             ),
             patch("konvu_telemetry.service.write_snapshot"),
+            patch("konvu_telemetry.service.write_provider_quotas"),
             patch("konvu_telemetry.service.write_health"),
             patch("konvu_telemetry.service.record_first_snapshot_ready") as recorded,
             patch("konvu_telemetry.service.time.time", return_value=1_767_225_630.0),

@@ -10,7 +10,7 @@ The snapshot source and SHA-256 are recorded in `NOTICE`. The scheduled pricing 
 
 For supported Codex model calls, Konvu also calculates subscription-credit equivalents from OpenAI's published per-million-token rates. These values show how many credits the recorded tokens correspond to if credit billing applies; they do not claim that the call was charged, because included limits and flexible-plan controls are account state reported separately under `account_quotas`. Konvu does not convert credits to dollars because purchase prices can differ by plan or agreement.
 
-Account quota windows come only from the providers' live usage endpoints. A transient refresh failure keeps the last provider result for at most ten minutes and marks it stale; Konvu never substitutes transcript or hook-derived limits.
+Account quota windows come only from the providers' live usage endpoints. A transient refresh failure marks the last provider result stale and retains each window until its provider-reported reset; Konvu never substitutes transcript or hook-derived limits.
 
 ## Prompts, subagents, and context
 
@@ -20,7 +20,7 @@ Context is the latest provider-recorded input plus cache traffic for a model cal
 
 ## Account limits
 
-Account-limit percentages and reset times are provider-reported rather than estimated. Every two minutes, the collector reads Claude's five-hour and weekly windows from Anthropic's usage endpoint and asks Codex's local app-server for every reported rolling, monthly, model-specific, and denial state. Invalid percentages are rejected. Authentication failures clear the provider immediately; transient failures retain the last result for up to ten minutes with an explicit stale status, while expired windows and their plan flags are removed.
+Account-limit percentages and reset times are provider-reported rather than estimated. Every ten minutes, the collector reads Claude's five-hour and weekly windows from Anthropic's usage endpoint; every two minutes, it asks Codex's local app-server for every reported rolling, monthly, model-specific, and denial state. Invalid percentages are rejected. Authentication failures clear the provider immediately; transient failures retain unexpired windows with an explicit stale status, while expired windows and their plan flags are removed. A Claude 429 waits fifteen minutes before another request.
 
 ## Forecasts
 

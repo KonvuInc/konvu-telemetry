@@ -18,14 +18,19 @@ from typing import Callable, Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from .storage import snapshot_path
+from .storage import (
+    account_quotas_path,
+    snapshot_path,
+    write_private_json_if_changed,
+)
 
 
 CLAUDE_USAGE_ENDPOINT = "https://api.anthropic.com/api/oauth/usage"
 CODEX_USAGE_ENDPOINT = "https://chatgpt.com/backend-api/wham/usage"
 CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 POLL_INTERVAL_SECONDS = 120.0
-RESULT_GRACE_SECONDS = 10 * 60.0
+CLAUDE_POLL_INTERVAL_SECONDS = 10 * 60.0
+RATE_LIMIT_BACKOFF_SECONDS = 15 * 60.0
 REQUEST_TIMEOUT_SECONDS = 10.0
 MAX_RESPONSE_BYTES = 256 * 1024
 
@@ -80,12 +85,13 @@ class _NoRedirect(HTTPRedirectHandler):
 
 
 def stored_provider_quotas() -> dict[str, object]:
-    """Read only authoritative provider quotas from the canonical snapshot."""
-    try:
-        snapshot = json.loads(snapshot_path().read_text())
-    except (OSError, json.JSONDecodeError):
-        return {}
-    accounts = snapshot.get("account_quotas") if isinstance(snapshot, dict) else None
+    """Read authoritative provider quotas, including the legacy snapshot location."""
+    accounts: object = _read_json_object(account_quotas_path())
+    if accounts is None:
+        snapshot = _read_json_object(snapshot_path())
+        accounts = (
+            snapshot.get("account_quotas") if isinstance(snapshot, dict) else None
+        )
     if not isinstance(accounts, dict):
         return {}
     return {
@@ -94,6 +100,24 @@ def stored_provider_quotas() -> dict[str, object]:
         if isinstance((account := accounts.get(provider)), dict)
         and account.get("source") == "provider_api"
     }
+
+
+def write_provider_quotas(quotas: dict[str, object]) -> None:
+    """Persist the collector's provider quota view independently from sessions."""
+    normalized = {
+        provider: quota
+        for provider in ("claude", "codex")
+        if isinstance((quota := quotas.get(provider)), dict)
+    }
+    write_private_json_if_changed(account_quotas_path(), normalized)
+
+
+def _read_json_object(path: Path) -> dict[str, object] | None:
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def _iso_now(now: float) -> str:
@@ -734,7 +758,6 @@ class ProviderLimitPoller:
         self._next_at = {"claude": 0.0, "codex": 0.0}
         self._failures = {"claude": 0, "codex": 0}
         self._snapshots: dict[str, dict[str, object] | None] = {}
-        self._last_success_at: dict[str, float] = {}
         self._failure_reasons: dict[str, FailureReason | None] = {}
         self._error_codes: dict[str, int | None] = {}
         for provider in self._fetchers:
@@ -748,21 +771,16 @@ class ProviderLimitPoller:
             observed = _iso_reset(initial.get("observed_at"))
             if observed is None:
                 continue
-            self._snapshots[provider] = initial
-            self._last_success_at[provider] = datetime.fromisoformat(
-                observed
-            ).timestamp()
+            canonical = dict(initial)
+            for display_field in ("status", "failure", "error_code"):
+                canonical.pop(display_field, None)
+            self._snapshots[provider] = canonical
 
     def _visible_snapshot(self, provider: str, now: float) -> dict[str, object]:
         snapshot = self._snapshots.get(provider)
-        last_success = self._last_success_at.get(provider)
         failure = self._failure_reasons.get(provider)
         error_code = self._error_codes.get(provider)
-        if (
-            snapshot is not None
-            and last_success is not None
-            and now - last_success <= RESULT_GRACE_SECONDS
-        ):
+        if snapshot is not None:
             if failure is None:
                 return snapshot
             visible = dict(snapshot)
@@ -790,11 +808,12 @@ class ProviderLimitPoller:
                         "rate_limit_reached_type",
                     ):
                         visible.pop(key, None)
-            visible["status"] = "stale"
-            visible["failure"] = failure
-            if error_code is not None:
-                visible["error_code"] = error_code
-            return visible
+                if visible_windows:
+                    visible["status"] = "stale"
+                    visible["failure"] = failure
+                    if error_code is not None:
+                        visible["error_code"] = error_code
+                    return visible
         unavailable: dict[str, object] = {
             "source": "provider_api",
             "status": "unavailable",
@@ -825,12 +844,10 @@ class ProviderLimitPoller:
                     )
                     if result.snapshot is not None:
                         self._snapshots[provider] = result.snapshot
-                        self._last_success_at[provider] = now
                         self._failure_reasons[provider] = None
                         self._error_codes[provider] = None
                     elif result.unavailable:
                         self._snapshots[provider] = None
-                        self._last_success_at.pop(provider, None)
                         self._failure_reasons[provider] = failure
                         self._error_codes[provider] = result.error_code
                     else:
@@ -840,16 +857,25 @@ class ProviderLimitPoller:
                         self._failures[provider] = 0
                     else:
                         self._failures[provider] += 1
-                    failure_delay = min(
-                        15 * 60.0,
-                        POLL_INTERVAL_SECONDS
-                        * (2 ** max(0, self._failures[provider] - 1)),
-                    )
-                    delay = max(
-                        POLL_INTERVAL_SECONDS,
-                        failure_delay,
-                        result.retry_after_seconds or 0.0,
-                    )
+                    if result.snapshot is not None:
+                        delay = (
+                            CLAUDE_POLL_INTERVAL_SECONDS
+                            if provider == "claude"
+                            else POLL_INTERVAL_SECONDS
+                        )
+                    else:
+                        failure_delay = min(
+                            RATE_LIMIT_BACKOFF_SECONDS,
+                            POLL_INTERVAL_SECONDS
+                            * (2 ** max(0, self._failures[provider] - 1)),
+                        )
+                        if result.failure == "rate_limited":
+                            failure_delay = RATE_LIMIT_BACKOFF_SECONDS
+                        delay = max(
+                            POLL_INTERVAL_SECONDS,
+                            failure_delay,
+                            result.retry_after_seconds or 0.0,
+                        )
                     self._next_at[provider] = now + delay
         return {
             provider: self._visible_snapshot(provider, now)

@@ -19,7 +19,11 @@ from .display import (
     statusline,
 )
 from .exporter import write_normalized_events
-from .provider_limits import ProviderLimitPoller, stored_provider_quotas
+from .provider_limits import (
+    ProviderLimitPoller,
+    stored_provider_quotas,
+    write_provider_quotas,
+)
 from .service import (
     collector_process_lock,
     open_dashboard,
@@ -80,7 +84,8 @@ def main(arguments: list[str] | None = None) -> None:
                     initial_snapshots=stored_provider_quotas()
                 ).refresh(now)
             except Exception:
-                provider_quotas = {"claude": None, "codex": None}
+                provider_quotas = stored_provider_quotas()
+            write_provider_quotas(provider_quotas)
             write_snapshot(build_snapshot(now, provider_quotas=provider_quotas))
             write_health(now)
     elif args.command == "serve":
