@@ -40,6 +40,7 @@ from .live import CodexLiveFile, IncrementalLiveState
 from .models import UsageEvent
 from .parsers import (
     claude_client_in_file,
+    claude_subagent_metadata,
     claude_subagent_statuses,
     claude_titles_in_file,
     codex_client_in_file,
@@ -138,6 +139,7 @@ def build_snapshot(
     compact_times: dict[str, list[float]] = defaultdict(list)
     agent_spawn_times: dict[tuple[str, str], float] = {}
     agent_spawn_labels: dict[tuple[str, str], str] = {}
+    agent_metadata: dict[tuple[str, str], dict[str, str]] = {}
     claude_subagent_statuses_by_session: dict[str, dict[str, bool]] = defaultdict(dict)
     claude_titles: dict[str, str] = {}
     claude_clients: dict[str, str] = {}
@@ -204,6 +206,9 @@ def build_snapshot(
             agent_spawn_times.setdefault(key, timestamp)
         for key, label in spawned_agent_labels(transcript).items():
             agent_spawn_labels.setdefault(key, label)
+        if root_session_id is not None:
+            for agent_id, metadata in claude_subagent_metadata(transcript).items():
+                agent_metadata.setdefault((root_session_id, agent_id), metadata)
         source_events = (
             claude_cached.events.values()
             if claude_cached is not None
@@ -228,8 +233,8 @@ def build_snapshot(
         }
         all_subagent_ids = spawned_agent_ids | set(subagent_events)
         statuses = claude_subagent_statuses_by_session.get(session_id, {})
-        entry_context_tokens = sum(
-            min(agent_events, key=lambda event: event.timestamp).usage.context_tokens
+        subagent_context_tokens = sum(
+            max(agent_events, key=lambda event: event.timestamp).usage.context_tokens
             for agent_events in subagent_events.values()
         )
         subagent_costs = [
@@ -390,16 +395,25 @@ def build_snapshot(
                     1 for agent_id in all_subagent_ids if statuses.get(agent_id, False)
                 ),
                 "subagent_total": len(all_subagent_ids),
-                "subagent_entry_context_tokens": entry_context_tokens,
+                "subagent_context_tokens": subagent_context_tokens,
                 "subagent_cost_usd": round(sum(subagent_costs), 6),
                 "subagents": [
                     {
                         "id": agent_id,
-                        "label": agent_spawn_labels.get(
-                            (session_id, agent_id), "Claude subagent"
+                        "label": agent_metadata.get((session_id, agent_id), {}).get(
+                            "agent_type",
+                            agent_spawn_labels.get(
+                                (session_id, agent_id), "Claude subagent"
+                            ),
                         ),
-                        "entry_context_tokens": (
-                            min(
+                        "description": agent_metadata.get(
+                            (session_id, agent_id), {}
+                        ).get(
+                            "description",
+                            agent_spawn_labels.get((session_id, agent_id), ""),
+                        ),
+                        "context_tokens": (
+                            max(
                                 subagent_events[agent_id],
                                 key=lambda event: event.timestamp,
                             ).usage.context_tokens
@@ -495,7 +509,9 @@ def build_snapshot(
                 for event in raw_child_events
             ]
             codex_subagent_events[parent_id].extend(child_events)
-            entry_context = child_events[0].usage.context_tokens if child_events else 0
+            current_context = (
+                child_events[-1].usage.context_tokens if child_events else 0
+            )
             is_live = (
                 codex_cached.latest_started_at > codex_cached.latest_terminal_at
                 and now - codex_cached.latest_started_at <= ACTIVITY_FRESHNESS_SECONDS
@@ -503,7 +519,7 @@ def build_snapshot(
                 else codex_subagent_is_live(transcript, now)
             )
             codex_subagent_entries[parent_id].append(
-                (session_id, label, entry_context, is_live, child_events)
+                (session_id, label, current_context, is_live, child_events)
             )
             continue
         codex_title = (
@@ -665,7 +681,7 @@ def build_snapshot(
                     1 for _, _, _, is_live, _ in child_entries if is_live
                 ),
                 "subagent_total": len(child_entries),
-                "subagent_entry_context_tokens": sum(
+                "subagent_context_tokens": sum(
                     context for _, _, context, _, _ in child_entries
                 ),
                 "subagent_cost_usd": round(sum(known_child_costs), 6),
@@ -673,7 +689,7 @@ def build_snapshot(
                     {
                         "id": agent_id,
                         "label": label,
-                        "entry_context_tokens": context,
+                        "context_tokens": context,
                         "live": is_live,
                         "cost_usd": round(
                             sum(

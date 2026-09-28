@@ -785,6 +785,34 @@ def spawned_agent_labels(file_path: Path) -> dict[tuple[str, str], str]:
     return labels
 
 
+def claude_subagent_metadata(file_path: Path) -> dict[str, dict[str, str]]:
+    """Read Claude's local child type and task metadata for one root transcript."""
+    directory = file_path.parent / file_path.stem / "subagents"
+    if not directory.is_dir():
+        return {}
+    metadata: dict[str, dict[str, str]] = {}
+    for candidate in directory.glob("agent-*.meta.json"):
+        agent_id = candidate.name.removeprefix("agent-").removesuffix(".meta.json")
+        if not agent_id:
+            continue
+        try:
+            raw = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(raw, dict):
+            continue
+        agent_type = raw.get("agentType")
+        description = session_title(raw.get("description"))
+        fields: dict[str, str] = {}
+        if isinstance(agent_type, str) and agent_type:
+            fields["agent_type"] = agent_type
+        if description:
+            fields["description"] = description
+        if fields:
+            metadata[agent_id] = fields
+    return metadata
+
+
 def claude_subagent_statuses(root_transcript: Path, now: float) -> dict[str, bool]:
     """Return whether each Claude child transcript is still executing."""
     statuses: dict[str, bool] = {}
