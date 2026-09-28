@@ -127,6 +127,14 @@ def summary_snapshot(snapshot: dict[str, object]) -> dict[str, object]:
     return summary
 
 
+def _claude_subagent_display(
+    metadata: dict[str, str], fallback: str | None
+) -> tuple[str, str]:
+    """Return a Claude child task label and its optional agent type."""
+    label = metadata.get("description") or fallback or metadata.get("agent_type")
+    return label or "Claude subagent", metadata.get("agent_type", "")
+
+
 def build_snapshot(
     now: float,
     live_state: IncrementalLiveState | None = None,
@@ -400,18 +408,8 @@ def build_snapshot(
                 "subagents": [
                     {
                         "id": agent_id,
-                        "label": agent_metadata.get((session_id, agent_id), {}).get(
-                            "agent_type",
-                            agent_spawn_labels.get(
-                                (session_id, agent_id), "Claude subagent"
-                            ),
-                        ),
-                        "description": agent_metadata.get(
-                            (session_id, agent_id), {}
-                        ).get(
-                            "description",
-                            agent_spawn_labels.get((session_id, agent_id), ""),
-                        ),
+                        "label": label,
+                        "description": description,
                         "context_tokens": (
                             max(
                                 subagent_events[agent_id],
@@ -437,6 +435,12 @@ def build_snapshot(
                         else None,
                     }
                     for agent_id in sorted(all_subagent_ids)
+                    for metadata in [agent_metadata.get((session_id, agent_id), {})]
+                    for label, description in [
+                        _claude_subagent_display(
+                            metadata, agent_spawn_labels.get((session_id, agent_id))
+                        )
+                    ]
                 ],
                 "token_usage": {
                     "input": sum(event.usage.input_tokens for event in events),

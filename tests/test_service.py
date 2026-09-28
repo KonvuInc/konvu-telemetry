@@ -95,6 +95,7 @@ from konvu_telemetry.service import (
     write_health,
 )
 from konvu_telemetry.snapshot import (
+    _claude_subagent_display,
     build_snapshot,
     sampled_rows,
     sampled_rows_with_tail,
@@ -777,6 +778,18 @@ class ServiceTests(unittest.TestCase):
                     }
                 },
             )
+
+    def test_claude_child_display_prefers_its_task_over_agent_type(self) -> None:
+        self.assertEqual(
+            _claude_subagent_display(
+                {
+                    "agent_type": "general-purpose",
+                    "description": "Review the attribution reset behavior.",
+                },
+                "Older spawned task",
+            ),
+            ("Review the attribution reset behavior.", "general-purpose"),
+        )
 
     def test_codex_subagent_prefers_nickname_over_technical_path(self) -> None:
         parent_id = "00000000-0000-0000-0000-000000000001"
