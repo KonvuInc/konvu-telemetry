@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.3 - 2026-09-28
 
 - Let people choose how often the usage box appears, from `konvu-telemetry cadence`
   or the dashboard's settings panel: after every prompt, after every tool call (the
