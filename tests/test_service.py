@@ -1844,7 +1844,10 @@ class ServiceTests(unittest.TestCase):
         self,
     ) -> None:
         # The port comes from configuration, so an overridden one reaches every surface.
-        with patch("konvu_telemetry.display.DASHBOARD_PORT", 9999):
+        with (
+            patch("konvu_telemetry.display.DASHBOARD_PORT", 9999),
+            patch.dict(os.environ, {"NO_COLOR": "1"}),
+        ):
             outputs = self.surface_outputs({"status": "healthy"})
         link = "http://127.0.0.1:9999/"
         for surface, output in outputs.items():
@@ -2017,15 +2020,16 @@ class ServiceTests(unittest.TestCase):
             "seven_day": {"utilization": 0.52},
         }
         current_quotas = "6.0% 5-hour limit · 51.0% weekly limit"
-        output = self.run_statusline(
-            session,
-            {"status": "stale"},
-            {
-                "rate_limits": stale_quotas,
-                "context_window": {"used_percentage": 87.4},
-            },
-            current_quotas,
-        )
+        with patch.dict(os.environ, {"NO_COLOR": "1"}):
+            output = self.run_statusline(
+                session,
+                {"status": "stale"},
+                {
+                    "rate_limits": stale_quotas,
+                    "context_window": {"used_percentage": 87.4},
+                },
+                current_quotas,
+            )
         self.assertIn("● PAYING\n", output)
         self.assertIn("CURRENT SPEND $25.4 ━━━▶ $30.3", output)
         self.assertIn("FORECASTED IN NEXT 10 PROMPTS", output)
