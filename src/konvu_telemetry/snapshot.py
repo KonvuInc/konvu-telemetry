@@ -765,14 +765,16 @@ def write_snapshot(snapshot: dict[str, object]) -> None:
             continue
         write_private_json_if_changed(session_destination, session)
     write_private_json(destination, summary_snapshot(snapshot))
-    sessions_directory = home_dir() / "sessions"
     cutoff = time.time() - SESSION_FILE_RETENTION_SECONDS
-    try:
-        for candidate in sessions_directory.glob("*.json"):
-            if candidate.stat().st_mtime < cutoff:
-                candidate.unlink(missing_ok=True)
-    except OSError:
-        pass
+    # "shown" holds one per-session record per cadence decision and ages out on
+    # the same schedule as the session detail it refers to.
+    for directory in (home_dir() / "sessions", home_dir() / "shown"):
+        try:
+            for candidate in directory.glob("*.json"):
+                if candidate.stat().st_mtime < cutoff:
+                    candidate.unlink(missing_ok=True)
+        except OSError:
+            continue
 
 
 def load_snapshot() -> dict[str, object] | None:

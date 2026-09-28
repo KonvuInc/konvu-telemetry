@@ -63,7 +63,32 @@ def _print_cadence(preference: Preferences) -> None:
     )
 
 
-def _choose_cadence_interactively() -> None:
+def _save_cadence(
+    cadence: str, rule: str = "", jump_percent: float | None = None
+) -> bool:
+    """Store one choice, reporting a refusal or an unwritable home as a message.
+
+    Every write goes through here so no surface can reach the user as a traceback.
+    """
+    try:
+        preference = write_preferences(cadence, rule, jump_percent)
+    except ValueError as error:
+        print(f"Nothing changed: {error}.")
+        return False
+    except OSError as error:
+        print(f"Could not save your choice: {error}.")
+        return False
+    _print_cadence(preference)
+    if preference["cadence"] == "custom":
+        # A custom rule needs code, so hand over the prompt that writes it.
+        print("\nGive this to your coding agent:\n")
+        print(custom_rule_prompt(preference["custom_rule"]))
+    return True
+
+
+def _choose_cadence_interactively(
+    rule: str = "", jump_percent: float | None = None
+) -> None:
     """Offer the same options the dashboard shows, numbered for the terminal."""
     options = list(CADENCES.items())
     current = read_preferences()
@@ -88,17 +113,15 @@ def _choose_cadence_interactively() -> None:
         return
     cadence = options[choice - 1][0]
     if cadence != "custom":
-        _print_cadence(write_preferences(cadence))
+        _save_cadence(cadence, jump_percent=jump_percent)
         return
-    try:
-        rule = input("Describe your rule: ").strip()
-    except (EOFError, KeyboardInterrupt):
-        print()
-        return
-    preference = write_preferences("custom", rule)
-    # A custom rule needs code, so hand over the prompt that writes it.
-    print("\nGive this to your coding agent:\n")
-    print(custom_rule_prompt(preference["custom_rule"]))
+    if not rule:
+        try:
+            rule = input("Describe your rule: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+    _save_cadence("custom", rule, jump_percent)
 
 
 def cadence_main(arguments: list[str]) -> None:
@@ -127,24 +150,22 @@ def cadence_main(arguments: list[str]) -> None:
         help="Print the current choice and exit without changing it.",
     )
     args = parser.parse_args(arguments)
+    # Validated before either branch, so a bad threshold cannot slip through the
+    # interactive path after the non-interactive one has rejected it.
+    if args.jump_percent is not None and args.jump_percent <= 0:
+        parser.error("--jump-percent must be greater than zero")
     if args.status:
+        if args.cadence or args.rule or args.jump_percent is not None:
+            parser.error("--status only reports the current choice; it cannot set one")
         _print_cadence(read_preferences())
         return
     if args.cadence is None:
-        _choose_cadence_interactively()
+        # The flags are carried into the menu rather than dropped, so a value the
+        # user passed is never ignored while the command reports success.
+        _choose_cadence_interactively(args.rule, args.jump_percent)
         return
-    if args.jump_percent is not None and args.jump_percent <= 0:
-        # Dropping it silently would report success for a threshold never stored.
-        parser.error("--jump-percent must be greater than zero")
-    try:
-        preference = write_preferences(args.cadence, args.rule, args.jump_percent)
-    except ValueError as error:
-        # A rejected setting is a usage mistake, not a crash; exit 2 like argparse.
-        parser.error(str(error))
-    _print_cadence(preference)
-    if preference["cadence"] == "custom":
-        print("\nGive this to your coding agent:\n")
-        print(custom_rule_prompt(preference["custom_rule"]))
+    if not _save_cadence(args.cadence, args.rule, args.jump_percent):
+        raise SystemExit(2)
 
 
 def main(arguments: list[str] | None = None) -> None:

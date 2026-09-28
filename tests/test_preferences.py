@@ -1,4 +1,6 @@
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
+from io import StringIO
+import json
 import os
 import tempfile
 from typing import Iterator
@@ -6,14 +8,18 @@ import unittest
 from unittest.mock import patch
 
 from konvu_telemetry.display import (
+    _binding_quota_window,
     _current_usage_percent,
     record_usage_shown,
     should_show_usage,
 )
-from konvu_telemetry.storage import custom_rule_module_path
+from konvu_telemetry.cli import cadence_main
+from konvu_telemetry.storage import custom_rule_module_path, preferences_path
 from konvu_telemetry.preferences import (
     CADENCES,
     DEFAULT_CADENCE,
+    DEFAULT_JUMP_PERCENT,
+    MAX_CUSTOM_RULE_LENGTH,
     custom_rule_prompt,
     read_preferences,
     write_preferences,
@@ -162,13 +168,19 @@ class PreferencesTests(unittest.TestCase):
             self.assertEqual(_current_usage_percent("codex"), 45.0)
 
     @contextmanager
-    def binding_window(self, resets_at: str, used_percent: float) -> Iterator[None]:
+    def binding_window(
+        self,
+        resets_at: str,
+        used_percent: float,
+        provider: str = "claude",
+        period: str = "five_hour",
+    ) -> Iterator[None]:
         """Pretend the provider reports one limit window at a given usage."""
         quotas = {
-            "claude": {
+            provider: {
                 "windows": [
                     {
-                        "period": "five_hour",
+                        "period": period,
                         "limit_id": "default",
                         "used_percent": used_percent,
                         "resets_at": resets_at,
@@ -180,6 +192,121 @@ class PreferencesTests(unittest.TestCase):
             "konvu_telemetry.display.stored_provider_quotas", return_value=quotas
         ):
             yield
+
+    def test_a_rolled_over_window_re_arms_even_when_usage_climbed(self) -> None:
+        """Guards the window identity on its own, without help from the drop check."""
+        write_preferences("usage-jump", jump_percent=50.0)
+        with self.binding_window("w1", 10.0):
+            self.assertTrue(should_show_usage("claude", "s"))
+            record_usage_shown("claude", "s")
+        # Higher than the baseline but under the threshold, so only the changed
+        # window identity can explain a box here.
+        with self.binding_window("w2", 20.0):
+            self.assertTrue(should_show_usage("claude", "s"))
+
+    def test_a_figure_that_went_backwards_re_arms_within_one_window(self) -> None:
+        """Guards the drop check on its own, with the window identity held fixed."""
+        write_preferences("usage-jump", jump_percent=50.0)
+        with self.binding_window("w1", 80.0):
+            self.assertTrue(should_show_usage("claude", "s"))
+            record_usage_shown("claude", "s")
+            self.assertFalse(should_show_usage("claude", "s"))
+        with self.binding_window("w1", 79.0):
+            self.assertTrue(should_show_usage("claude", "s"))
+
+    def test_equal_buckets_pick_the_same_one_whatever_the_order(self) -> None:
+        """Two buckets at the same percent must not look like a jump on reorder."""
+        windows = [
+            {
+                "period": "weekly",
+                "limit_id": "a",
+                "used_percent": 40.0,
+                "resets_at": "r",
+            },
+            {
+                "period": "weekly",
+                "limit_id": "b",
+                "used_percent": 40.0,
+                "resets_at": "r",
+            },
+        ]
+        keys = []
+        for ordering in (windows, list(reversed(windows))):
+            with patch(
+                "konvu_telemetry.display.stored_provider_quotas",
+                return_value={"codex": {"windows": ordering}},
+            ):
+                keys.append(_binding_quota_window("codex"))
+        self.assertEqual(keys[0], keys[1])
+
+    def test_an_unavailable_provider_shows_once_rather_than_every_turn(self) -> None:
+        write_preferences("usage-jump", jump_percent=1.0)
+        with patch(
+            "konvu_telemetry.display.stored_provider_quotas",
+            return_value={"codex": {"status": "unavailable", "windows": []}},
+        ):
+            self.assertTrue(should_show_usage("codex", "s"))
+            record_usage_shown("codex", "s")
+            self.assertFalse(should_show_usage("codex", "s"))
+        # Once the provider answers again the figure is real, so the box returns.
+        with self.binding_window("w1", 5.0, provider="codex", period="weekly"):
+            self.assertTrue(should_show_usage("codex", "s"))
+
+    def test_an_over_long_rule_is_refused_rather_than_stored_in_part(self) -> None:
+        with self.assertRaises(ValueError):
+            write_preferences("custom", "x" * (MAX_CUSTOM_RULE_LENGTH + 1))
+        self.assertEqual(read_preferences()["cadence"], DEFAULT_CADENCE)
+
+    def test_a_hand_edited_file_cannot_turn_custom_into_always_show(self) -> None:
+        for stored in ({"cadence": "custom", "custom_rule": ""}, {"cadence": "custom"}):
+            preferences_path().write_text(json.dumps(stored))
+            self.assertEqual(read_preferences()["cadence"], DEFAULT_CADENCE)
+        # A jump threshold that is not a positive number is dropped, not honoured.
+        for bad in ("5", 0, -1, True):
+            preferences_path().write_text(
+                json.dumps({"cadence": "usage-jump", "jump_percent": bad})
+            )
+            self.assertEqual(read_preferences()["jump_percent"], DEFAULT_JUMP_PERCENT)
+
+    def test_a_file_that_is_not_utf8_still_honours_the_chosen_cadence(self) -> None:
+        """A latin-1 byte from an editor must not raise into a hook or the API."""
+        preferences_path().write_bytes(
+            b'{"cadence": "never", "custom_rule": "\xe0 80%"}'
+        )
+        self.assertEqual(read_preferences()["cadence"], "never")
+        self.assertFalse(should_show_usage("claude", "s", tool_calls=5))
+        # Unparseable content is a different case: there is no choice left to honour.
+        preferences_path().write_bytes(b'{"cadence": "never"')
+        self.assertEqual(read_preferences()["cadence"], DEFAULT_CADENCE)
+
+    def test_the_menu_keeps_the_threshold_passed_on_the_command_line(self) -> None:
+        """A flag given without a cadence must reach the write, not be dropped."""
+        with patch("builtins.input", return_value="3"), redirect_stdout(StringIO()):
+            cadence_main(["--jump-percent", "25"])
+        stored = read_preferences()
+        self.assertEqual(stored["cadence"], "usage-jump")
+        self.assertEqual(stored["jump_percent"], 25.0)
+
+    def test_the_menu_reports_an_empty_custom_rule_instead_of_crashing(self) -> None:
+        output = StringIO()
+        with patch("builtins.input", side_effect=["5", "  "]), redirect_stdout(output):
+            cadence_main([])
+        self.assertIn("Nothing changed", output.getvalue())
+        self.assertEqual(read_preferences()["cadence"], DEFAULT_CADENCE)
+
+    def test_an_unwritable_home_is_reported_rather_than_raised(self) -> None:
+        output = StringIO()
+        with (
+            patch(
+                "konvu_telemetry.cli.write_preferences",
+                side_effect=OSError(13, "Permission denied"),
+            ),
+            redirect_stdout(output),
+        ):
+            with self.assertRaises(SystemExit) as exit_code:
+                cadence_main(["never"])
+        self.assertEqual(exit_code.exception.code, 2)
+        self.assertIn("Could not save your choice", output.getvalue())
 
     def test_the_agent_prompt_is_actionable_without_reading_the_codebase(self) -> None:
         prompt = custom_rule_prompt("only above 80% weekly")

@@ -20,7 +20,9 @@ Konvu Telemetry is one Python package with a single resident process. The proces
 - Every usage summary ends with one dashboard line: the `DASHBOARD_PORT` loopback URL when `service.load_health()` reports `healthy`, and otherwise the `konvu-telemetry setup` command that installs and starts the collector serving it. Only `healthy` counts as reachable; `stale`, `starting`, a missing or unreadable health record, and a failed read all show the command, because a dead link costs more than a redundant hint. No surface opens a socket to decide this.
 - When a usage box is shown is the user's choice, stored in `preferences.json` and read fresh on every turn. The choices are after every prompt, after every tool call (the default), only when the binding limit has moved by `jump_percent`, never, and a custom rule. No check outside that choice suppresses a box: the cadence is the only gate, so a widening choice actually widens. The Claude CLI status line is deliberately exempt, because it is ambient and always current.
 - Tool counts feed the cadence rather than gating ahead of it. The prompt hooks read the rendered session's `last_task_tool_calls`; the Codex `Stop` hook counts tool calls on the exact turn it fires on, which is more precise for that one hook. A missing or non-integer count reads as zero.
-- The `usage-jump` cadence compares against the last figure a box actually displayed, recorded after printing rather than when the decision was made, so a turn that decided to show but rendered nothing does not consume the jump. Each stored figure carries the identity of the window it came from — provider, period, limit bucket and reset time — so a rolled-over window or a different Codex bucket re-arms the box instead of silencing it.
+- The `usage-jump` cadence watches one window per provider: the five-hour window for Claude and the weekly one for Codex, taking the busiest limit bucket when the provider reports several. Movement in any other window does not trigger it.
+- Its baseline is recorded once the hook has emitted the box rather than when the gate decided to, so a turn that decided to show and then rendered nothing does not consume the jump. The two desktop surfaces inject the box as model context, so "emitted" there means handed to the model, which may still decline to render it.
+- Each stored figure carries the identity of the window it came from — provider, period, limit bucket and reset time — so a rolled-over window, a different bucket, or a provider outage re-arms the box instead of silencing it. While the provider's figures are unavailable the box shows once and then waits, rather than firing every turn.
 - A custom rule is the user's own `custom_rule.py`, executed on every turn. It lives outside the package so an upgrade cannot replace it, and any failure to import or run it shows the box: staying silent is the worse failure.
 
 ## Runtime flow
@@ -51,7 +53,7 @@ Konvu Telemetry is one Python package with a single resident process. The proces
 | `~/.konvu/telemetry/preferences.json` | Chosen display cadence, custom rule text and jump threshold | `0600` |
 | `~/.konvu/telemetry/preferences.lock` | Cross-process lock so the command and dashboard cannot revert each other | `0600` |
 | `~/.konvu/telemetry/custom_rule.py` | User-authored `should_show(context)` rule, kept outside the package so upgrades cannot erase it | User-owned |
-| `~/.konvu/telemetry/shown/*.json` | Per-session record of the usage figure the last box displayed | `0600` |
+| `~/.konvu/telemetry/shown/*.json` | Per-session record of the usage figure the last box displayed, pruned on the session retention schedule | `0600` |
 | `~/.konvu/telemetry/collector*.log` | LaunchAgent stdout and stderr | User-owned |
 | `~/Library/LaunchAgents/com.konvu.telemetry.plist` | Per-user service definition | User-owned |
 | `~/.claude/settings.json` | Optional Claude status line plus `UserPromptSubmit` hook merge | `0600` after write |
