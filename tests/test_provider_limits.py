@@ -25,6 +25,7 @@ from konvu_telemetry.provider_limits import (
     fetch_codex_limits,
     read_claude_access_token,
     stored_provider_quotas,
+    write_provider_quotas,
 )
 from konvu_telemetry.fleet_telemetry import enrich_snapshot
 
@@ -302,9 +303,9 @@ class ProviderLimitsTests(unittest.TestCase):
         poller = ProviderLimitPoller(claude, codex)
 
         self.assertEqual(set(poller.refresh(100)), {"claude", "codex"})
-        poller.refresh(219)
+        poller.refresh(699)
         self.assertEqual(claude.call_count, 1)
-        snapshots = poller.refresh(220)
+        snapshots = poller.refresh(700)
         self.assertEqual(
             snapshots["claude"],
             {
@@ -332,22 +333,37 @@ class ProviderLimitsTests(unittest.TestCase):
         self.assertEqual(claude["status"], "stale")
         self.assertEqual(claude["windows"], [{"used_percent": 7.0}])
 
-    @patch("konvu_telemetry.provider_limits.snapshot_path")
+    def test_poller_replaces_persisted_failure_metadata_after_restart(self) -> None:
+        poller = ProviderLimitPoller(
+            Mock(return_value=FetchResult(None, failure="network_error")),
+            Mock(return_value=FetchResult(None, unavailable=True)),
+            initial_snapshots={
+                "claude": {
+                    "source": "provider_api",
+                    "observed_at": "1970-01-01T00:01:40+00:00",
+                    "status": "stale",
+                    "failure": "rate_limited",
+                    "error_code": 429,
+                    "windows": [{"used_percent": 7.0}],
+                }
+            },
+        )
+
+        claude = poller.refresh(220)["claude"]
+        self.assertEqual(claude["failure"], "network_error")
+        self.assertNotIn("error_code", claude)
+
+    @patch("konvu_telemetry.provider_limits.account_quotas_path")
     def test_stored_quotas_accept_only_provider_api_results(
         self, mocked_path: Mock
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "live-sessions.json"
+            path = Path(directory) / "account-quotas.json"
             path.write_text(
                 json.dumps(
                     {
-                        "account_quotas": {
-                            "claude": {
-                                "source": "provider_api",
-                                "windows": [],
-                            },
-                            "codex": {"source": "local_fallback", "windows": []},
-                        }
+                        "claude": {"source": "provider_api", "windows": []},
+                        "codex": {"source": "local_fallback", "windows": []},
                     }
                 )
             )
@@ -356,6 +372,54 @@ class ProviderLimitsTests(unittest.TestCase):
                 stored_provider_quotas(),
                 {"claude": {"source": "provider_api", "windows": []}},
             )
+
+    def test_stored_quotas_migrate_from_the_legacy_session_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legacy = root / "live-sessions.json"
+            legacy.write_text(
+                json.dumps(
+                    {
+                        "account_quotas": {
+                            "claude": {
+                                "source": "provider_api",
+                                "windows": [{"used_percent": 7.0}],
+                            }
+                        }
+                    }
+                )
+            )
+            with (
+                patch(
+                    "konvu_telemetry.provider_limits.account_quotas_path",
+                    return_value=root / "missing.json",
+                ),
+                patch(
+                    "konvu_telemetry.provider_limits.snapshot_path",
+                    return_value=legacy,
+                ),
+            ):
+                stored = stored_provider_quotas()
+        self.assertEqual(stored["claude"]["windows"], [{"used_percent": 7.0}])
+
+    def test_provider_quotas_are_private_and_exclude_missing_results(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "account-quotas.json"
+            with patch(
+                "konvu_telemetry.provider_limits.account_quotas_path",
+                return_value=destination,
+            ):
+                write_provider_quotas(
+                    {
+                        "claude": {"source": "provider_api", "windows": []},
+                        "codex": None,
+                    }
+                )
+            self.assertEqual(
+                json.loads(destination.read_text()),
+                {"claude": {"source": "provider_api", "windows": []}},
+            )
+            self.assertEqual(destination.stat().st_mode & 0o777, 0o600)
 
     def test_poller_clears_confirmed_unavailability(self) -> None:
         claude = Mock(
@@ -376,8 +440,8 @@ class ProviderLimitsTests(unittest.TestCase):
         )
 
         poller.refresh(100)
-        self.assertEqual(poller.refresh(220)["claude"]["status"], "stale")
-        unavailable = poller.refresh(340)["claude"]
+        self.assertEqual(poller.refresh(700)["claude"]["status"], "stale")
+        unavailable = poller.refresh(820)["claude"]
         self.assertEqual(
             unavailable,
             {
@@ -389,7 +453,7 @@ class ProviderLimitsTests(unittest.TestCase):
             },
         )
 
-    def test_poller_expires_a_stale_result_after_ten_minutes(self) -> None:
+    def test_poller_retains_a_valid_window_beyond_ten_minutes(self) -> None:
         claude = Mock(
             side_effect=[
                 FetchResult({"windows": [{"used_percent": 7.0}]}),
@@ -403,11 +467,12 @@ class ProviderLimitsTests(unittest.TestCase):
         )
 
         poller.refresh(100)
-        self.assertEqual(poller.refresh(220)["claude"]["status"], "stale")
-        unavailable = poller.refresh(701)["claude"]
-        self.assertEqual(unavailable["status"], "unavailable")
-        self.assertEqual(unavailable["failure"], "network_error")
-        self.assertEqual(unavailable["windows"], [])
+        stale = poller.refresh(700)["claude"]
+        self.assertEqual(stale["status"], "stale")
+        self.assertEqual(stale["windows"], [{"used_percent": 7.0}])
+        stale = poller.refresh(820)["claude"]
+        self.assertEqual(stale["status"], "stale")
+        self.assertEqual(stale["windows"], [{"used_percent": 7.0}])
 
     def test_poller_drops_expired_windows_and_stale_plan_flags(self) -> None:
         claude = Mock(
@@ -433,11 +498,39 @@ class ProviderLimitsTests(unittest.TestCase):
         )
 
         poller.refresh(100)
-        stale = poller.refresh(220)["claude"]
-        self.assertEqual(stale["status"], "stale")
-        self.assertEqual(stale["windows"], [])
-        self.assertNotIn("ordinary_usage_allowed", stale)
-        self.assertNotIn("limit_states", stale)
+        unavailable = poller.refresh(700)["claude"]
+        self.assertEqual(unavailable["status"], "unavailable")
+        self.assertEqual(unavailable["windows"], [])
+        self.assertNotIn("ordinary_usage_allowed", unavailable)
+        self.assertNotIn("limit_states", unavailable)
+
+    def test_successful_claude_fetches_are_ten_minutes_apart(self) -> None:
+        claude = Mock(return_value=FetchResult({"windows": []}))
+        poller = ProviderLimitPoller(
+            claude,
+            Mock(return_value=FetchResult(None, unavailable=True)),
+        )
+
+        poller.refresh(100)
+        poller.refresh(699)
+        self.assertEqual(claude.call_count, 1)
+        poller.refresh(700)
+        self.assertEqual(claude.call_count, 2)
+
+    def test_rate_limits_back_off_immediately_for_fifteen_minutes(self) -> None:
+        claude = Mock(
+            return_value=FetchResult(None, failure="rate_limited", error_code=429)
+        )
+        poller = ProviderLimitPoller(
+            claude,
+            Mock(return_value=FetchResult(None, unavailable=True)),
+        )
+
+        poller.refresh(100)
+        poller.refresh(999)
+        self.assertEqual(claude.call_count, 1)
+        poller.refresh(1000)
+        self.assertEqual(claude.call_count, 2)
 
     def test_poller_respects_provider_retry_after(self) -> None:
         claude = Mock(return_value=FetchResult(None, 300))
