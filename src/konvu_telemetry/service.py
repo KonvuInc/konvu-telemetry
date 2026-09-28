@@ -14,9 +14,11 @@ import os
 from pathlib import Path
 from socket import socket
 from socketserver import BaseServer
+import signal
+import subprocess
 from threading import Condition, Lock, Thread
 import time
-from typing import Iterator
+from typing import IO, Callable, Iterator
 from urllib.parse import parse_qs, urlparse
 import webbrowser
 
@@ -61,9 +63,72 @@ _DASHBOARD_DATA_AVAILABLE = False
 REFRESH_TIMEOUT_SECONDS = 30
 
 
+# How long a departing collector is given to close its socket and let go.
+HANDOVER_TIMEOUT_SECONDS = 15.0
+HANDOVER_POLL_SECONDS = 0.25
+
+
+def _process_is_a_collector(pid: int) -> bool:
+    """Whether this pid is really our collector, and not a reused number.
+
+    A pid is recycled the moment its process ends, so the recorded number alone
+    is never enough to justify signalling it.
+    """
+    if pid <= 1 or pid == os.getpid():
+        return False
+    try:
+        completed = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    command = completed.stdout.strip()
+    # Our own package or console script, in either spelling. Matching the word
+    # "serve" as well would miss the entry point, which does not carry it.
+    return "konvu_telemetry" in command or "konvu-telemetry" in command
+
+
+def _recorded_lock_holder(handle: IO[str]) -> int | None:
+    try:
+        handle.seek(0)
+        return int(handle.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _ask_holder_to_stand_down(handle: IO[str]) -> bool:
+    """Signal the running collector and wait for its lock, after an upgrade.
+
+    Homebrew leaves the old process running, so without a handover the new one
+    exits and the old code keeps serving until someone re-runs setup.
+    """
+    pid = _recorded_lock_holder(handle)
+    if pid is None or not _process_is_a_collector(pid):
+        return False
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except (OSError, ProcessLookupError):
+        return False
+    deadline = time.monotonic() + HANDOVER_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            time.sleep(HANDOVER_POLL_SECONDS)
+    return False
+
+
 @contextmanager
-def collector_process_lock() -> Iterator[None]:
-    """Prevent two collector processes from writing the canonical snapshot."""
+def collector_process_lock(take_over: bool = False) -> Iterator[None]:
+    """Prevent two collector processes from writing the canonical snapshot.
+
+    The long-running service takes the lock over from an older collector; a
+    one-shot run does not, because there is nothing for it to keep serving.
+    """
     path = collector_lock_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+") as handle:
@@ -71,9 +136,10 @@ def collector_process_lock() -> Iterator[None]:
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
-            raise SystemExit(
-                "Another Konvu telemetry collector is already running"
-            ) from error
+            if not (take_over and _ask_holder_to_stand_down(handle)):
+                raise SystemExit(
+                    "Another Konvu telemetry collector is already running"
+                ) from error
         handle.seek(0)
         handle.truncate()
         handle.write(str(os.getpid()))
@@ -230,12 +296,26 @@ def load_health(now: float | None = None) -> dict[str, object]:
     return payload
 
 
+def package_was_replaced() -> bool:
+    """Whether the code this process is running has been replaced on disk.
+
+    An upgrade installs into a new directory and deletes the old one, but the
+    running collector keeps serving from memory. Its own module file vanishing
+    is the cheapest reliable signal that it is now the previous version.
+    """
+    try:
+        return not Path(__file__).exists()
+    except OSError:
+        return False
+
+
 def collect_forever(
     interval_seconds: int,
     live_state: IncrementalLiveState,
     snapshot_lock: Lock,
     refresh_coordinator: RefreshCoordinator | None = None,
     provider_limit_poller: ProviderLimitPoller | None = None,
+    on_stale_install: Callable[[], None] | None = None,
 ) -> None:
     """Refresh local session files until the operating system stops the service."""
     global _DASHBOARD_DATA_AVAILABLE
@@ -244,6 +324,14 @@ def collect_forever(
         initial_snapshots=stored_provider_quotas()
     )
     while True:
+        if package_was_replaced():
+            # Exiting hands the service back to launchd, which starts it again
+            # from the new install; staying would serve the old code forever.
+            # The collector runs in a daemon thread, so the whole process has to
+            # be told to stop, not just this loop.
+            if on_stale_install is not None:
+                on_stale_install()
+            return
         coordinator.start_collection()
         started_at = time.time()
         collection_error = None
@@ -547,6 +635,8 @@ def _run_local_service(interval_seconds: int, port: int) -> None:
     collector = Thread(
         target=collect_forever,
         args=(interval_seconds, live_state, snapshot_lock, refresh_coordinator),
+        # shutdown() must be called from another thread than serve_forever.
+        kwargs={"on_stale_install": server.shutdown},
         daemon=True,
     )
     initialize_dashboard_data_available()
@@ -558,11 +648,11 @@ def _run_local_service(interval_seconds: int, port: int) -> None:
     )
     try:
         server.serve_forever()
-    except KeyboardInterrupt:
+    finally:
         server.server_close()
 
 
 def run_local_service(interval_seconds: int, port: int) -> None:
     """Run the sole collector and localhost dashboard process."""
-    with collector_process_lock():
+    with collector_process_lock(take_over=True):
         _run_local_service(interval_seconds, port)

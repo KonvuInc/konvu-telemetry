@@ -8,11 +8,12 @@ import os
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 from threading import Event, Lock, Thread
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -128,6 +129,71 @@ class ServiceTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(SystemExit, "port 7824 is already in use"):
                 service._run_local_service(60, 7824)
+
+    def test_the_collector_stops_once_its_own_code_is_replaced(self) -> None:
+        """An upgrade deletes the old install; the loop must not serve it on."""
+        self.assertFalse(service.package_was_replaced())
+        with patch("konvu_telemetry.service.Path") as path:
+            path.return_value.exists.return_value = False
+            self.assertTrue(service.package_was_replaced())
+            # The loop returns instead of collecting, so launchd restarts it.
+            coordinator = service.RefreshCoordinator()
+            with patch.object(coordinator, "start_collection") as collect:
+                service.collect_forever(1, MagicMock(), Lock(), coordinator)
+            collect.assert_not_called()
+
+    def test_a_one_shot_run_never_takes_the_lock_from_a_running_collector(self) -> None:
+        """Only the long-running service hands over; `once` has nothing to serve."""
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+            patch("konvu_telemetry.service._ask_holder_to_stand_down") as handover,
+        ):
+            with service.collector_process_lock():
+                with self.assertRaises(SystemExit):
+                    with service.collector_process_lock():
+                        pass
+            handover.assert_not_called()
+
+    def test_the_service_takes_the_lock_over_from_an_older_collector(self) -> None:
+        """An upgrade must not leave the previous version serving forever."""
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+        ):
+            with patch(
+                "konvu_telemetry.service._ask_holder_to_stand_down", return_value=True
+            ) as handover:
+                with service.collector_process_lock():
+                    with service.collector_process_lock(take_over=True):
+                        pass
+                handover.assert_called_once()
+            # A holder that will not stand down still stops the newcomer, rather
+            # than letting two collectors write the same snapshot.
+            with patch(
+                "konvu_telemetry.service._ask_holder_to_stand_down", return_value=False
+            ):
+                with service.collector_process_lock():
+                    with self.assertRaises(SystemExit):
+                        with service.collector_process_lock(take_over=True):
+                            pass
+
+    def test_only_a_konvu_collector_is_ever_signalled(self) -> None:
+        """A pid is recycled the instant its process ends, so identity is checked."""
+        with patch("konvu_telemetry.service.subprocess.run") as run:
+            run.return_value = SimpleNamespace(stdout="/bin/sleep 60")
+            self.assertFalse(service._process_is_a_collector(4242))
+            run.return_value = SimpleNamespace(
+                stdout="/usr/bin/python /x/konvu-telemetry serve"
+            )
+            self.assertTrue(service._process_is_a_collector(4242))
+            run.return_value = SimpleNamespace(
+                stdout='python -c from konvu_telemetry.collector import main; main(["serve"])'
+            )
+            self.assertTrue(service._process_is_a_collector(4242))
+        # Our own pid and init are never candidates, whatever ps would say.
+        self.assertFalse(service._process_is_a_collector(os.getpid()))
+        self.assertFalse(service._process_is_a_collector(1))
 
     def test_collector_process_lock_rejects_a_second_writer(self) -> None:
         with (
