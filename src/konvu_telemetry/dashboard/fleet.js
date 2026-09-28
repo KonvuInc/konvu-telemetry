@@ -1427,6 +1427,94 @@ function renderFreshness(stale) {
   button.setAttribute("aria-label", button.title);
   button.classList.toggle("stale", Boolean(stale));
 }
+/* ============ settings: display cadence ============
+   The cadence governs the usage box injected into a CLI turn. A custom rule
+   needs code, so the dashboard stores the wording and hands back a prompt for
+   the user's own agent rather than pretending it took effect. */
+const cadenceState = { options: [], cadence: "", custom_rule: "", loaded: false };
+async function loadPreferences() {
+  if (previewMode) return;
+  try {
+    const response = await fetch("/api/preferences", { cache: "no-store" });
+    if (!response.ok) return;
+    const value = await response.json();
+    Object.assign(cadenceState, value, { loaded: true });
+    renderCadenceOptions();
+  } catch {
+    return;
+  }
+}
+function renderCadenceOptions() {
+  const host = $("#cadence-options");
+  if (!host || !cadenceState.loaded) return;
+  host.innerHTML = cadenceState.options
+    .map(
+      (option) =>
+        '<button class="cadence-option" role="radio" type="button" data-cadence="' +
+        esc(option.id) + '" aria-checked="' + String(option.id === cadenceState.cadence) + '">' +
+        "<b>" + esc(option.label) + "</b></button>"
+    )
+    .join("");
+  const custom = $("#cadence-custom");
+  if (custom) custom.hidden = cadenceState.cadence !== "custom";
+  const rule = $("#cadence-rule");
+  if (rule && document.activeElement !== rule) rule.value = cadenceState.custom_rule || "";
+}
+function openSettings() {
+  $("#settings-panel").hidden = false;
+  $("#settings-backdrop").hidden = false;
+  document.querySelector("main").inert = true;
+  loadPreferences();
+}
+function closeSettings() {
+  $("#settings-panel").hidden = true;
+  $("#settings-backdrop").hidden = true;
+  document.querySelector("main").inert = false;
+  $("#settings-open")?.focus();
+}
+async function saveCadence() {
+  const status = $("#cadence-status");
+  const body = { cadence: cadenceState.cadence, custom_rule: $("#cadence-rule")?.value || "" };
+  try {
+    const response = await fetch("/api/preferences", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) throw new Error("save failed");
+    const saved = await response.json();
+    Object.assign(cadenceState, saved);
+    renderCadenceOptions();
+    if (status) status.textContent = "Saved";
+    const promptBox = $("#cadence-prompt");
+    if (promptBox) {
+      promptBox.hidden = !saved.agent_prompt;
+      $("#cadence-prompt-text").textContent = saved.agent_prompt || "";
+    }
+  } catch {
+    if (status) status.textContent = "Couldn’t save — is the collector running?";
+  }
+}
+function bindSettings() {
+  $("#settings-open")?.addEventListener("click", openSettings);
+  $("#settings-close")?.addEventListener("click", closeSettings);
+  $("#settings-backdrop")?.addEventListener("click", closeSettings);
+  $("#cadence-save")?.addEventListener("click", saveCadence);
+  $("#cadence-copy")?.addEventListener("click", () => {
+    navigator.clipboard?.writeText($("#cadence-prompt-text").textContent || "");
+    $("#cadence-status").textContent = "Prompt copied";
+  });
+  document.addEventListener("click", (event) => {
+    const option = event.target instanceof Element ? event.target.closest("[data-cadence]") : null;
+    if (!option) return;
+    cadenceState.cadence = option.dataset.cadence;
+    $("#cadence-status").textContent = "";
+    renderCadenceOptions();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !$("#settings-panel").hidden) closeSettings();
+  });
+}
 function bindEvents() {
   $("#freshness").addEventListener("click", refreshNow);
   document.addEventListener(
@@ -2198,6 +2286,7 @@ function browserAlerts(payload) {
 initialUrl();
 bindEvents();
 bindNotificationPanel();
+bindSettings();
 refresh();
 setInterval(() => {
   renderFreshness(state.error || !state.payload || elapsed(state.payload.generated_at) > 120000);

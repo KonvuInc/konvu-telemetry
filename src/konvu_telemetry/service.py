@@ -28,6 +28,12 @@ from .config import (
 from .live import IncrementalLiveState
 from .provider_limits import ProviderLimitPoller, stored_provider_quotas
 from .snapshot import build_snapshot, write_snapshot
+from .preferences import (
+    CADENCES,
+    custom_rule_prompt,
+    read_preferences,
+    write_preferences,
+)
 from .storage import (
     collector_lock_path,
     health_path,
@@ -329,6 +335,16 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
         if path == "/api/live-sessions":
             self._serve_json_file(snapshot_path())
             return
+        if path == "/api/preferences":
+            self._send_json(
+                {
+                    **read_preferences(),
+                    "options": [
+                        {"id": key, "label": label} for key, label in CADENCES.items()
+                    ],
+                }
+            )
+            return
         if path == "/api/session":
             query = parse_qs(urlparse(self.path).query)
             provider = query.get("provider", [""])[0]
@@ -346,10 +362,11 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
         if not local_request_allowed(host, origin):
             self.send_error(403)
             return
-        if (
-            urlparse(self.path).path != "/api/refresh"
-            or self.refresh_coordinator is None
-        ):
+        path = urlparse(self.path).path
+        if path == "/api/preferences":
+            self._save_preferences()
+            return
+        if path != "/api/refresh" or self.refresh_coordinator is None:
             self.send_error(404)
             return
         try:
@@ -364,6 +381,58 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
         self.send_response(200)
         self._secure_headers("application/json; charset=utf-8", len(payload))
         self._write_payload(payload)
+
+    def _send_json(self, value: object, status: int = 200) -> None:
+        payload = json.dumps(value).encode("utf-8")
+        self.send_response(status)
+        self._secure_headers("application/json; charset=utf-8", len(payload))
+        self._write_payload(payload)
+
+    def _save_preferences(self) -> None:
+        """Store a cadence chosen in the dashboard. Rejects unknown cadences
+        rather than silently falling back, so the UI cannot drift from what is
+        actually in force."""
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self.send_error(400)
+            return
+        if length <= 0 or length > 8192:
+            self.send_error(400)
+            return
+        try:
+            body = json.loads(self.rfile.read(length))
+        except (json.JSONDecodeError, OSError):
+            self.send_error(400)
+            return
+        if not isinstance(body, dict):
+            self.send_error(400)
+            return
+        cadence = body.get("cadence")
+        if not isinstance(cadence, str) or cadence not in CADENCES:
+            self.send_error(400)
+            return
+        rule = body.get("custom_rule")
+        jump = body.get("jump_percent")
+        try:
+            preference = write_preferences(
+                cadence,
+                rule if isinstance(rule, str) else "",
+                jump
+                if isinstance(jump, (int, float)) and not isinstance(jump, bool)
+                else None,
+            )
+        except (ValueError, OSError):
+            self.send_error(400)
+            return
+        self._send_json(
+            {
+                **preference,
+                "agent_prompt": custom_rule_prompt(preference["custom_rule"])
+                if preference["cadence"] == "custom"
+                else "",
+            }
+        )
 
     def _secure_headers(self, content_type: str, content_length: int) -> None:
         self.send_header("Content-Type", content_type)

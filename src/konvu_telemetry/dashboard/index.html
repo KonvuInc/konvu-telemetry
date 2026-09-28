@@ -12,6 +12,9 @@
       <div class="brand"><img src="/konvu-ghost.svg" alt="Konvu" width="19" height="19" /><strong>Coding Agents monitoring</strong></div>
       <div class="top-actions">
         <button class="freshness" id="freshness" type="button"></button>
+        <button id="settings-open" class="settings-button" type="button" aria-label="Settings" title="Settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 9 19.4a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 4.6 9a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1Z" /></svg>
+        </button>
         <div class="notification-wrap">
           <button
             id="konvu-alert-control"
@@ -63,6 +66,34 @@
       <section id="kpi-banner" aria-label="Fleet summary"></section>
       <div id="fleet"></div>
     </main>
+    <div id="settings-backdrop" hidden></div>
+    <section id="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title" hidden>
+      <div class="settings-top">
+        <h2 id="settings-title">Settings</h2>
+        <button id="settings-close" aria-label="Close settings">×</button>
+      </div>
+      <div class="settings-body">
+        <h3>When to show usage in your CLI</h3>
+        <p class="settings-note">
+          Controls the usage box injected into a Claude or Codex turn. The status line is
+          always current and is not affected.
+        </p>
+        <div id="cadence-options" class="cadence-options" role="radiogroup" aria-label="Display cadence"></div>
+        <div id="cadence-custom" class="cadence-custom" hidden>
+          <label for="cadence-rule">Describe your rule</label>
+          <textarea id="cadence-rule" rows="3" placeholder="e.g. only when I am over 80% of my weekly limit"></textarea>
+        </div>
+        <div class="settings-actions">
+          <button id="cadence-save" class="settings-primary" type="button">Save</button>
+          <span id="cadence-status" role="status"></span>
+        </div>
+        <div id="cadence-prompt" class="cadence-prompt" hidden>
+          <p>A custom rule needs code. Give this to your coding agent:</p>
+          <pre id="cadence-prompt-text"></pre>
+          <button id="cadence-copy" class="settings-secondary" type="button">Copy</button>
+        </div>
+      </div>
+    </section>
     <div id="graph-tooltip" role="tooltip" hidden></div>
     <div id="backdrop" hidden></div>
     <section id="inspector" role="dialog" aria-modal="true" aria-labelledby="inspector-title" hidden>
