@@ -73,12 +73,15 @@
         <button id="settings-close" aria-label="Close settings">×</button>
       </div>
       <div class="settings-body">
-        <h3>When to show the usage box</h3>
-        <p class="settings-note">
-          The Konvu usage box shown inside a turn, in Codex CLI, Codex desktop and Claude
-          desktop. The Claude CLI status line is always current and is not affected.
-        </p>
-        <div class="box-preview" aria-label="What the usage box looks like">
+        <section class="settings-section">
+          <h3>The usage box</h3>
+          <p class="settings-note">
+            Konvu prints this box inside a turn, in Codex CLI, Codex desktop and Claude
+            desktop. It shows how much of your plan the session has used and what the
+            next ten prompts are forecast to cost. The Claude CLI status line is always
+            current and is not affected by this setting.
+          </p>
+          <div class="box-preview" aria-label="What the usage box looks like">
           <figure>
             <figcaption>Inside your plan</figcaption>
             <div class="box-frame"><b>KONVU USAGE</b><pre>🟢 INCLUDED
@@ -94,7 +97,15 @@
 🔗 OPEN LIVE DASHBOARD</pre></div>
           </figure>
         </div>
-        <div id="cadence-options" class="cadence-options" role="radiogroup" aria-label="Display cadence"></div>
+        </section>
+        <section class="settings-section">
+          <h3>When it appears</h3>
+          <p class="settings-note">
+            Pick how often the box is printed. A custom rule lets you describe the
+            condition in your own words and have your coding agent write it.
+          </p>
+          <div id="cadence-options" class="cadence-options" role="radiogroup" aria-label="Display cadence"></div>
+        </section>
         <div class="settings-actions">
           <button id="cadence-save" class="settings-primary" type="button">Save</button>
           <span id="cadence-status" role="status"></span>

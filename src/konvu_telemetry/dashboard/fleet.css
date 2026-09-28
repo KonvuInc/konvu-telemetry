@@ -2137,7 +2137,7 @@ select {
 @media (max-width: 700px) {
   .ledger-controls {
     justify-content: flex-start;
-    margin: 0 0 16px;
+    margin: 0;
     gap: 12px;
   }
 }
@@ -3254,6 +3254,11 @@ select {
 .settings-body {
   padding: 20px 22px 24px;
 }
+.settings-section + .settings-section {
+  margin-top: 26px;
+  padding-top: 22px;
+  border-top: 1px solid var(--line);
+}
 .settings-body h3 {
   margin: 0 0 5px;
   font-size: 12px;
@@ -3278,7 +3283,7 @@ select {
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 8px 11px;
+  padding: 12px 13px;
   border: 0;
   border-bottom: 1px solid var(--line);
   border-radius: 0;
@@ -3427,7 +3432,7 @@ select {
 /* The frame is drawn in CSS rather than with │ characters: a text border can
    only stay unbroken at line-height 1, which leaves the rows too tight. */
 .box-frame {
-  padding: 12px 14px;
+  padding: 16px 16px;
   border-radius: 5px;
   background: #1d1230;
   overflow-x: auto;
