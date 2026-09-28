@@ -129,10 +129,13 @@ p {
   font-style: normal;
 }
 .state-popover {
-  position: absolute;
-  z-index: 50;
+  /* Fixed, not absolute: .table-shell scrolls horizontally, and a scroll
+     container clips both axes, so an absolutely positioned popover is cut off
+     at the table edges. Coordinates are set on hover in fleet.js. */
+  position: fixed;
+  z-index: 200;
   left: 0;
-  top: calc(100% + 7px);
+  top: 0;
   display: none !important;
   width: max-content;
   max-width: 280px;
@@ -1255,6 +1258,11 @@ select {
 .compact-ledger td {
   padding: 11px 12px;
   position: relative;
+}
+/* Lift the hovered cell above its siblings so its popover is not covered. */
+.compact-ledger td:hover,
+.compact-ledger td:focus-within {
+  z-index: 60;
 }
 .compact-ledger td:first-child {
   padding-left: 9px;
@@ -3172,4 +3180,12 @@ select {
   font-weight: 700;
   color: var(--ink);
   font-variant-numeric: tabular-nums;
+}
+
+/* ---------- pending value ---------- */
+.pending-sentence {
+  font-size: 10.5px;
+  color: var(--mist);
+  font-style: italic;
+  font-weight: 500;
 }

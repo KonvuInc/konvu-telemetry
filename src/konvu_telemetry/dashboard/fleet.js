@@ -534,16 +534,56 @@ function sessionDataState(s, metric = "forecast") {
   if (providerState.kind !== "ready") return providerState;
   const reason = s.quota_attribution?.reason;
   const noun = metric === "share" ? "Share" : "Forecast";
+  // Each state waits on something specific, so say which. No countdown is
+  // possible: the limit moves with usage, not with the clock.
   const labels = {
-    window_reset: [noun + " recalculating after limit reset", "Konvu needs new activity in this limit window."],
-    establishing_baseline: [noun + " available after the next plan update", "Konvu needs two plan readings to estimate this session."],
-    waiting_for_quota_change: [noun + " updating…", "This session is recorded; Konvu is waiting for the matching plan-usage update."],
-    waiting_for_activity: [noun + " available after more prompts", "Konvu needs a few prompts to estimate this session."],
+    window_reset: ["Ready after your next prompts", "The limit window just reset, so Konvu needs fresh activity in it."],
+    establishing_baseline: ["Ready after the next plan update", "Konvu needs two plan readings before it can estimate this session."],
+    waiting_for_quota_change: ["Ready when your usage ticks up 1%", "Your prompts are recorded. Plans report whole percentages, so Konvu waits for the next one."],
+    waiting_for_activity: ["Ready after a few more prompts", "This session has not used enough yet for Konvu to estimate it."],
   };
-  const [label, detail] = labels[reason] || [noun + " updating…", "Konvu needs another data point."];
+  const [label, detail] = labels[reason] || ["Ready after the next plan update", "Konvu needs another reading."];
   return { kind: "loading", label, detail };
 }
+/* A fixed popover needs real coordinates. Placed above the trigger when there
+   is room, below otherwise, and clamped to the viewport so it is never cut. */
+function placeStatePopover(trigger) {
+  const popover = trigger.querySelector(".state-popover");
+  if (!popover) return;
+  popover.style.visibility = "hidden";
+  popover.style.display = "block";
+  const anchor = trigger.getBoundingClientRect();
+  const box = popover.getBoundingClientRect();
+  const gap = 7;
+  const above = anchor.top - box.height - gap;
+  const top = above >= 8 ? above : anchor.bottom + gap;
+  const left = Math.max(8, Math.min(anchor.left, window.innerWidth - box.width - 8));
+  popover.style.top = Math.round(top) + "px";
+  popover.style.left = Math.round(left) + "px";
+  popover.style.visibility = "";
+}
+function bindStatePopovers() {
+  for (const event of ["pointerenter", "focusin"]) {
+    document.addEventListener(
+      event,
+      (e) => {
+        const trigger = e.target instanceof Element ? e.target.closest(".data-state") : null;
+        if (trigger) placeStatePopover(trigger);
+      },
+      true,
+    );
+  }
+}
 function dataStateMarkup(data) {
+  // A spinner would promise the value is arriving on its own; it is not. The
+  // figure needs another plan reading, so say that and let the tooltip explain
+  // which one is missing.
+  if (data.kind === "loading") {
+    return (
+      '<span class="pending-sentence" tabindex="0" title="' + esc(data.detail) + '">' +
+      "Not enough data to compute</span>"
+    );
+  }
   const marker = data.kind === "loading"
     ? '<i class="state-spinner" aria-hidden="true"></i>'
     : ["login", "error"].includes(data.kind)
@@ -2197,6 +2237,7 @@ function browserAlerts(payload) {
 
 initialUrl();
 bindEvents();
+bindStatePopovers();
 bindNotificationPanel();
 refresh();
 setInterval(() => {
