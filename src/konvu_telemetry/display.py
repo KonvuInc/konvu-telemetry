@@ -351,7 +351,7 @@ def cli_dashboard_line() -> str:
     if not line.startswith(prefix):
         return line
     url = line.removeprefix(prefix)
-    label = terminal_style("🔗 OPEN LIVE DASHBOARD", "38;5;245")
+    label = terminal_style("🔗 Open live dashboard", "38;5;245")
     if os.environ.get("NO_COLOR") or os.environ.get("TERM") == "dumb":
         return f"{label} {url}"
     return terminal_link(label, url)
@@ -379,30 +379,30 @@ def claude_statusline_rows(
                 context = raw_context / raw_window * 100
         width = statusline_width()
         cells = 4 if width < 62 else 6 if width < 84 else 8
-        segments = [terminal_style("● INCLUDED", "1;38;5;78")]
-        for label, period in (("5H", "five_hour"), ("WEEK", "weekly")):
+        segments = [terminal_style("● Included", "1;38;5;78")]
+        for label, period in (("5h", "five_hour"), ("Week", "weekly")):
             value = quotas.get(period)
             if value is not None:
                 segments.append(meter_segment(label, value, cells))
         if context is not None:
-            segments.append(meter_segment("CONTEXT", context, cells))
+            segments.append(meter_segment("Context", context, cells))
         rows = wrap_statusline_segments(segments, width)
         attribution = quota_window_value(session, "five_hour", "estimated_percent")
         forecast = quota_window_value(session, "five_hour", "projected_next_10_percent")
         if attribution is not None and forecast is not None:
             projected = min(100.0, attribution + forecast)
             forecast_row = (
-                terminal_style("THIS SESSION", "38;5;245")
+                terminal_style("This session", "38;5;245")
                 + " "
                 + terminal_style(f"{attribution:.1f}%", "1;38;5;255")
                 + " "
-                + terminal_style("OF 5H LIMIT", "38;5;245")
+                + terminal_style("of 5h limit", "38;5;245")
                 + " "
                 + terminal_style("━━━▶", "1;38;5;141")
                 + " "
                 + terminal_style(f"{projected:.1f}%", "1;38;5;255")
                 + " "
-                + terminal_style("FORECASTED IN NEXT 10 PROMPTS", "38;5;245")
+                + terminal_style("forecasted in next 10 prompts", "38;5;245")
             )
             rows.append(forecast_row)
         if width >= 45:
@@ -414,10 +414,10 @@ def claude_statusline_rows(
         if usage_mode == "exhausted" and isinstance(out_of_plan, (int, float)):
             paid = out_of_plan
         paid_forecast = session.get("projected_next_10_tasks_usd")
-        rows = [terminal_style("● PAYING", "1;38;5;203")]
+        rows = [terminal_style("● Paying", "1;38;5;203")]
         if isinstance(paid, (int, float)) and isinstance(paid_forecast, (int, float)):
             rows.append(
-                terminal_style("CURRENT SPEND", "38;5;245")
+                terminal_style("Current spend", "38;5;245")
                 + " "
                 + terminal_style(money(paid), "1;38;5;255")
                 + " "
@@ -425,7 +425,7 @@ def claude_statusline_rows(
                 + " "
                 + terminal_style(money(paid + paid_forecast), "1;38;5;255")
                 + " "
-                + terminal_style("FORECASTED IN NEXT 10 PROMPTS", "38;5;245")
+                + terminal_style("forecasted in next 10 prompts", "38;5;245")
             )
         rows.append(dashboard)
         return rows
@@ -554,7 +554,7 @@ def meter(value: object, width: int = 10) -> str:
 
 def hook_quota_meters(quota_text: str) -> str:
     """Convert recorded provider limit text into small, readable box meters."""
-    labels = {"5-hour": "5H", "weekly": "WEEK", "monthly": "MONTH"}
+    labels = {"5-hour": "5h", "weekly": "Week", "monthly": "Month"}
     matches = re.findall(r"(\d+(?:\.\d+)?)% (5-hour|weekly|monthly) limit", quota_text)
     return "  ".join(
         f"{labels[label]} [{meter(float(used), 7)}] {percentage(float(used))}"
@@ -573,14 +573,14 @@ def hook_forecast_row(session: dict[str, object]) -> str:
         forecast = session.get("projected_next_10_tasks_usd")
         if isinstance(current, (int, float)) and isinstance(forecast, (int, float)):
             return (
-                f"💸 CURRENT SPEND {money(current)}  ━━━▶  {money(current + forecast)} "
-                "FORECASTED IN NEXT 10 PROMPTS"
+                f"💸 Current spend {money(current)}  ━━━▶  {money(current + forecast)} "
+                "forecasted in next 10 prompts"
             )
-        return "💸 FORECAST UNAVAILABLE"
+        return "💸 Forecast unavailable"
     attribution = session.get("quota_attribution")
     windows = attribution.get("windows") if isinstance(attribution, dict) else None
     target = "weekly" if session.get("provider") == "codex" else "five_hour"
-    label = "WEEKLY" if target == "weekly" else "5H"
+    label = "weekly" if target == "weekly" else "5h"
     for window in windows if isinstance(windows, list) else []:
         if not isinstance(window, dict) or window.get("period") != target:
             continue
@@ -589,30 +589,30 @@ def hook_forecast_row(session: dict[str, object]) -> str:
         if isinstance(current, (int, float)) and isinstance(forecast, (int, float)):
             projected_total = min(100.0, current + forecast)
             return (
-                f"📈 THIS SESSION {percentage(current)} OF {label} LIMIT  ━━━▶  "
-                f"{percentage(projected_total)} FORECASTED IN NEXT 10 PROMPTS"
+                f"📈 This session {percentage(current)} of {label} limit  ━━━▶  "
+                f"{percentage(projected_total)} forecasted in next 10 prompts"
             )
-    return "📈 SUBSCRIPTION FORECAST UNAVAILABLE"
+    return "📈 Subscription forecast unavailable"
 
 
 def usage_box_lines(session: dict[str, object], quota_text: str) -> list[str]:
     """Frame text-only meters and forecast data for Codex and desktop hooks."""
     included = session.get("usage_mode") == "included"
-    rows = ["🟢 INCLUDED" if included else "🔴 PAYING"]
+    rows = ["🟢 Included" if included else "🔴 Paying"]
     context = context_usage_text(session)
     context_percent = session.get("context_tokens")
     window = session.get("context_window_tokens")
     if isinstance(context_percent, int) and isinstance(window, int) and window > 0:
         used = context_percent / window * 100
-        context_row = f"CONTEXT [{meter(used, 7)}] {percentage(used)}"
+        context_row = f"Context [{meter(used, 7)}] {percentage(used)}"
     else:
-        context_row = f"CONTEXT {context}"
+        context_row = f"Context {context}"
     quota_meters = hook_quota_meters(quota_text)
     meter_row = f"{quota_meters}  {context_row}" if quota_meters else context_row
     rows.append(f"⏱️ {meter_row}")
     rows.append(hook_forecast_row(session))
-    rows.append(dashboard_line().replace("dashboard:", "OPEN LIVE DASHBOARD"))
-    return ["╭─ KONVU USAGE", *(f"│ {row}" for row in rows), "╰─"]
+    rows.append(dashboard_line().replace("dashboard:", "Open live dashboard"))
+    return ["╭─ Konvu usage", *(f"│ {row}" for row in rows), "╰─"]
 
 
 def prompt_box_context(provider: str, session_id: str) -> str | None:
