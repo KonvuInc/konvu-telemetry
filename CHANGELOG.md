@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.6 - 2026-09-29
 
 - Add `konvu-telemetry --version`, and report the installed version plus the running
   collector's version from `konvu-telemetry status`.
