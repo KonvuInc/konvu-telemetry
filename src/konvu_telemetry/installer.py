@@ -248,7 +248,114 @@ def is_konvu_statusline(value: object) -> bool:
     if not arguments:
         return False
     command = Path(arguments[0]).expanduser()
-    return command in {launcher_path(), claude_statusline_path()}
+    if command == claude_statusline_path():
+        return len(arguments) == 1
+    return _is_konvu_statusline_command(arguments)
+
+
+def _shell_commands(source: str) -> list[list[str]]:
+    commands: list[list[str]] = []
+    separators = {"|", "||", "&", "&&", ";", ";;", "(", ")"}
+    for line in source.splitlines():
+        lexer = shlex.shlex(line, posix=True, punctuation_chars="|;&()")
+        lexer.whitespace_split = True
+        lexer.commenters = "#"
+        try:
+            tokens = list(lexer)
+        except ValueError:
+            continue
+        start = 0
+        for end in range(len(tokens) + 1):
+            if end < len(tokens) and tokens[end] not in separators:
+                continue
+            if tokens[start:end]:
+                commands.append(tokens[start:end])
+            start = end + 1
+    return commands
+
+
+def _is_environment_assignment(value: str) -> bool:
+    name, separator, _ = value.partition("=")
+    return bool(separator and name.isidentifier())
+
+
+def _unwrap_shell_command(command: list[str]) -> list[str]:
+    unwrapped = list(command)
+    while unwrapped and unwrapped[0] in {"command", "exec"}:
+        unwrapped = unwrapped[1:]
+    while unwrapped and _is_environment_assignment(unwrapped[0]):
+        unwrapped = unwrapped[1:]
+    if not unwrapped or Path(unwrapped[0]).name != "env":
+        return unwrapped
+    unwrapped = unwrapped[1:]
+    while unwrapped:
+        argument = unwrapped[0]
+        if argument in {"-u", "--unset"} and len(unwrapped) >= 2:
+            unwrapped = unwrapped[2:]
+        elif argument in {"-i", "--ignore-environment"} or argument.startswith(
+            "--unset="
+        ):
+            unwrapped = unwrapped[1:]
+        elif argument == "--":
+            unwrapped = unwrapped[1:]
+            break
+        elif _is_environment_assignment(argument):
+            unwrapped = unwrapped[1:]
+        else:
+            break
+    return unwrapped
+
+
+def _is_konvu_statusline_command(command: list[str]) -> bool:
+    unwrapped = _unwrap_shell_command(command)
+    if len(unwrapped) < 2 or unwrapped[1] != "statusline":
+        return False
+    return Path(unwrapped[0]).name in {CONSOLE_COMMAND, LAUNCHER_NAME}
+
+
+def shell_invokes_konvu_statusline(source: str) -> bool:
+    """Return whether shell source executes Konvu's status-line command."""
+    return any(
+        _is_konvu_statusline_command(command) for command in _shell_commands(source)
+    )
+
+
+def _direct_konvu_statusline_command(source: str) -> bool:
+    """Return whether a command only prepares for and runs Konvu's status line."""
+    found = False
+    for command in _shell_commands(source):
+        unwrapped = _unwrap_shell_command(command)
+        if not unwrapped:
+            continue
+        if unwrapped[0] == "cd":
+            continue
+        if not _is_konvu_statusline_command(command):
+            return False
+        found = True
+    return found
+
+
+def custom_statusline_invokes_konvu(command: str) -> bool:
+    """Inspect an existing status-line command and its script for Konvu."""
+    if shell_invokes_konvu_statusline(command):
+        return True
+    try:
+        arguments = shlex.split(command)
+    except ValueError:
+        return False
+    if not arguments:
+        return False
+    script_index = 1 if Path(arguments[0]).name in {"bash", "sh", "zsh"} else 0
+    if len(arguments) <= script_index:
+        return False
+    script = Path(arguments[script_index]).expanduser()
+    try:
+        if not script.is_file() or script.stat().st_size > 128 * 1024:
+            return False
+        source = script.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return False
+    return shell_invokes_konvu_statusline(source)
 
 
 def is_konvu_hook(value: object, command: str) -> bool:
@@ -286,8 +393,19 @@ def write_claude_statusline_wrapper(command: str) -> None:
             wrapper,
             "#!/bin/sh\n"
             "payload=$(cat)\n"
-            f"printf '%s' \"$payload\" | {shlex.quote(str(original))}\n"
-            f"printf '%s' \"$payload\" | {command_text('statusline')}\n",
+            "original_output=$(printf '%s' \"$payload\" | "
+            f"{shlex.quote(str(original))})\n"
+            "konvu_output=$(printf '%s' \"$payload\" | "
+            f"{command_text('statusline')})\n"
+            'if [ -n "$original_output" ]; then\n'
+            "  printf '%s' \"$original_output\"\n"
+            "fi\n"
+            'if [ -n "$original_output" ] && [ -n "$konvu_output" ]; then\n'
+            "  printf '\\n'\n"
+            "fi\n"
+            'if [ -n "$konvu_output" ]; then\n'
+            "  printf '%s' \"$konvu_output\"\n"
+            "fi\n",
         ),
     ):
         temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -322,18 +440,44 @@ def install_claude_statusline(
         }
     )
     wrapper_command = shlex.quote(str(claude_statusline_path()))
+    remove_wrapper = False
     if command == wrapper_command:
-        statusline["command"] = wrapper_command
+        state_path = claude_statusline_state_path()
+        state = load_json_object(state_path) if state_path.is_file() else {}
+        original = state.get("statusLine")
+        original_command = (
+            original.get("command") if isinstance(original, dict) else None
+        )
+        if (
+            isinstance(original, dict)
+            and isinstance(original_command, str)
+            and custom_statusline_invokes_konvu(original_command)
+        ):
+            if not _direct_konvu_statusline_command(original_command):
+                statusline = dict(original)
+            remove_wrapper = True
+        else:
+            statusline["command"] = wrapper_command
+    elif (
+        command is not None
+        and not is_konvu_statusline(command)
+        and custom_statusline_invokes_konvu(command)
+    ):
+        if not _direct_konvu_statusline_command(command):
+            statusline = dict(existing) if isinstance(existing, dict) else {}
+        remove_wrapper = True
     elif command is not None and not is_konvu_statusline(command):
         write_claude_statusline_wrapper(command)
         write_json(claude_statusline_state_path(), {"statusLine": existing})
         statusline["command"] = wrapper_command
     else:
+        remove_wrapper = True
+    settings["statusLine"] = statusline
+    write_json(path, settings)
+    if remove_wrapper:
         claude_statusline_path().unlink(missing_ok=True)
         claude_statusline_original_path().unlink(missing_ok=True)
         claude_statusline_state_path().unlink(missing_ok=True)
-    settings["statusLine"] = statusline
-    write_json(path, settings)
     return "installed"
 
 

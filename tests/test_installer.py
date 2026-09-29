@@ -237,13 +237,180 @@ class InstallerTests(unittest.TestCase):
                 )
                 self.assertTrue(installer.remove_claude_statusline())
             self.assertEqual(
-                rendered.stdout, 'existing:{"session_id":"session"}telemetry'
+                rendered.stdout, 'existing:{"session_id":"session"}\ntelemetry'
             )
             self.assertEqual(
                 json.loads(path.read_text())["statusLine"]["command"],
                 "printf existing:; cat",
             )
             self.assertFalse(wrapper.exists())
+
+    def test_hand_wired_konvu_statusline_is_not_wrapped_again(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            claude = home / ".claude"
+            claude.mkdir()
+            script = claude / "statusline.sh"
+            launcher = home / ".konvu" / "telemetry" / installer.LAUNCHER_NAME
+            launcher.parent.mkdir(parents=True)
+            launcher.write_text("#!/bin/sh\nexit 0\n")
+            launcher.chmod(0o700)
+            script.write_text(
+                f"#!/bin/sh\ncat | ~/{launcher.relative_to(home)} statusline\n"
+            )
+            existing = {
+                "type": "command",
+                "command": str(script),
+                "refreshInterval": 10,
+            }
+            settings = claude / "settings.json"
+            settings.write_text(json.dumps({"statusLine": existing}))
+            with patch.object(installer.Path, "home", return_value=home):
+                installer.install_claude_statusline(ensure_launcher=False)
+                installed = json.loads(settings.read_text())
+                self.assertEqual(installed["statusLine"], existing)
+                self.assertFalse(installer.claude_statusline_path().exists())
+                self.assertFalse(installer.claude_statusline_state_path().exists())
+
+    def test_direct_konvu_statuslines_are_replaced_with_current_launcher(self) -> None:
+        commands = (
+            "/opt/homebrew/bin/konvu-telemetry statusline",
+            "/tmp/old-venv/bin/konvu-telemetry statusline",
+            "cd /tmp/old-checkout && exec env PYTHONPATH=src "
+            "/tmp/old-venv/bin/konvu-telemetry statusline",
+        )
+        for command in commands:
+            with (
+                self.subTest(command=command),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                home = Path(temporary)
+                claude = home / ".claude"
+                telemetry = home / ".konvu" / "telemetry"
+                claude.mkdir()
+                telemetry.mkdir(parents=True)
+                launcher = telemetry / installer.LAUNCHER_NAME
+                launcher.write_text("#!/bin/sh\nexit 0\n")
+                launcher.chmod(0o700)
+                settings = claude / "settings.json"
+                settings.write_text(
+                    json.dumps(
+                        {
+                            "statusLine": {
+                                "type": "command",
+                                "command": command,
+                                "refreshInterval": 10,
+                            }
+                        }
+                    )
+                )
+                with patch.object(installer.Path, "home", return_value=home):
+                    installer.install_claude_statusline(ensure_launcher=False)
+                    installed = json.loads(settings.read_text())["statusLine"]
+                    self.assertEqual(installed["command"], f"{launcher} statusline")
+                    self.assertEqual(installed["refreshInterval"], 60)
+                    self.assertFalse(installer.claude_statusline_path().exists())
+                    self.assertFalse(installer.claude_statusline_state_path().exists())
+
+    def test_setup_repairs_an_already_double_wrapped_statusline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            claude = home / ".claude"
+            telemetry = home / ".konvu" / "telemetry"
+            claude.mkdir()
+            telemetry.mkdir(parents=True)
+            script = claude / "statusline.sh"
+            launcher = telemetry / installer.LAUNCHER_NAME
+            launcher.write_text("#!/bin/sh\nexit 0\n")
+            launcher.chmod(0o700)
+            script.write_text(f"#!/bin/sh\ncat | {launcher} statusline\n")
+            original = {"type": "command", "command": str(script)}
+            wrapper = telemetry / installer.CLAUDE_STATUSLINE_NAME
+            wrapper.write_text("#!/bin/sh\nexit 0\n")
+            saved = telemetry / installer.CLAUDE_STATUSLINE_STATE_NAME
+            saved.write_text(json.dumps({"statusLine": original}))
+            generated_original = telemetry / installer.CLAUDE_STATUSLINE_ORIGINAL_NAME
+            generated_original.write_text(f"#!/bin/sh\n{script}\n")
+            settings = claude / "settings.json"
+            settings.write_text(
+                json.dumps(
+                    {
+                        "statusLine": {
+                            "type": "command",
+                            "command": str(wrapper),
+                            "refreshInterval": 60,
+                        }
+                    }
+                )
+            )
+            with patch.object(installer.Path, "home", return_value=home):
+                installer.install_claude_statusline(ensure_launcher=False)
+                installed = json.loads(settings.read_text())
+                self.assertEqual(installed["statusLine"], original)
+                self.assertFalse(wrapper.exists())
+                self.assertFalse(generated_original.exists())
+                self.assertFalse(saved.exists())
+
+    def test_setup_discards_saved_direct_konvu_statusline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            claude = home / ".claude"
+            telemetry = home / ".konvu" / "telemetry"
+            claude.mkdir()
+            telemetry.mkdir(parents=True)
+            launcher = telemetry / installer.LAUNCHER_NAME
+            launcher.write_text("#!/bin/sh\nexit 0\n")
+            launcher.chmod(0o700)
+            old_command = (
+                "cd /Users/ag/Desktop/code/konvu-telemetry && exec env PYTHONPATH=src "
+                "/tmp/konvu-telemetry-ci-venv/bin/konvu-telemetry statusline"
+            )
+            wrapper = telemetry / installer.CLAUDE_STATUSLINE_NAME
+            wrapper.write_text("#!/bin/sh\nexit 0\n")
+            generated_original = telemetry / installer.CLAUDE_STATUSLINE_ORIGINAL_NAME
+            generated_original.write_text(f"#!/bin/sh\n{old_command}\n")
+            saved = telemetry / installer.CLAUDE_STATUSLINE_STATE_NAME
+            saved.write_text(
+                json.dumps({"statusLine": {"type": "command", "command": old_command}})
+            )
+            settings = claude / "settings.json"
+            settings.write_text(
+                json.dumps(
+                    {
+                        "statusLine": {
+                            "type": "command",
+                            "command": str(wrapper),
+                            "refreshInterval": 60,
+                        }
+                    }
+                )
+            )
+            with patch.object(installer.Path, "home", return_value=home):
+                installer.install_claude_statusline(ensure_launcher=False)
+            installed = json.loads(settings.read_text())["statusLine"]
+            self.assertEqual(installed["command"], f"{launcher} statusline")
+            self.assertFalse(wrapper.exists())
+            self.assertFalse(generated_original.exists())
+            self.assertFalse(saved.exists())
+
+    def test_statusline_mentions_do_not_count_as_invocations(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            launcher = home / ".konvu" / "telemetry" / installer.LAUNCHER_NAME
+            with patch.object(installer.Path, "home", return_value=home):
+                self.assertFalse(
+                    installer.shell_invokes_konvu_statusline(
+                        f"# {launcher} statusline\necho {launcher} statusline\n"
+                    )
+                )
+                self.assertFalse(
+                    installer.shell_invokes_konvu_statusline(f"{launcher} codex-hook\n")
+                )
+                self.assertFalse(
+                    installer.shell_invokes_konvu_statusline(
+                        "/tmp/konvu-telemetry-helper statusline\n"
+                    )
+                )
 
     def test_setup_removes_a_legacy_claude_stop_hook_and_keeps_foreign_ones(
         self,
