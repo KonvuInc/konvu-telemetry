@@ -10,7 +10,7 @@ import time
 from .analytics import (
     backtest_next_ten,
 )
-from .config import DASHBOARD_PORT
+from .config import DASHBOARD_PORT, package_version
 from .display import (
     claude_hook,
     claude_prompt_hook,
@@ -53,6 +53,14 @@ def main(arguments: list[str] | None = None) -> None:
         return
     parser = argparse.ArgumentParser(
         description="Local-first Claude Code and Codex usage monitoring"
+    )
+    # Declared before the required positional so the flag stands alone, which is
+    # what anyone checking a version types.
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=package_version(),
+        help="Print the installed version and exit.",
     )
     parser.add_argument(
         "command",

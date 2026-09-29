@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from importlib.metadata import PackageNotFoundError, version
 
 DEFAULT_LIVE_WINDOW_SECONDS = 24 * 60 * 60
 ROLLING_WINDOW_SECONDS = 60 * 60
@@ -26,3 +27,12 @@ MAX_PARSED_RECORD_BYTES = 64 * 1024
 MAX_CONTEXT_HISTORY_POINTS = 256
 MAX_SUMMARY_ITERATION_POINTS = 40
 DEFAULT_HEALTH_STALE_SECONDS = 150
+
+
+def package_version() -> str:
+    """The installed version of this package, for reporting which build is running."""
+    try:
+        return version("konvu-telemetry")
+    except PackageNotFoundError:
+        # A source checkout that was never installed still has to report something.
+        return "unknown"

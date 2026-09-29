@@ -2485,6 +2485,22 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(health["stale_for_seconds"], 151)
         self.assertEqual(health["next_poll_at"], "1970-01-01T00:02:40+00:00")
 
+    def test_health_records_the_version_of_the_running_collector(self) -> None:
+        # An upgrade leaves the old collector serving until it restarts, so the
+        # running version has to be readable separately from the installed one.
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch(
+                "konvu_telemetry.service.health_path",
+                return_value=Path(directory) / "health.json",
+            ),
+            patch("konvu_telemetry.service.package_version", return_value="9.9.9"),
+        ):
+            write_health(100.0, interval_seconds=60)
+            self.assertEqual(load_health(150.0)["collector_version"], "9.9.9")
+            write_health(200.0, error="disk full")
+            self.assertEqual(load_health(250.0)["collector_version"], "9.9.9")
+
     def test_collector_keeps_polling_when_health_state_cannot_be_written(self) -> None:
         coordinator = Mock()
         coordinator.wait_for_refresh.side_effect = StopIteration
