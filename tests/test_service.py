@@ -50,7 +50,6 @@ from konvu_telemetry.display import (
     retained_session,
     statusline,
     usage_box_lines,
-    usage_rows,
 )
 from konvu_telemetry.exporter import normalized_event
 from konvu_telemetry.fleet_telemetry import (
@@ -2147,49 +2146,10 @@ class ServiceTests(unittest.TestCase):
             "subagent_cost_usd": 0.4,
         }
 
-    def test_usage_rows_are_the_content_every_surface_renders(self) -> None:
-        with health_patch({"status": "stale"}):
-            rows = usage_rows(self.shared_row_session(), "3.0% weekly limit")
-        self.assertEqual(
-            rows,
-            [
-                "💸 $25.4 API-equivalent total · $4.9 API-equivalent for the next 10 prompts",
-                "🤖 1 live / 2 total · 90.0% context shared · $0.4 API-equivalent",
-                "🧠 50.0% context · 3.0% weekly limit",
-                DASHBOARD_HINT,
-            ],
-        )
-
     def test_display_numbers_use_one_decimal_and_round_half_up(self) -> None:
         self.assertEqual(percentage(1.25), "1.3%")
         self.assertEqual(percentage(100), "100.0%")
         self.assertEqual(money(1.25), "$1.3")
-
-    def test_included_usage_rows_hide_monetary_estimates(self) -> None:
-        session = {
-            **self.shared_row_session(),
-            "usage_mode": "included",
-            "quota_attribution": {
-                "windows": [
-                    {
-                        "period": "five_hour",
-                        "estimated_percent": 1.25,
-                        "projected_next_10_percent": 3.0,
-                    }
-                ]
-            },
-        }
-        with health_patch({"status": "stale"}):
-            rows = usage_rows(session, "20.0% 5-hour limit")
-        self.assertEqual(
-            rows[:3],
-            [
-                "🟢 Included · ~3.0% of 5-hour limit in the next 10 prompts",
-                "20.0% 5-hour limit",
-                "🧠 50.0% context · 🎯 Responsible for ~1.3% of 5-hour limit",
-            ],
-        )
-        self.assertNotIn("$", "\n".join(rows))
 
     def test_quota_usage_text_distinguishes_each_window(self) -> None:
         snapshot = {
@@ -2208,27 +2168,31 @@ class ServiceTests(unittest.TestCase):
             "⏳ 6.0% 5-hour limit · 📅 54.0% weekly limit · 🌙 100.0% monthly limit",
         )
 
-    def test_hot_subscription_share_gets_a_fire_marker(self) -> None:
-        for provider, period, estimate in (
-            ("claude", "five_hour", 20.1),
-            ("codex", "weekly", 10.1),
-        ):
-            session = {
-                **self.shared_row_session(),
-                "provider": provider,
-                "usage_mode": "included",
-                "quota_attribution": {
-                    "windows": [{"period": period, "estimated_percent": estimate}]
-                },
-            }
-            self.assertIn("🔥", "\n".join(usage_rows(session, "")))
+    def test_unknown_subscription_uses_the_new_statusline_hud(self) -> None:
+        with patch.dict(os.environ, {"NO_COLOR": "1"}):
+            output = self.run_statusline(
+                {**self.shared_row_session(), "usage_mode": "unknown"},
+                {"status": "stale"},
+                {"context_window": {"used_percentage": 50.0}},
+            )
+        self.assertIn("Subscription limits unavailable · retrying", output)
+        self.assertIn("⏱️ Context", output)
+        self.assertIn("📈 Subscription forecast unavailable", output)
+        self.assertNotIn("API-equivalent", output)
 
-    def test_unknown_subscription_usage_hides_monetary_estimates(self) -> None:
-        session = {**self.shared_row_session(), "usage_mode": "unknown"}
-        with health_patch({"status": "stale"}):
-            rows = usage_rows(session, "")
-        self.assertEqual(rows[0], "⚪ Subscription limit unavailable")
-        self.assertNotIn("$", "\n".join(rows))
+    def test_stale_subscription_marks_the_new_hud_as_retrying(self) -> None:
+        session = {
+            **self.shared_row_session(),
+            "usage_mode": "included",
+            "quota_status": "stale",
+        }
+        output = self.run_statusline(
+            session,
+            {"status": "stale"},
+            {"context_window": {"used_percentage": 50.0}},
+        )
+        self.assertIn("Last known: included · retrying", output)
+        self.assertIn("Context", output)
 
     def test_the_usage_box_is_a_text_only_hud_inside_a_frame(self) -> None:
         session = self.shared_row_session()
