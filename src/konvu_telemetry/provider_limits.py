@@ -871,8 +871,7 @@ class ProviderLimitPoller:
             "source": "provider_api",
             "status": (
                 "fetching"
-                if failure not in {"credentials_unavailable", "authentication_failed"}
-                and self._failures[provider] < 3
+                if failure != "credentials_unavailable" and self._failures[provider] < 3
                 else "unavailable"
             ),
             "failure": failure or "service_unavailable",
@@ -916,18 +915,30 @@ class ProviderLimitPoller:
                         "service_unavailable" if result.snapshot is None else None
                     )
                     self._last_polled_at[provider] = now
+                    temporary_auth_failure = (
+                        failure == "authentication_failed"
+                        and self._failures[provider] + 1 < 3
+                    )
                     if result.snapshot is not None:
                         self._snapshots[provider] = result.snapshot
                         self._failure_reasons[provider] = None
                         self._error_codes[provider] = None
-                    elif result.unavailable:
+                    elif result.unavailable and not temporary_auth_failure:
                         self._snapshots[provider] = None
                         self._failure_reasons[provider] = failure
                         self._error_codes[provider] = result.error_code
                     else:
                         self._failure_reasons[provider] = failure
                         self._error_codes[provider] = result.error_code
-                    if result.snapshot is not None or result.unavailable:
+                    if result.snapshot is not None:
+                        self._failures[provider] = 0
+                    elif (
+                        result.unavailable
+                        and failure == "authentication_failed"
+                        and not temporary_auth_failure
+                    ):
+                        self._failures[provider] = 3
+                    elif result.unavailable and not temporary_auth_failure:
                         self._failures[provider] = 0
                     else:
                         self._failures[provider] += 1

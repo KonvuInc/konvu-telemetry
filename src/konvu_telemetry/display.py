@@ -161,28 +161,6 @@ def recorded_quota_usage_text(provider: str) -> str:
     return quota_usage_text({"account_quotas": stored_provider_quotas()}, provider)
 
 
-def subagent_usage_text(session: dict[str, object]) -> str:
-    """Summarise the live and total child-agent footprint in one short line."""
-    total = session.get("subagent_total")
-    live = session.get("active_subagents")
-    handed = session.get(
-        "subagent_context_tokens", session.get("subagent_entry_context_tokens")
-    )
-    context = session.get("context_tokens")
-    if not isinstance(total, int) or total == 0:
-        return ""
-    shared_percentage = None
-    if isinstance(handed, int) and isinstance(context, int) and context > 0:
-        shared_percentage = handed / (context * total) * 100
-    shared_text = (
-        f"{percentage(min(100, shared_percentage))} context shared"
-        if shared_percentage is not None
-        else tokens(handed)
-    )
-    spend_text = f"{money(session.get('subagent_cost_usd'))} API-equivalent"
-    return f"🤖 {live or 0} live / {total} total · {shared_text} · {spend_text}"
-
-
 def dashboard_line() -> str:
     """Link the local dashboard, or name the command that starts it when it is not serving."""
     # Only a healthy collector is serving the dashboard; a wrong URL is worse than a hint.
@@ -204,50 +182,6 @@ def context_usage_text(session: dict[str, object]) -> str:
     if isinstance(context, int) and isinstance(window, int) and window > 0:
         return f"{percentage(context / window * 100)} context"
     return f"{tokens(context)} context"
-
-
-def quota_attribution_text(session: dict[str, object]) -> str:
-    """Render the current session's explicitly estimated subscription share."""
-    attribution = session.get("quota_attribution")
-    windows = attribution.get("windows") if isinstance(attribution, dict) else None
-    provider = session.get("provider")
-    target_period = "weekly" if provider == "codex" else "five_hour"
-    parts: list[str] = []
-    for window in windows if isinstance(windows, list) else []:
-        if not isinstance(window, dict):
-            continue
-        period = window.get("period")
-        estimate = window.get("estimated_percent")
-        if period != target_period or not isinstance(estimate, (int, float)):
-            continue
-        label = "5-hour" if period == "five_hour" else period
-        hot = (provider == "claude" and period == "five_hour" and estimate > 20) or (
-            provider == "codex" and period == "weekly" and estimate > 10
-        )
-        parts.append(
-            f"~{percentage(estimate)} of {label} limit" + (" 🔥" if hot else "")
-        )
-    return " · ".join(parts)
-
-
-def quota_forecast_text(session: dict[str, object]) -> str:
-    """Render a calibrated next-ten subscription-limit estimate when available."""
-    attribution = session.get("quota_attribution")
-    windows = attribution.get("windows") if isinstance(attribution, dict) else None
-    rows = (
-        [row for row in windows if isinstance(row, dict)]
-        if isinstance(windows, list)
-        else []
-    )
-    for period in ("five_hour", "weekly"):
-        for window in rows:
-            forecast = window.get("projected_next_10_percent")
-            if window.get("period") == period and isinstance(forecast, (int, float)):
-                label = "5-hour" if period == "five_hour" else "weekly"
-                return (
-                    f"~{percentage(forecast)} of {label} limit in the next 10 prompts"
-                )
-    return ""
 
 
 def terminal_style(text: str, code: str) -> str:
@@ -379,7 +313,13 @@ def claude_statusline_rows(
                 context = raw_context / raw_window * 100
         width = statusline_width()
         cells = 4 if width < 62 else 6 if width < 84 else 8
-        segments = [terminal_style("● Included", "1;38;5;78")]
+        quota_stale = session.get("quota_status") == "stale"
+        included_label = (
+            "● Last known: included · retrying" if quota_stale else "● Included"
+        )
+        segments = [
+            terminal_style(included_label, "1;38;5;221" if quota_stale else "1;38;5;78")
+        ]
         for label, period in (("5h", "five_hour"), ("Week", "weekly")):
             value = quotas.get(period)
             if value is not None:
@@ -429,69 +369,24 @@ def claude_statusline_rows(
             )
         rows.append(dashboard)
         return rows
-    return usage_rows(session, recorded_quota_usage_text("claude"), context_percent)
-
-
-def usage_rows(
-    session: dict[str, object],
-    quota_text: str,
-    context_percent: float | None = None,
-) -> list[str]:
-    """Build the usage summary every surface shows, unframed; each surface wraps it itself."""
-    usage_mode = session.get("usage_mode")
-    complete = session.get("cost_status") == "complete"
-    forecast = session.get("projected_next_10_tasks_usd")
-    forecast_text = (
-        f"{money(forecast)} API-equivalent for the next 10 prompts"
-        if complete and isinstance(forecast, (int, float))
-        else "forecast unavailable"
-    )
-    total_cost = (
-        session.get("total_cost_usd")
-        if usage_mode == "api_billed"
-        else session.get("out_of_plan_spend_usd")
-        if session.get("out_of_plan_spend_status") is not None
-        else None
-    )
-    total_text = (
-        f"{money(total_cost)} API-equivalent"
-        if complete and isinstance(total_cost, (int, float))
-        else "— spent beyond plan"
-        if complete
-        else f"known minimum {money(total_cost)} API-equivalent"
-        if session.get("cost_status") == "partial"
-        else "cost unavailable"
-    )
-    context_text = (
-        f"{percentage(context_percent)} context"
-        if context_percent is not None
-        else context_usage_text(session)
-    )
-    money_visible = usage_mode in {"api_billed", "exhausted"}
-    quota_stale = session.get("quota_status") == "stale"
-    included_label = "🟡 Last known: included" if quota_stale else "🟢 Included"
-    money_label = "🟡 Last known plan status · " if quota_stale else "💸 "
-    rows = (
-        [f"{money_label}{total_text} total · {forecast_text}"]
-        if money_visible
-        else [f"{included_label} · {quota_forecast_text(session)}".rstrip(" ·")]
-        if usage_mode == "included"
-        else ["⚪ Subscription limit unavailable"]
-    )
-    subagents = subagent_usage_text(session)
-    if subagents and money_visible:
-        rows.append(subagents)
-    context_row = f"🧠 {context_text}"
-    if usage_mode == "included":
-        if quota_text:
-            rows.append(quota_text)
-        attribution = quota_attribution_text(session)
-        if attribution:
-            context_row += f" · 🎯 Responsible for {attribution}"
-    elif quota_text:
-        context_row += f" · {quota_text}"
-    rows.append(context_row)
-    rows.append(dashboard_line())
+    context = context_percent
+    if context is None:
+        raw_context = session.get("context_tokens")
+        raw_window = session.get("context_window_tokens")
+        if (
+            isinstance(raw_context, int)
+            and isinstance(raw_window, int)
+            and raw_window > 0
+        ):
+            context = raw_context / raw_window * 100
+    rows = [
+        terminal_style("● Subscription limits unavailable · retrying", "1;38;5;245")
+    ]
+    if context is not None:
+        rows.append("⏱️ " + meter_segment("Context", context, 7))
+    rows.append(terminal_style("📈 Subscription forecast unavailable", "38;5;245"))
+    if statusline_width() >= 45:
+        rows.append(dashboard)
     return rows
 
 

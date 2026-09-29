@@ -418,11 +418,22 @@ class ProviderLimitsTests(unittest.TestCase):
             )
             self.assertEqual(destination.stat().st_mode & 0o777, 0o600)
 
-    def test_poller_clears_confirmed_unavailability(self) -> None:
+    def test_poller_keeps_last_known_limits_through_two_auth_failures(self) -> None:
         claude = Mock(
             side_effect=[
                 FetchResult({"windows": [{"used_percent": 7.0}]}),
-                FetchResult(None, failure="network_error"),
+                FetchResult(
+                    None,
+                    unavailable=True,
+                    failure="authentication_failed",
+                    error_code=401,
+                ),
+                FetchResult(
+                    None,
+                    unavailable=True,
+                    failure="authentication_failed",
+                    error_code=401,
+                ),
                 FetchResult(
                     None,
                     unavailable=True,
@@ -437,13 +448,37 @@ class ProviderLimitsTests(unittest.TestCase):
         )
 
         poller.refresh(100)
-        self.assertEqual(poller.refresh(220)["claude"]["status"], "stale")
-        unavailable = poller.refresh(340)["claude"]
+        first = poller.refresh(220)["claude"]
+        second = poller.refresh(340)["claude"]
+        self.assertEqual(first["status"], "stale")
+        self.assertEqual(second["status"], "stale")
+        self.assertEqual(first["windows"], [{"used_percent": 7.0}])
+        self.assertEqual(second["windows"], [{"used_percent": 7.0}])
+
+        unavailable = poller.refresh(580)["claude"]
         self.assertEqual(unavailable["source"], "provider_api")
         self.assertEqual(unavailable["status"], "unavailable")
         self.assertEqual(unavailable["failure"], "authentication_failed")
         self.assertEqual(unavailable["error_code"], 401)
         self.assertEqual(unavailable["windows"], [])
+
+    def test_poller_retries_two_auth_failures_without_a_prior_reading(self) -> None:
+        claude = Mock(
+            return_value=FetchResult(
+                None,
+                unavailable=True,
+                failure="authentication_failed",
+                error_code=401,
+            )
+        )
+        poller = ProviderLimitPoller(
+            claude,
+            Mock(return_value=FetchResult(None, unavailable=True)),
+        )
+
+        self.assertEqual(poller.refresh(100)["claude"]["status"], "fetching")
+        self.assertEqual(poller.refresh(220)["claude"]["status"], "fetching")
+        self.assertEqual(poller.refresh(460)["claude"]["status"], "unavailable")
 
     def test_poller_retains_a_valid_window_during_transient_failures(self) -> None:
         claude = Mock(
