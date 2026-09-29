@@ -2169,11 +2169,12 @@ class ServiceTests(unittest.TestCase):
         )
 
     def test_unknown_subscription_uses_the_new_statusline_hud(self) -> None:
-        output = self.run_statusline(
-            {**self.shared_row_session(), "usage_mode": "unknown"},
-            {"status": "stale"},
-            {"context_window": {"used_percentage": 50.0}},
-        )
+        with patch.dict(os.environ, {"NO_COLOR": "1"}):
+            output = self.run_statusline(
+                {**self.shared_row_session(), "usage_mode": "unknown"},
+                {"status": "stale"},
+                {"context_window": {"used_percentage": 50.0}},
+            )
         self.assertIn("Subscription limits unavailable · retrying", output)
         self.assertIn("⏱️ Context", output)
         self.assertIn("📈 Subscription forecast unavailable", output)
