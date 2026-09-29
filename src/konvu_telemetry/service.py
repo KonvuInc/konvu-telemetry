@@ -67,6 +67,7 @@ REFRESH_TIMEOUT_SECONDS = 30
 # How long a departing collector is given to close its socket and let go.
 HANDOVER_TIMEOUT_SECONDS = 15.0
 HANDOVER_POLL_SECONDS = 0.25
+UPGRADE_RESTART_EXIT_CODE = 75
 
 
 def _process_is_a_collector(pid: int) -> bool:
@@ -694,7 +695,8 @@ def _run_local_service(interval_seconds: int, port: int) -> None:
     finally:
         server.server_close()
     if stale_install:
-        raise SystemExit(75)
+        # Existing launch agents restart only after an unsuccessful exit.
+        raise SystemExit(UPGRADE_RESTART_EXIT_CODE)
 
 
 def run_local_service(interval_seconds: int, port: int) -> None:
