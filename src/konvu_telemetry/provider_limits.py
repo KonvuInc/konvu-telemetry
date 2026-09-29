@@ -798,7 +798,9 @@ class ProviderLimitPoller:
                 failures = poll_state.get("failures")
                 if isinstance(next_at, (int, float)) and not isinstance(next_at, bool):
                     self._next_at[provider] = max(0.0, float(next_at))
-                if isinstance(last_polled_at, (int, float)) and not isinstance(last_polled_at, bool):
+                if isinstance(last_polled_at, (int, float)) and not isinstance(
+                    last_polled_at, bool
+                ):
                     self._last_polled_at[provider] = max(0.0, float(last_polled_at))
                 if isinstance(failures, int) and not isinstance(failures, bool):
                     self._failures[provider] = max(0, failures)
@@ -816,7 +818,9 @@ class ProviderLimitPoller:
             "failures": self._failures[provider],
         }
 
-    def _with_poll_state(self, provider: str, account: dict[str, object]) -> dict[str, object]:
+    def _with_poll_state(
+        self, provider: str, account: dict[str, object]
+    ) -> dict[str, object]:
         visible = dict(account)
         visible["poll_state"] = self._poll_state(provider)
         return visible
@@ -835,7 +839,10 @@ class ProviderLimitPoller:
                     if not isinstance(window, dict):
                         continue
                     reset = _iso_reset(window.get("resets_at"))
-                    if reset is not None and datetime.fromisoformat(reset).timestamp() <= now:
+                    if (
+                        reset is not None
+                        and datetime.fromisoformat(reset).timestamp() <= now
+                    ):
                         expired_window = True
                         continue
                     visible_windows.append(window)
@@ -878,6 +885,7 @@ class ProviderLimitPoller:
         active_providers: frozenset[str] = frozenset({"claude", "codex"}),
     ) -> dict[str, object]:
         """Refresh due provider limits, polling Claude less often while idle."""
+
         def is_due(provider: str) -> bool:
             if provider == "claude" and self._failures[provider] == 0:
                 interval = (
@@ -889,9 +897,7 @@ class ProviderLimitPoller:
                 return previous is None or now - previous >= interval
             return now >= self._next_at[provider]
 
-        due = [
-            provider for provider in self._fetchers if is_due(provider)
-        ]
+        due = [provider for provider in self._fetchers if is_due(provider)]
         if due:
             with ThreadPoolExecutor(max_workers=len(due)) as executor:
                 futures = {
