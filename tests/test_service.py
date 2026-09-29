@@ -1,6 +1,6 @@
 import json
 from collections.abc import Callable
-from contextlib import nullcontext
+from contextlib import nullcontext, redirect_stderr
 from datetime import datetime, timezone
 import errno
 from io import StringIO
@@ -33,7 +33,7 @@ from konvu_telemetry.config import (
     ALERT_FORECAST_USD,
     BASELINE_SCHEMA_VERSION,
 )
-from konvu_telemetry.collector import main as collector_main
+from konvu_telemetry.cli import build_parser, main as cli_main
 from konvu_telemetry.display import (
     _session_tool_calls,
     claude_hook,
@@ -212,7 +212,7 @@ class ServiceTests(unittest.TestCase):
             )
             self.assertTrue(service._process_is_a_collector(4242))
             run.return_value = SimpleNamespace(
-                stdout='python -c from konvu_telemetry.collector import main; main(["serve"])'
+                stdout='python -c from konvu_telemetry.cli import main; main(["serve"])'
             )
             self.assertTrue(service._process_is_a_collector(4242))
         # Our own pid and init are never candidates, whatever ps would say.
@@ -244,7 +244,7 @@ class ServiceTests(unittest.TestCase):
             ),
         ):
             poller.return_value.refresh.return_value = quotas
-            collector_main(["once"])
+            cli_main(["once"])
         build.assert_called_once_with(100.0, provider_quotas=quotas)
         write_quotas.assert_called_once_with(quotas)
 
@@ -2279,7 +2279,7 @@ class ServiceTests(unittest.TestCase):
             [
                 sys.executable,
                 "-c",
-                "from konvu_telemetry.collector import main; main()",
+                "from konvu_telemetry.cli import main; main()",
                 command,
             ],
             input=stdin,
@@ -2949,6 +2949,56 @@ class ServiceTests(unittest.TestCase):
             set(baseline),
             {"schema_version", "generated_at", "lookback_days", "forecasts"},
         )
+
+
+class CommandDispatchTests(unittest.TestCase):
+    """The parser is the only command list, so nothing can be routed by accident."""
+
+    INVOCATIONS = (
+        ["setup"],
+        ["status"],
+        ["uninstall"],
+        ["telemetry", "status"],
+        ["cadence"],
+        ["once"],
+        ["serve"],
+        ["statusline"],
+        ["normalize"],
+        ["backtest-next-ten"],
+        ["dashboard"],
+        ["claude-hook"],
+        ["claude-prompt-hook"],
+        ["codex-hook"],
+        ["codex-prompt-hook"],
+    )
+
+    def test_every_command_parses_to_its_own_handler(self) -> None:
+        parser = build_parser()
+        for invocation in self.INVOCATIONS:
+            parsed = parser.parse_args(invocation)
+            self.assertTrue(callable(parsed.run), invocation[0])
+
+    def test_an_unknown_command_is_refused_rather_than_run_as_a_status_line(
+        self,
+    ) -> None:
+        with redirect_stderr(StringIO()), self.assertRaises(SystemExit) as refused:
+            cli_main(["setpu"])
+        self.assertEqual(refused.exception.code, 2)
+
+    def test_a_hook_never_fails_on_an_argument_it_does_not_know(self) -> None:
+        """A non-zero hook blocks the user's prompt, so hooks never reach argparse."""
+        with patch("konvu_telemetry.cli.HOOKS", {"claude-hook": Mock()}) as hooks:
+            cli_main(["claude-hook", "--unknown-to-this-build"])
+            cli_main(["future-hook"])
+        hooks["claude-hook"].assert_called_once_with()
+
+    def test_the_installed_service_arguments_still_reach_the_collector_loop(
+        self,
+    ) -> None:
+        """setup writes `serve --interval N` into the plist, so it must keep parsing."""
+        with patch("konvu_telemetry.collector.run_local_service") as loop:
+            cli_main(["serve", "--interval", "5", "--port", "7825"])
+        loop.assert_called_once_with(5, 7825)
 
 
 if __name__ == "__main__":
