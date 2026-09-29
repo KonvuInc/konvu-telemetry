@@ -19,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
+from .config import package_version
 from .preferences import ensure_preferences_file
 from .service import load_health
 from .tracking import record_setup_completed as record_setup_event
@@ -790,6 +791,7 @@ def service_status() -> dict[str, object]:
     installed = launch_agent_path().is_file()
     return {
         "installed": installed,
+        "version": package_version(),
         "health": load_health(),
         "dashboard": f"http://127.0.0.1:{PORT}/",
     }
