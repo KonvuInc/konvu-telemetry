@@ -6,7 +6,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 import fcntl
-from importlib.metadata import PackageNotFoundError, version
 import json
 from pathlib import Path
 import platform
@@ -17,6 +16,7 @@ from typing import Callable, Iterator, Literal, TypedDict
 from urllib.request import Request, urlopen
 from uuid import UUID, uuid4
 
+from .config import package_version
 from .storage import (
     ensure_private_directory,
     tracking_queue_path,
@@ -60,13 +60,6 @@ def _send_to_posthog(payload: bytes) -> None:
             raise OSError("PostHog redirected telemetry batch")
         if not 200 <= response.status < 300:
             raise OSError("PostHog rejected telemetry batch")
-
-
-def _cli_version() -> str:
-    try:
-        return version("konvu-telemetry")
-    except PackageNotFoundError:
-        return "unknown"
 
 
 def _os_family() -> str:
@@ -311,7 +304,7 @@ class TrackingStore:
                 "$insert_id": event_id,
                 "$process_person_profile": False,
                 "$ip": "0",
-                "cli_version": _cli_version(),
+                "cli_version": package_version(),
                 "os_family": _os_family(),
                 **properties,
             },

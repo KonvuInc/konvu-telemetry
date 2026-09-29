@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Add `konvu-telemetry --version`, and report the installed version plus the running
+  collector's version from `konvu-telemetry status`.
+
 ## 0.3.5 - 2026-09-28
 
 - Restart the collector automatically after a Homebrew upgrade so the new version

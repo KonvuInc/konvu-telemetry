@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import os
 import plistlib
@@ -8,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from konvu_telemetry import cli, installer
+from konvu_telemetry.config import package_version
 
 
 class InstallerTests(unittest.TestCase):
@@ -707,3 +710,18 @@ class InstallerTests(unittest.TestCase):
             self.assertFalse((home / ".konvu").exists())
             self.assertEqual(list(claude_path.parent.glob("*.konvu-backup-*")), [])
             self.assertEqual(list(codex_path.parent.glob("*.konvu-backup-*")), [])
+
+    def test_version_flag_prints_the_installed_version(self) -> None:
+        # Without a flag of its own the command rejects "--version" as an unknown
+        # argument, so this asserts both the exit code and what was printed.
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            with self.assertRaises(SystemExit) as exited:
+                cli.main(["--version"])
+        self.assertEqual(exited.exception.code, 0)
+        self.assertEqual(printed.getvalue().strip(), package_version())
+
+    def test_status_reports_the_installed_version(self) -> None:
+        with patch.object(installer, "load_health", return_value={"status": "healthy"}):
+            status = installer.service_status()
+        self.assertEqual(status["version"], package_version())

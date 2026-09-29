@@ -26,6 +26,7 @@ from .config import (
     ALLOWED_PROVIDERS,
     DEFAULT_HEALTH_STALE_SECONDS,
     LIVE_ACTIVITY_SECONDS,
+    package_version,
 )
 from .live import IncrementalLiveState
 from .provider_limits import (
@@ -251,6 +252,9 @@ def write_health(
         previous = loaded if isinstance(loaded, dict) else {}
     except (OSError, json.JSONDecodeError):
         pass
+    # Named apart from the installed version because an upgrade leaves the running
+    # collector behind the one on disk until it restarts.
+    previous["collector_version"] = package_version()
     if error is None:
         previous["status"] = "healthy"
         previous["last_success_at"] = datetime.fromtimestamp(

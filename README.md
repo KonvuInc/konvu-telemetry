@@ -22,7 +22,13 @@ Setup starts the local collector, opens the dashboard at `http://127.0.0.1:7824`
 konvu-telemetry dashboard  # Open the local dashboard
 konvu-telemetry status     # Check that collection is running
 konvu-telemetry cadence    # Choose how often the usage box appears
+konvu-telemetry --version  # Print the installed version
 ```
+
+`status` reports the installed version alongside collector health, and
+`health.collector_version` inside it is the version the running collector was started
+from. The two differ between a Homebrew upgrade and the collector restarting that
+follows it.
 
 `cadence` with no argument lists the choices: after every prompt, after every tool
 call (the default), only when usage jumps, never, or a custom rule you describe and
