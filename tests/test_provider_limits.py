@@ -148,6 +148,7 @@ class ProviderLimitsTests(unittest.TestCase):
         self.assertIsNotNone(result.snapshot)
         self.assertNotIn("secret-token", json.dumps(result.snapshot))
         self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0].get_header("User-agent"), "claude-code/2.1.0")
 
     def test_claude_fetch_honors_retry_after_without_reading_error_body(self) -> None:
         error = HTTPError(
@@ -307,14 +308,9 @@ class ProviderLimitsTests(unittest.TestCase):
         poller.refresh(219)
         self.assertEqual(claude.call_count, 1)
         snapshots = poller.refresh(220)
-        self.assertEqual(
-            snapshots["claude"],
-            {
-                "windows": [{"used_percent": 7.0}],
-                "status": "stale",
-                "failure": "network_error",
-            },
-        )
+        self.assertEqual(snapshots["claude"]["windows"], [{"used_percent": 7.0}])
+        self.assertEqual(snapshots["claude"]["status"], "stale")
+        self.assertEqual(snapshots["claude"]["failure"], "network_error")
         self.assertEqual(claude.call_count, 2)
 
     def test_poller_retains_canonical_snapshot_when_first_fetch_fails(self) -> None:
@@ -443,16 +439,11 @@ class ProviderLimitsTests(unittest.TestCase):
         poller.refresh(100)
         self.assertEqual(poller.refresh(220)["claude"]["status"], "stale")
         unavailable = poller.refresh(340)["claude"]
-        self.assertEqual(
-            unavailable,
-            {
-                "source": "provider_api",
-                "status": "unavailable",
-                "failure": "authentication_failed",
-                "error_code": 401,
-                "windows": [],
-            },
-        )
+        self.assertEqual(unavailable["source"], "provider_api")
+        self.assertEqual(unavailable["status"], "unavailable")
+        self.assertEqual(unavailable["failure"], "authentication_failed")
+        self.assertEqual(unavailable["error_code"], 401)
+        self.assertEqual(unavailable["windows"], [])
 
     def test_poller_retains_a_valid_window_during_transient_failures(self) -> None:
         claude = Mock(
@@ -500,7 +491,7 @@ class ProviderLimitsTests(unittest.TestCase):
 
         poller.refresh(100)
         unavailable = poller.refresh(220)["claude"]
-        self.assertEqual(unavailable["status"], "unavailable")
+        self.assertEqual(unavailable["status"], "fetching")
         self.assertEqual(unavailable["windows"], [])
         self.assertNotIn("ordinary_usage_allowed", unavailable)
         self.assertNotIn("limit_states", unavailable)
@@ -517,6 +508,44 @@ class ProviderLimitsTests(unittest.TestCase):
         self.assertEqual(claude.call_count, 1)
         poller.refresh(220)
         self.assertEqual(claude.call_count, 2)
+
+    def test_successful_idle_claude_fetches_are_five_minutes_apart(self) -> None:
+        claude = Mock(return_value=FetchResult({"windows": []}))
+        poller = ProviderLimitPoller(
+            claude,
+            Mock(return_value=FetchResult(None, unavailable=True)),
+        )
+
+        poller.refresh(100, frozenset())
+        poller.refresh(399, frozenset())
+        self.assertEqual(claude.call_count, 1)
+        poller.refresh(400, frozenset())
+        self.assertEqual(claude.call_count, 2)
+
+    def test_poller_restores_pending_backoff_without_a_prior_reading(self) -> None:
+        claude = Mock(return_value=FetchResult(None, failure="rate_limited"))
+        poller = ProviderLimitPoller(
+            claude,
+            Mock(return_value=FetchResult(None, unavailable=True)),
+            initial_snapshots={
+                "claude": {
+                    "source": "provider_api",
+                    "status": "fetching",
+                    "failure": "rate_limited",
+                    "windows": [],
+                    "poll_state": {
+                        "next_at": 1_000.0,
+                        "last_polled_at": 100.0,
+                        "failures": 1,
+                    },
+                }
+            },
+        )
+
+        snapshot = poller.refresh(999)["claude"]
+        self.assertEqual(claude.call_count, 0)
+        self.assertEqual(snapshot["status"], "fetching")
+        self.assertEqual(snapshot["poll_state"]["next_at"], 1_000.0)
 
     def test_a_rate_limit_retries_in_seconds_rather_than_hours(self) -> None:
         """A 429 throttles the endpoint; it does not mean the figures stopped."""

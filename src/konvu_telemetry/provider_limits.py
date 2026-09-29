@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -27,21 +28,20 @@ from .storage import (
 
 
 CLAUDE_USAGE_ENDPOINT = "https://api.anthropic.com/api/oauth/usage"
+CLAUDE_USAGE_USER_AGENT = "claude-code/2.1.0"
 CODEX_USAGE_ENDPOINT = "https://chatgpt.com/backend-api/wham/usage"
 CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 POLL_INTERVAL_SECONDS = 120.0
-CLAUDE_POLL_INTERVAL_SECONDS = POLL_INTERVAL_SECONDS
-# A 429 is a throttle on the usage endpoint, not a sign the figures stopped
-# moving, so the first retry comes quickly and only a run of refusals backs off.
+CLAUDE_ACTIVE_POLL_INTERVAL_SECONDS = POLL_INTERVAL_SECONDS
+CLAUDE_IDLE_POLL_INTERVAL_SECONDS = 5 * 60.0
 RATE_LIMIT_BACKOFF_SECONDS = 20.0
 RATE_LIMIT_MAX_BACKOFF_SECONDS = 30 * 60.0
-# A transient failure is a different case: nothing asked us to slow down, so it
-# keeps the ceiling it always had.
 TRANSIENT_FAILURE_MAX_BACKOFF_SECONDS = 15 * 60.0
 RATE_LIMIT_JITTER_FRACTION = 0.1
 RATE_LIMIT_MAX_JITTER_SECONDS = 5 * 60.0
 REQUEST_TIMEOUT_SECONDS = 10.0
 MAX_RESPONSE_BYTES = 256 * 1024
+LOGGER = logging.getLogger(__name__)
 
 FailureReason = Literal[
     "authentication_failed",
@@ -500,7 +500,7 @@ def fetch_claude_limits(
             "Authorization": f"Bearer {token}",
             "Accept": "application/json",
             "anthropic-beta": "oauth-2025-04-20",
-            "User-Agent": "konvu-telemetry",
+            "User-Agent": CLAUDE_USAGE_USER_AGENT,
         },
     )
     try:
@@ -755,12 +755,7 @@ def fetch_codex_limits(now: float | None = None) -> FetchResult:
 
 
 def _rate_limit_delay(failures: int, retry_after_seconds: float | None) -> float:
-    """Back off from 20 seconds, doubling per consecutive refusal, with jitter.
-
-    The provider's own Retry-After is a floor, never a ceiling: waiting longer
-    than asked only means showing figures that are staler than they need to be.
-    Jitter keeps several machines on one account from retrying in lockstep.
-    """
+    """Back off from 20 seconds, doubling per consecutive refusal."""
     exponent = min(max(0, failures - 1), 12)
     delay: float = min(
         RATE_LIMIT_MAX_BACKOFF_SECONDS,
@@ -782,6 +777,7 @@ class ProviderLimitPoller:
     ) -> None:
         self._fetchers = {"claude": claude_fetcher, "codex": codex_fetcher}
         self._next_at = {"claude": 0.0, "codex": 0.0}
+        self._last_polled_at = {"claude": None, "codex": None}
         self._failures = {"claude": 0, "codex": 0}
         self._snapshots: dict[str, dict[str, object] | None] = {}
         self._failure_reasons: dict[str, FailureReason | None] = {}
@@ -794,65 +790,107 @@ class ProviderLimitPoller:
             )
             if not isinstance(initial, dict) or initial.get("source") != "provider_api":
                 continue
-            observed = _iso_reset(initial.get("observed_at"))
+            canonical = dict(initial)
+            poll_state = canonical.pop("poll_state", None)
+            if isinstance(poll_state, dict):
+                next_at = poll_state.get("next_at")
+                last_polled_at = poll_state.get("last_polled_at")
+                failures = poll_state.get("failures")
+                if isinstance(next_at, (int, float)) and not isinstance(next_at, bool):
+                    self._next_at[provider] = max(0.0, float(next_at))
+                if isinstance(last_polled_at, (int, float)) and not isinstance(last_polled_at, bool):
+                    self._last_polled_at[provider] = max(0.0, float(last_polled_at))
+                if isinstance(failures, int) and not isinstance(failures, bool):
+                    self._failures[provider] = max(0, failures)
+            observed = _iso_reset(canonical.get("observed_at"))
             if observed is None:
                 continue
-            canonical = dict(initial)
             for display_field in ("status", "failure", "error_code"):
                 canonical.pop(display_field, None)
             self._snapshots[provider] = canonical
+
+    def _poll_state(self, provider: str) -> dict[str, object]:
+        return {
+            "next_at": self._next_at[provider],
+            "last_polled_at": self._last_polled_at[provider],
+            "failures": self._failures[provider],
+        }
+
+    def _with_poll_state(self, provider: str, account: dict[str, object]) -> dict[str, object]:
+        visible = dict(account)
+        visible["poll_state"] = self._poll_state(provider)
+        return visible
 
     def _visible_snapshot(self, provider: str, now: float) -> dict[str, object]:
         snapshot = self._snapshots.get(provider)
         failure = self._failure_reasons.get(provider)
         error_code = self._error_codes.get(provider)
         if snapshot is not None:
-            if failure is None:
-                return snapshot
             visible = dict(snapshot)
             windows = snapshot.get("windows")
+            visible_windows: list[dict[str, object]] = []
+            expired_window = False
             if isinstance(windows, list):
-                visible_windows: list[dict[str, object]] = []
-                expired_window = False
                 for window in windows:
                     if not isinstance(window, dict):
                         continue
                     reset = _iso_reset(window.get("resets_at"))
-                    if (
-                        reset is not None
-                        and datetime.fromisoformat(reset).timestamp() <= now
-                    ):
+                    if reset is not None and datetime.fromisoformat(reset).timestamp() <= now:
                         expired_window = True
                         continue
                     visible_windows.append(window)
                 visible["windows"] = visible_windows
-                if expired_window:
-                    for key in (
-                        "ordinary_usage_allowed",
-                        "spend_control_reached",
-                        "limit_states",
-                        "rate_limit_reached_type",
-                    ):
-                        visible.pop(key, None)
-                if visible_windows:
+            if expired_window:
+                for key in (
+                    "ordinary_usage_allowed",
+                    "spend_control_reached",
+                    "limit_states",
+                    "rate_limit_reached_type",
+                ):
+                    visible.pop(key, None)
+            if visible_windows:
+                if failure is not None:
                     visible["status"] = "stale"
                     visible["failure"] = failure
                     if error_code is not None:
                         visible["error_code"] = error_code
-                    return visible
+                return self._with_poll_state(provider, visible)
+            if failure is None and not expired_window:
+                return self._with_poll_state(provider, visible)
         unavailable: dict[str, object] = {
             "source": "provider_api",
-            "status": "unavailable",
+            "status": (
+                "fetching"
+                if failure not in {"credentials_unavailable", "authentication_failed"}
+                and self._failures[provider] < 3
+                else "unavailable"
+            ),
             "failure": failure or "service_unavailable",
             "windows": [],
         }
         if error_code is not None:
             unavailable["error_code"] = error_code
-        return unavailable
+        return self._with_poll_state(provider, unavailable)
 
-    def refresh(self, now: float) -> dict[str, object]:
+    def refresh(
+        self,
+        now: float,
+        active_providers: frozenset[str] = frozenset({"claude", "codex"}),
+    ) -> dict[str, object]:
+        """Refresh due provider limits, polling Claude less often while idle."""
+        def is_due(provider: str) -> bool:
+            if provider == "claude" and self._failures[provider] == 0:
+                interval = (
+                    CLAUDE_ACTIVE_POLL_INTERVAL_SECONDS
+                    if provider in active_providers
+                    else CLAUDE_IDLE_POLL_INTERVAL_SECONDS
+                )
+                previous = self._last_polled_at[provider]
+                return previous is None or now - previous >= interval
+            return now >= self._next_at[provider]
+
         due = [
-            provider for provider, next_at in self._next_at.items() if now >= next_at
+            provider for provider in self._fetchers if is_due(provider)
         ]
         if due:
             with ThreadPoolExecutor(max_workers=len(due)) as executor:
@@ -868,6 +906,7 @@ class ProviderLimitPoller:
                     failure = result.failure or (
                         "service_unavailable" if result.snapshot is None else None
                     )
+                    self._last_polled_at[provider] = now
                     if result.snapshot is not None:
                         self._snapshots[provider] = result.snapshot
                         self._failure_reasons[provider] = None
@@ -885,7 +924,11 @@ class ProviderLimitPoller:
                         self._failures[provider] += 1
                     if result.snapshot is not None:
                         delay = (
-                            CLAUDE_POLL_INTERVAL_SECONDS
+                            (
+                                CLAUDE_ACTIVE_POLL_INTERVAL_SECONDS
+                                if provider in active_providers
+                                else CLAUDE_IDLE_POLL_INTERVAL_SECONDS
+                            )
                             if provider == "claude"
                             else POLL_INTERVAL_SECONDS
                         )
@@ -897,15 +940,12 @@ class ProviderLimitPoller:
                         )
                         if provider == "claude":
                             failure_delay = max(
-                                failure_delay, CLAUDE_POLL_INTERVAL_SECONDS
+                                failure_delay, CLAUDE_ACTIVE_POLL_INTERVAL_SECONDS
                             )
                         if result.failure == "rate_limited":
-                            failure_delay = _rate_limit_delay(
+                            delay = _rate_limit_delay(
                                 self._failures[provider], result.retry_after_seconds
                             )
-                            # A throttled retry may come sooner than a healthy
-                            # poll, so the ordinary interval is not a floor here.
-                            delay = failure_delay
                         else:
                             delay = max(
                                 POLL_INTERVAL_SECONDS,
@@ -913,6 +953,14 @@ class ProviderLimitPoller:
                                 result.retry_after_seconds or 0.0,
                             )
                     self._next_at[provider] = now + delay
+                    if failure is not None:
+                        LOGGER.warning(
+                            "Provider limit request failed: provider=%s failure=%s status=%s retry_after=%s",
+                            provider,
+                            failure,
+                            result.error_code,
+                            result.retry_after_seconds,
+                        )
         return {
             provider: self._visible_snapshot(provider, now)
             for provider in self._fetchers

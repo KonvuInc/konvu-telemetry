@@ -218,6 +218,35 @@ def snapshot_has_dashboard_data(snapshot: object, now: float) -> bool:
     return False
 
 
+def active_providers(snapshot: object, now: float) -> frozenset[str]:
+    """Return providers with a session active inside the live activity window."""
+    if not isinstance(snapshot, dict):
+        return frozenset()
+    sessions = snapshot.get("sessions")
+    providers: set[str] = set()
+    for session in sessions if isinstance(sessions, list) else []:
+        if not isinstance(session, dict):
+            continue
+        provider = session.get("provider")
+        last_activity = parse_timestamp(session.get("last_activity_at"))
+        if (
+            provider in ALLOWED_PROVIDERS
+            and last_activity is not None
+            and -60 <= now - last_activity <= LIVE_ACTIVITY_SECONDS
+        ):
+            providers.add(provider)
+    return frozenset(providers)
+
+
+def recorded_snapshot() -> dict[str, object] | None:
+    """Read the last canonical snapshot for polling cadence decisions."""
+    try:
+        payload = json.loads(snapshot_path().read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def initialize_dashboard_data_available(now: float | None = None) -> None:
     """Restore dashboard visibility state once when the resident service starts."""
     global _DASHBOARD_DATA_AVAILABLE
@@ -341,7 +370,10 @@ def collect_forever(
         collection_error = None
         try:
             try:
-                provider_quotas = quota_poller.refresh(started_at)
+                provider_quotas = quota_poller.refresh(
+                    started_at,
+                    active_providers(recorded_snapshot(), started_at),
+                )
             except Exception:
                 provider_quotas = stored_provider_quotas()
             with snapshot_lock:
@@ -636,11 +668,18 @@ def _run_local_service(interval_seconds: int, port: int) -> None:
         if error.errno != errno.EADDRINUSE:
             raise
         raise SystemExit(f"Konvu dashboard port {port} is already in use") from None
+    stale_install = False
+
+    def stop_for_upgrade() -> None:
+        nonlocal stale_install
+        stale_install = True
+        server.shutdown()
+
     collector = Thread(
         target=collect_forever,
         args=(interval_seconds, live_state, snapshot_lock, refresh_coordinator),
         # shutdown() must be called from another thread than serve_forever.
-        kwargs={"on_stale_install": server.shutdown},
+        kwargs={"on_stale_install": stop_for_upgrade},
         daemon=True,
     )
     initialize_dashboard_data_available()
@@ -654,6 +693,8 @@ def _run_local_service(interval_seconds: int, port: int) -> None:
         server.serve_forever()
     finally:
         server.server_close()
+    if stale_install:
+        raise SystemExit(75)
 
 
 def run_local_service(interval_seconds: int, port: int) -> None:
