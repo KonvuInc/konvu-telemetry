@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Handlers for the collector commands, dispatched by `cli`."""
 
 from __future__ import annotations

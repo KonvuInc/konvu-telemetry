@@ -2985,6 +2985,13 @@ class CommandDispatchTests(unittest.TestCase):
             cli_main(["setpu"])
         self.assertEqual(refused.exception.code, 2)
 
+    def test_a_hook_never_fails_on_an_argument_it_does_not_know(self) -> None:
+        """A non-zero hook blocks the user's prompt, so hooks never reach argparse."""
+        with patch("konvu_telemetry.cli.HOOKS", {"claude-hook": Mock()}) as hooks:
+            cli_main(["claude-hook", "--unknown-to-this-build"])
+            cli_main(["future-hook"])
+        hooks["claude-hook"].assert_called_once_with()
+
     def test_the_installed_service_arguments_still_reach_the_collector_loop(
         self,
     ) -> None:

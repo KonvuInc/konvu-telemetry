@@ -283,10 +283,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(arguments: list[str] | None = None) -> None:
     argv = sys.argv[1:] if arguments is None else arguments
-    # Hooks are dispatched before argparse: a name this build does not know must exit 0
+    # Every hook is dispatched before argparse, whatever else is on the line: a name
+    # this build does not know, or an argument it does not accept, must still exit 0
     # in silence, because a non-zero hook blocks the user's prompt.
     command = argv[0] if argv else ""
-    if command.endswith("-hook") and command not in HOOKS:
+    if command.endswith("-hook"):
+        hook = HOOKS.get(command)
+        if hook is not None:
+            hook()
         return
     parsed = build_parser().parse_args(argv)
     parsed.run(parsed)
