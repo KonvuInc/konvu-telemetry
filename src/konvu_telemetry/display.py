@@ -597,8 +597,14 @@ def hook_forecast_row(session: dict[str, object]) -> str:
 
 def usage_box_lines(session: dict[str, object], quota_text: str) -> list[str]:
     """Frame text-only meters and forecast data for Codex and desktop hooks."""
-    included = session.get("usage_mode") == "included"
-    rows = ["🟢 Included" if included else "🔴 Paying"]
+    usage_mode = session.get("usage_mode")
+    rows = (
+        ["🟢 Included"]
+        if usage_mode == "included"
+        else ["🔴 Paying"]
+        if usage_mode in {"api_billed", "exhausted"}
+        else ["⚪ Subscription limit unavailable"]
+    )
     context = context_usage_text(session)
     context_percent = session.get("context_tokens")
     window = session.get("context_window_tokens")
@@ -608,6 +614,8 @@ def usage_box_lines(session: dict[str, object], quota_text: str) -> list[str]:
     else:
         context_row = f"Context {context}"
     quota_meters = hook_quota_meters(quota_text)
+    if session.get("quota_status") == "stale" and quota_meters:
+        quota_meters = f"Last known {quota_meters}"
     meter_row = f"{quota_meters}  {context_row}" if quota_meters else context_row
     rows.append(f"⏱️ {meter_row}")
     rows.append(hook_forecast_row(session))

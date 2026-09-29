@@ -2213,6 +2213,14 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(lines[-1], "╰─")
         self.assertIn("│ ⏱️ Week [░░░░░░░] 3.0%  Context [████░░░] 50.0%", lines)
 
+    def test_usage_box_does_not_label_an_unavailable_plan_as_paying(self) -> None:
+        session = {**self.shared_row_session(), "usage_mode": "unknown"}
+
+        lines = usage_box_lines(session, "")
+
+        self.assertIn("│ ⚪ Subscription limit unavailable", lines)
+        self.assertNotIn("Paying", "\n".join(lines))
+
     def test_the_status_line_renders_current_spend_and_forecast(
         self,
     ) -> None:
