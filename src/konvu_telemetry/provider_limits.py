@@ -777,7 +777,10 @@ class ProviderLimitPoller:
     ) -> None:
         self._fetchers = {"claude": claude_fetcher, "codex": codex_fetcher}
         self._next_at = {"claude": 0.0, "codex": 0.0}
-        self._last_polled_at = {"claude": None, "codex": None}
+        self._last_polled_at: dict[str, float | None] = {
+            "claude": None,
+            "codex": None,
+        }
         self._failures = {"claude": 0, "codex": 0}
         self._snapshots: dict[str, dict[str, object] | None] = {}
         self._failure_reasons: dict[str, FailureReason | None] = {}
