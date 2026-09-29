@@ -431,6 +431,32 @@ class QuotaAttributionTests(unittest.TestCase):
             self.assertEqual(window["estimated_percent"], 6.0)
             self.assertEqual(window["projected_next_10_percent"], 1.0)
 
+    def test_the_rate_remembers_the_whole_window_not_its_last_few_ticks(self) -> None:
+        """Two expensive points followed by eight cheap ones.
+
+        A tick fires on a whole percentage point, so the work it lands on is
+        close to arbitrary. Reading only the most recent ticks would forget the
+        expensive start entirely and project twenty times too high.
+        """
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+        ):
+            spend = 100.0
+            apply_quota_attribution(snapshot(20, [session("a", spend)]))
+            for point, cost in enumerate([100.0, 100.0] + [1.0] * 8, start=1):
+                spend += cost
+                apply_quota_attribution(snapshot(20 + point, [session("a", spend)]))
+
+            latest = snapshot(30, [session("a", spend)])
+            latest["sessions"][0]["projected_next_10_tasks_usd"] = 10
+            apply_quota_attribution(latest)
+            window = latest["sessions"][0]["quota_attribution"]["windows"][0]
+
+        # Ten points cost 208 of spend, so ten more units of spend buys about
+        # half a point. The last eight ticks alone would say ten points.
+        self.assertLess(float(window["projected_next_10_percent"]), 1.0)
+
     def test_retains_usage_until_the_rounded_provider_limit_advances(self) -> None:
         with (
             tempfile.TemporaryDirectory() as directory,

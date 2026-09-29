@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Measure how much quota a unit of work costs across the whole limit window rather
+  than its last few ticks, so one late reading can no longer swing a session's
+  share and its projection several-fold.
+
 ## 0.3.6 - 2026-09-29
 
 - Add `konvu-telemetry --version`, and report the installed version plus the running

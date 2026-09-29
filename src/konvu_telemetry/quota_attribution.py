@@ -86,6 +86,24 @@ def _forecast_weight(provider: str, session: dict[str, object]) -> float | None:
 
 
 def _calibration_rate(window: dict[str, object]) -> float | None:
+    """How much of the window one unit of work costs, over the whole window.
+
+    Measured across everything the window has seen rather than its last few
+    ticks. A tick fires on a whole percentage point, so the work it happens to
+    land on is close to arbitrary; averaging a handful of them lets one late
+    tick move the rate several-fold. The totals below keep moving in one
+    direction and settle as the window fills.
+    """
+    percent = _number(window.get("attributed_percent"))
+    weight = _number(window.get("attributed_weight"))
+    if (
+        percent is not None
+        and weight is not None
+        and percent >= MIN_FORECAST_PERCENT
+        and weight > 0
+    ):
+        return percent / weight
+    # State written before the totals existed still carries the samples.
     raw_samples = window.get("calibration_samples")
     if not isinstance(raw_samples, list):
         return None
@@ -252,6 +270,8 @@ def _reset_window(
     stored["used_percent"] = used
     stored["allocations"] = {}
     stored["calibration_samples"] = []
+    stored["attributed_percent"] = 0.0
+    stored["attributed_weight"] = 0.0
     stored["pending"] = {}
     reset = raw_window.get("resets_at")
     if isinstance(reset, str):
@@ -434,6 +454,12 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
                     allocations[session_id] = (
                         _number(allocations.get(session_id)) or 0.0
                     ) + increase * weight / total_weight
+                old_window["attributed_percent"] = (
+                    _number(old_window.get("attributed_percent")) or 0.0
+                ) + increase
+                old_window["attributed_weight"] = (
+                    _number(old_window.get("attributed_weight")) or 0.0
+                ) + total_weight
                 samples = old_window.setdefault("calibration_samples", [])
                 if isinstance(samples, list):
                     samples.append({"percent": increase, "weight": total_weight})
