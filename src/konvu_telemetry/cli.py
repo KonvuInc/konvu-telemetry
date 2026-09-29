@@ -275,6 +275,9 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard.add_argument("--port", type=int, default=DASHBOARD_PORT)
     dashboard.set_defaults(run=run_dashboard)
 
+    # Hooks are registered even though `main` dispatches them before argparse: setup
+    # only accepts a launcher whose `--help` names `REQUIRED_CONSOLE_COMMANDS`, so
+    # dropping them here would silently break every install.
     for name, run in HOOK_RUNNERS.items():
         register(name, f"Agent hook: {name}.").set_defaults(run=run)
 
@@ -287,7 +290,9 @@ def main(arguments: list[str] | None = None) -> None:
     # this build does not know, or an argument it does not accept, must still exit 0
     # in silence, because a non-zero hook blocks the user's prompt.
     command = argv[0] if argv else ""
-    if command.endswith("-hook"):
+    # A hook name is a bare word, so a mistyped flag still reaches argparse and errors
+    # rather than passing for a hook this build does not know and exiting 0.
+    if command.endswith("-hook") and not command.startswith("-"):
         hook = HOOKS.get(command)
         if hook is not None:
             hook()

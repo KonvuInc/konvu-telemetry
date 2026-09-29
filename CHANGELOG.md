@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Describe every command in `konvu-telemetry --help`, and accept each command's own
+  flags only. `--interval` and `--no-browser` belong to `setup`, `--interval` and
+  `--port` to `serve`, and `--port` to `dashboard`; passing one to a command that
+  does not take it now reports an error instead of ignoring it.
+
 ## 0.3.6 - 2026-09-29
 
 - Add `konvu-telemetry --version`, and report the installed version plus the running

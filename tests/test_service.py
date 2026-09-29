@@ -34,6 +34,7 @@ from konvu_telemetry.config import (
     BASELINE_SCHEMA_VERSION,
 )
 from konvu_telemetry.cli import build_parser, main as cli_main
+from konvu_telemetry.installer import REQUIRED_CONSOLE_COMMANDS
 from konvu_telemetry.display import (
     _session_tool_calls,
     claude_hook,
@@ -2991,6 +2992,17 @@ class CommandDispatchTests(unittest.TestCase):
             cli_main(["claude-hook", "--unknown-to-this-build"])
             cli_main(["future-hook"])
         hooks["claude-hook"].assert_called_once_with()
+
+    def test_help_names_every_command_the_launcher_check_looks_for(self) -> None:
+        """setup rejects a launcher whose `--help` omits these, so they must stay listed."""
+        help_text = build_parser().format_help()
+        for command in REQUIRED_CONSOLE_COMMANDS:
+            self.assertIn(command, help_text)
+
+    def test_an_unknown_flag_is_refused_rather_than_taken_for_a_hook(self) -> None:
+        with redirect_stderr(StringIO()), self.assertRaises(SystemExit) as refused:
+            cli_main(["--not-a-hook"])
+        self.assertEqual(refused.exception.code, 2)
 
     def test_the_installed_service_arguments_still_reach_the_collector_loop(
         self,
