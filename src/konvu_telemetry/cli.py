@@ -7,7 +7,17 @@ import json
 import sys
 
 from . import keymenu
-from .collector import main as collector_main
+from .collector import (
+    HOOK_RUNNERS,
+    HOOKS,
+    run_backtest_next_ten,
+    run_dashboard,
+    run_normalize,
+    run_once,
+    run_serve,
+    run_statusline,
+)
+from .config import DASHBOARD_PORT, package_version
 from .installer import service_status, setup, uninstall, uninstall_homebrew_package
 from .preferences import (
     CADENCES,
@@ -20,33 +30,28 @@ from .preferences import (
 from .tracking import set_tracking_enabled, tracking_status
 
 
-def installer_main(arguments: list[str]) -> None:
-    parser = argparse.ArgumentParser(description="Install Konvu's local usage monitor")
-    parser.add_argument("command", choices=["setup", "status", "uninstall"])
-    parser.add_argument("--interval", type=int, default=60)
-    parser.add_argument("--no-browser", action="store_true")
-    args = parser.parse_args(arguments)
-    if args.command == "setup":
-        print(
-            json.dumps(
-                setup(max(1, args.interval), not args.no_browser),
-                indent=2,
-            )
+def run_setup(arguments: argparse.Namespace) -> None:
+    print(
+        json.dumps(
+            setup(max(1, arguments.interval), not arguments.no_browser),
+            indent=2,
         )
-    elif args.command == "status":
-        print(json.dumps(service_status(), indent=2))
-    else:
-        print(json.dumps(uninstall(), indent=2), flush=True)
-        uninstall_homebrew_package()
+    )
 
 
-def tracking_main(arguments: list[str]) -> None:
-    parser = argparse.ArgumentParser(description="Control anonymous product analytics")
-    parser.add_argument("command", choices=["on", "off", "status"])
-    args = parser.parse_args(arguments)
-    if args.command == "on":
+def run_status(_arguments: argparse.Namespace) -> None:
+    print(json.dumps(service_status(), indent=2))
+
+
+def run_uninstall(_arguments: argparse.Namespace) -> None:
+    print(json.dumps(uninstall(), indent=2), flush=True)
+    uninstall_homebrew_package()
+
+
+def run_tracking(arguments: argparse.Namespace) -> None:
+    if arguments.state == "on":
         set_tracking_enabled(True)
-    elif args.command == "off":
+    elif arguments.state == "off":
         set_tracking_enabled(False)
     print(json.dumps({"enabled": tracking_status().enabled}))
 
@@ -166,18 +171,74 @@ def _choose_cadence_from_a_list(
     _save_cadence("custom", rule, jump_percent)
 
 
-def cadence_main(arguments: list[str]) -> None:
+def run_cadence(arguments: argparse.Namespace) -> None:
+    # Validated before either branch, so a bad threshold cannot slip through the
+    # interactive path after the non-interactive one has rejected it.
+    if arguments.jump_percent is not None and arguments.jump_percent <= 0:
+        arguments.parser.error("--jump-percent must be greater than zero")
+    if arguments.status:
+        if arguments.cadence or arguments.rule or arguments.jump_percent is not None:
+            arguments.parser.error(
+                "--status only reports the current choice; it cannot set one"
+            )
+        _print_cadence(read_preferences())
+        return
+    if arguments.cadence is None:
+        # The flags are carried into the menu rather than dropped, so a value the
+        # user passed is never ignored while the command reports success.
+        _choose_cadence_interactively(arguments.rule, arguments.jump_percent)
+        return
+    if not _save_cadence(arguments.cadence, arguments.rule, arguments.jump_percent):
+        raise SystemExit(2)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Declare every command once, so no command list can drift out of step."""
     parser = argparse.ArgumentParser(
-        description="Choose how often the Konvu usage box is shown inside a turn"
+        description="Local-first Claude Code and Codex usage monitoring"
     )
+    # Declared before the subcommand so the flag stands alone, which is what
+    # anyone checking a version types.
     parser.add_argument(
+        "--version",
+        action="version",
+        version=package_version(),
+        help="Print the installed version and exit.",
+    )
+    commands = parser.add_subparsers(dest="command", required=True, metavar="command")
+
+    def register(name: str, help_text: str) -> argparse.ArgumentParser:
+        command = commands.add_parser(name, help=help_text, description=help_text)
+        command.set_defaults(parser=command)
+        return command
+
+    install = register("setup", "Install the collector, status line and hooks.")
+    install.add_argument("--interval", type=int, default=60)
+    install.add_argument("--no-browser", action="store_true")
+    install.set_defaults(run=run_setup)
+
+    register("status", "Report whether the collector is running.").set_defaults(
+        run=run_status
+    )
+    register("uninstall", "Remove everything this installed.").set_defaults(
+        run=run_uninstall
+    )
+
+    tracking = register("telemetry", "Control anonymous product analytics.")
+    tracking.add_argument("state", choices=["on", "off", "status"])
+    tracking.set_defaults(run=run_tracking)
+
+    cadence = register(
+        "cadence", "Choose how often the Konvu usage box is shown inside a turn."
+    )
+    cadence.add_argument(
         "cadence",
         nargs="?",
         choices=sorted(CADENCES),
         help="Omit to choose from a list.",
     )
-    parser.add_argument("--rule", default="", help="Your rule, with cadence 'custom'.")
-    parser.add_argument(
+    cadence.add_argument("--rule", default="", help="Your rule, with cadence 'custom'.")
+    cadence.add_argument(
         "--jump-percent",
         type=float,
         default=None,
@@ -186,39 +247,46 @@ def cadence_main(arguments: list[str]) -> None:
             "Must be greater than zero."
         ),
     )
-    parser.add_argument(
+    cadence.add_argument(
         "--status",
         action="store_true",
         help="Print the current choice and exit without changing it.",
     )
-    args = parser.parse_args(arguments)
-    # Validated before either branch, so a bad threshold cannot slip through the
-    # interactive path after the non-interactive one has rejected it.
-    if args.jump_percent is not None and args.jump_percent <= 0:
-        parser.error("--jump-percent must be greater than zero")
-    if args.status:
-        if args.cadence or args.rule or args.jump_percent is not None:
-            parser.error("--status only reports the current choice; it cannot set one")
-        _print_cadence(read_preferences())
-        return
-    if args.cadence is None:
-        # The flags are carried into the menu rather than dropped, so a value the
-        # user passed is never ignored while the command reports success.
-        _choose_cadence_interactively(args.rule, args.jump_percent)
-        return
-    if not _save_cadence(args.cadence, args.rule, args.jump_percent):
-        raise SystemExit(2)
+    cadence.set_defaults(run=run_cadence)
+
+    register("once", "Collect one snapshot and exit.").set_defaults(run=run_once)
+
+    serve = register("serve", "Run the collector loop and the local dashboard.")
+    serve.add_argument("--interval", type=int, default=60)
+    serve.add_argument("--port", type=int, default=DASHBOARD_PORT)
+    serve.set_defaults(run=run_serve)
+
+    register(
+        "statusline", "Print the status line for the current session."
+    ).set_defaults(run=run_statusline)
+    register("normalize", "Write the normalized event export.").set_defaults(
+        run=run_normalize
+    )
+    register("backtest-next-ten", "Backtest the next-ten forecast.").set_defaults(
+        run=run_backtest_next_ten
+    )
+
+    dashboard = register("dashboard", "Open the local dashboard in a browser.")
+    dashboard.add_argument("--port", type=int, default=DASHBOARD_PORT)
+    dashboard.set_defaults(run=run_dashboard)
+
+    for name, run in HOOK_RUNNERS.items():
+        register(name, f"Agent hook: {name}.").set_defaults(run=run)
+
+    return parser
 
 
 def main(arguments: list[str] | None = None) -> None:
-    command = sys.argv[1:] if arguments is None else arguments
-    if command and command[0] == "cadence":
-        cadence_main(command[1:])
+    argv = sys.argv[1:] if arguments is None else arguments
+    # Hooks are dispatched before argparse: a name this build does not know must exit 0
+    # in silence, because a non-zero hook blocks the user's prompt.
+    command = argv[0] if argv else ""
+    if command.endswith("-hook") and command not in HOOKS:
         return
-    if command and command[0] == "telemetry":
-        tracking_main(command[1:])
-        return
-    if command and command[0] in {"setup", "status", "uninstall"}:
-        installer_main(command)
-        return
-    collector_main(command)
+    parsed = build_parser().parse_args(argv)
+    parsed.run(parsed)

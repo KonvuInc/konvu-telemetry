@@ -13,7 +13,7 @@ from konvu_telemetry.display import (
     record_usage_shown,
     should_show_usage,
 )
-from konvu_telemetry.cli import cadence_main
+from konvu_telemetry.cli import main as cli_main
 from konvu_telemetry.storage import custom_rule_module_path, preferences_path
 from konvu_telemetry.preferences import (
     CADENCES,
@@ -283,7 +283,7 @@ class PreferencesTests(unittest.TestCase):
     def test_the_menu_keeps_the_threshold_passed_on_the_command_line(self) -> None:
         """A flag given without a cadence must reach the write, not be dropped."""
         with patch("builtins.input", return_value="3"), redirect_stdout(StringIO()):
-            cadence_main(["--jump-percent", "25"])
+            cli_main(["cadence", "--jump-percent", "25"])
         stored = read_preferences()
         self.assertEqual(stored["cadence"], "usage-jump")
         self.assertEqual(stored["jump_percent"], 25.0)
@@ -291,7 +291,7 @@ class PreferencesTests(unittest.TestCase):
     def test_the_menu_reports_an_empty_custom_rule_instead_of_crashing(self) -> None:
         output = StringIO()
         with patch("builtins.input", side_effect=["5", "  "]), redirect_stdout(output):
-            cadence_main([])
+            cli_main(["cadence"])
         self.assertIn("Nothing changed", output.getvalue())
         self.assertEqual(read_preferences()["cadence"], DEFAULT_CADENCE)
 
@@ -305,7 +305,7 @@ class PreferencesTests(unittest.TestCase):
             redirect_stdout(output),
         ):
             with self.assertRaises(SystemExit) as exit_code:
-                cadence_main(["never"])
+                cli_main(["cadence", "never"])
         self.assertEqual(exit_code.exception.code, 2)
         self.assertIn("Could not save your choice", output.getvalue())
 

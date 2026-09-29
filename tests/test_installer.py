@@ -42,7 +42,7 @@ class InstallerTests(unittest.TestCase):
             ),
             patch("builtins.print"),
         ):
-            cli.installer_main(["uninstall"])
+            cli.main(["uninstall"])
         self.assertEqual(calls, ["local", "package"])
 
     def test_console_launcher_skips_a_stale_py_path_injected_script(self) -> None:
