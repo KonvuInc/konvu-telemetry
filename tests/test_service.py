@@ -142,6 +142,31 @@ class ServiceTests(unittest.TestCase):
                 service.collect_forever(1, MagicMock(), Lock(), coordinator)
             collect.assert_not_called()
 
+    def test_a_replaced_service_exits_unsuccessfully_for_launchd_to_restart(
+        self,
+    ) -> None:
+        server = MagicMock()
+
+        class ImmediateThread:
+            def __init__(self, *, kwargs: dict[str, Callable[[], None]], **_: object):
+                self.stop_replaced_service = kwargs["on_stale_install"]
+
+            def start(self) -> None:
+                self.stop_replaced_service()
+
+        with (
+            patch("konvu_telemetry.service.ThreadingHTTPServer", return_value=server),
+            patch("konvu_telemetry.service.Thread", ImmediateThread),
+            patch("konvu_telemetry.service.initialize_dashboard_data_available"),
+            patch("konvu_telemetry.service.flush_tracking_in_background"),
+            patch("builtins.print"),
+        ):
+            with self.assertRaises(SystemExit) as stopped:
+                service._run_local_service(60, 7824)
+        self.assertEqual(stopped.exception.code, service.UPGRADE_RESTART_EXIT_CODE)
+        server.shutdown.assert_called_once_with()
+        server.server_close.assert_called_once_with()
+
     def test_a_one_shot_run_never_takes_the_lock_from_a_running_collector(self) -> None:
         """Only the long-running service hands over; `once` has nothing to serve."""
         with (
