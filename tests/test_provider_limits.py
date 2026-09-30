@@ -622,6 +622,50 @@ class ProviderLimitsTests(unittest.TestCase):
             )
             self.assertEqual(destination.stat().st_mode & 0o777, 0o600)
 
+    def test_provider_quotas_keep_the_most_recent_poll(self) -> None:
+        """`once` and the service poll before locking, so the later writer may be older."""
+
+        def polled(at: float, **fields: object) -> dict[str, object]:
+            return {
+                "source": "provider_api",
+                "windows": [],
+                "poll_state": {
+                    "next_at": at + 120,
+                    "last_polled_at": at,
+                    "failures": 0,
+                },
+                **fields,
+            }
+
+        older = polled(100.0, windows=[{"used_percent": 40.0}])
+        newer = polled(220.0, windows=[{"used_percent": 47.0}])
+        cleared = polled(340.0, status="unavailable", failure="authentication_failed")
+        legacy = {"source": "provider_api", "windows": [{"used_percent": 1.0}]}
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "account-quotas.json"
+            with patch(
+                "konvu_telemetry.provider_limits.account_quotas_path",
+                return_value=destination,
+            ):
+                self.assertEqual(
+                    write_provider_quotas({"claude": newer}), {"claude": newer}
+                )
+                self.assertEqual(
+                    write_provider_quotas({"claude": older}), {"claude": newer}
+                )
+                self.assertEqual(json.loads(destination.read_text()), {"claude": newer})
+                # A later poll always lands, including one that cleared the provider.
+                self.assertEqual(
+                    write_provider_quotas({"claude": cleared}), {"claude": cleared}
+                )
+                # A record without poll state cannot be ordered and lands as before.
+                self.assertEqual(
+                    write_provider_quotas({"claude": legacy}), {"claude": legacy}
+                )
+                self.assertEqual(
+                    json.loads(destination.read_text()), {"claude": legacy}
+                )
+
     def test_poller_keeps_last_known_limits_through_two_auth_failures(self) -> None:
         claude = Mock(
             side_effect=[

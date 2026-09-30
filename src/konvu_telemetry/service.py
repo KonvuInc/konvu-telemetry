@@ -43,6 +43,7 @@ from .preferences import (
 )
 from .storage import (
     account_quotas_path,
+    collection_lock_path,
     collector_lock_path,
     health_path,
     parse_timestamp,
@@ -126,10 +127,10 @@ def _ask_holder_to_stand_down(handle: IO[str]) -> bool:
 
 @contextmanager
 def collector_process_lock(take_over: bool = False) -> Iterator[None]:
-    """Prevent two collector processes from writing the canonical snapshot.
+    """Keep a single long-running collector serving the dashboard.
 
-    The long-running service takes the lock over from an older collector; a
-    one-shot run does not, because there is nothing for it to keep serving.
+    The service takes the lock over from an older collector after an upgrade.
+    A one-shot run never takes it: it serializes with `collection_lock` instead.
     """
     path = collector_lock_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -146,6 +147,26 @@ def collector_process_lock(take_over: bool = False) -> Iterator[None]:
         handle.truncate()
         handle.write(str(os.getpid()))
         handle.flush()
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def collection_lock() -> Iterator[None]:
+    """Serialize one collection's writes across processes.
+
+    The service holds it only while writing, so `konvu-telemetry once` waits for
+    the current collection rather than exiting, and the quota-attribution ledger
+    and health record, which every collection reads and rewrites whole, are never
+    written by two collectors at once.
+    """
+    path = collection_lock_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+") as handle:
+        os.chmod(path, 0o600)
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         try:
             yield
         finally:
@@ -377,8 +398,8 @@ def collect_forever(
                 )
             except Exception:
                 provider_quotas = stored_provider_quotas()
-            with snapshot_lock:
-                write_provider_quotas(provider_quotas)
+            with snapshot_lock, collection_lock():
+                provider_quotas = write_provider_quotas(provider_quotas)
                 snapshot = build_snapshot(
                     started_at,
                     live_state,
@@ -390,12 +411,14 @@ def collect_forever(
             )
             if _DASHBOARD_DATA_AVAILABLE:
                 record_first_snapshot_ready()
-            write_health(time.time(), interval_seconds=interval_seconds)
+            with collection_lock():
+                write_health(time.time(), interval_seconds=interval_seconds)
         except Exception as error:
             collection_error = f"{type(error).__name__}: {error}"
             record_collector_failure()
             try:
-                write_health(time.time(), collection_error, interval_seconds)
+                with collection_lock():
+                    write_health(time.time(), collection_error, interval_seconds)
             except Exception as health_error:
                 LOGGER.error(
                     "Collector failed (%s); health write failed (%s)",

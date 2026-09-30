@@ -23,7 +23,7 @@ from .provider_limits import (
     write_provider_quotas,
 )
 from .service import (
-    collector_process_lock,
+    collection_lock,
     open_dashboard,
     run_local_service,
     write_health,
@@ -54,17 +54,20 @@ HOOK_RUNNERS: dict[str, Callable[[argparse.Namespace], None]] = {
 
 
 def run_once(_arguments: argparse.Namespace) -> None:
-    with collector_process_lock():
-        now = time.time()
-        try:
-            provider_quotas = ProviderLimitPoller(
-                initial_snapshots=stored_provider_quotas()
-            ).refresh(now)
-        except Exception:
-            provider_quotas = stored_provider_quotas()
-        write_provider_quotas(provider_quotas)
-        write_snapshot(build_snapshot(now, provider_quotas=provider_quotas))
-        write_health(now)
+    now = time.time()
+    try:
+        provider_quotas = ProviderLimitPoller(
+            initial_snapshots=stored_provider_quotas()
+        ).refresh(now)
+    except Exception:
+        provider_quotas = stored_provider_quotas()
+    # The write phase is serialized with a running service; the network fetch
+    # above stays outside so it never holds up the service's next collection.
+    with collection_lock():
+        provider_quotas = write_provider_quotas(provider_quotas)
+        collected_at = time.time()
+        write_snapshot(build_snapshot(collected_at, provider_quotas=provider_quotas))
+        write_health(collected_at)
 
 
 def run_serve(arguments: argparse.Namespace) -> None:

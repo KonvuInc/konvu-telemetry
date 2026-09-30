@@ -148,6 +148,10 @@ def collector_lock_path() -> Path:
     return home_dir() / "collector.lock"
 
 
+def collection_lock_path() -> Path:
+    return home_dir() / "collection.lock"
+
+
 def quota_attribution_path() -> Path:
     return home_dir() / "quota-attribution.json"
 
