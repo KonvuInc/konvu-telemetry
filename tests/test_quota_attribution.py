@@ -12,14 +12,19 @@ from konvu_telemetry.quota_attribution import (
 from konvu_telemetry.storage import quota_attribution_path
 
 
-def session(session_id: str, weight: float) -> dict[str, object]:
-    """Weight is recorded cost now, not a token count."""
-    return {
+def session(
+    session_id: str, weight: float, prompts: float | None = None
+) -> dict[str, object]:
+    """Weight is recorded cost; prompts drive the ten-prompt projection."""
+    row: dict[str, object] = {
         "id": session_id,
         "provider": "claude",
         "total_cost_usd": float(weight),
         "cost_status": "complete",
     }
+    if prompts is not None:
+        row["task_count"] = prompts
+    return row
 
 
 def snapshot(used: float, sessions: list[dict[str, object]]) -> dict[str, object]:
@@ -153,7 +158,7 @@ class QuotaAttributionTests(unittest.TestCase):
                 correction["sessions"][0]["quota_attribution"]["windows"][0][
                     "estimated_percent"
                 ],
-                6.0,
+                4.0,
             )
 
             reset = snapshot(1, [session("a", 300)])
@@ -411,25 +416,25 @@ class QuotaAttributionTests(unittest.TestCase):
             stored = next(iter(allocations.values()))["allocations"]
             self.assertEqual(stored, {"a": 5.0, "b": 1.0})
 
-    def test_projects_next_ten_after_first_real_calibration(self) -> None:
+    def test_projects_what_the_last_ten_prompts_burned(self) -> None:
+        """Twenty prompts that cost this session four points; the last ten of
+        them cost two, so the next ten are projected at two."""
         with (
             tempfile.TemporaryDirectory() as directory,
             patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
         ):
-            apply_quota_attribution(snapshot(20, [session("a", 100)]))
-            for used, tokens in ((22, 200), (24, 300)):
-                next_snapshot = snapshot(used, [session("a", tokens)])
-                next_snapshot["sessions"][0]["projected_next_10_tasks_usd"] = 50
-                apply_quota_attribution(next_snapshot)
-                window = next_snapshot["sessions"][0]["quota_attribution"]["windows"][0]
-                self.assertEqual(window["projected_next_10_percent"], 1.0)
+            apply_quota_attribution(snapshot(20, [session("a", 0, prompts=0)]))
+            for step in range(1, 21):
+                used = 20 + step // 5
+                apply_quota_attribution(
+                    snapshot(used, [session("a", step * 10.0, prompts=step)])
+                )
+            latest = snapshot(24, [session("a", 200.0, prompts=20)])
+            apply_quota_attribution(latest)
+            window = latest["sessions"][0]["quota_attribution"]["windows"][0]
 
-            calibrated = snapshot(26, [session("a", 400)])
-            calibrated["sessions"][0]["projected_next_10_tasks_usd"] = 50
-            apply_quota_attribution(calibrated)
-            window = calibrated["sessions"][0]["quota_attribution"]["windows"][0]
-            self.assertEqual(window["estimated_percent"], 6.0)
-            self.assertEqual(window["projected_next_10_percent"], 1.0)
+        self.assertEqual(window["estimated_percent"], 4.0)
+        self.assertEqual(window["projected_next_10_percent"], 2.0)
 
     def test_retains_usage_until_the_rounded_provider_limit_advances(self) -> None:
         with (
@@ -447,14 +452,15 @@ class QuotaAttributionTests(unittest.TestCase):
             self.assertEqual(window["estimated_percent"], 1.0)
             ledger = json.loads(quota_attribution_path().read_text())
             stored = next(iter(ledger["providers"]["claude"]["windows"].values()))
-            self.assertEqual(
-                stored["calibration_samples"], [{"percent": 1.0, "weight": 200.0}]
-            )
+            self.assertEqual(stored["allocations"], {"a": 1.0})
             self.assertEqual(stored["pending"], {})
 
-    def test_stable_calibration_estimates_work_before_the_next_provider_tick(
+    def test_the_share_holds_still_until_the_provider_reports_again(
         self,
     ) -> None:
+        """Work done since the last report has no measured cost, so it is not
+        priced into the share. The share is the session's cut of the points the
+        provider has actually reported, and it waits for the next one."""
         with (
             tempfile.TemporaryDirectory() as directory,
             patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
@@ -464,16 +470,68 @@ class QuotaAttributionTests(unittest.TestCase):
                 apply_quota_attribution(snapshot(used, [session("a", tokens)]))
 
             pending = snapshot(23, [session("a", 800)])
-            pending["sessions"][0]["projected_next_10_tasks_usd"] = 100
             apply_quota_attribution(pending)
 
             window = pending["sessions"][0]["quota_attribution"]["windows"][0]
-            self.assertEqual(window["estimated_percent"], 3.5)
-            self.assertEqual(window["projected_next_10_percent"], 0.5)
+            self.assertEqual(window["estimated_percent"], 3.0)
             ledger = json.loads(quota_attribution_path().read_text())
             stored = next(iter(ledger["providers"]["claude"]["windows"].values()))
             self.assertEqual(stored["allocations"], {"a": 3.0})
             self.assertEqual(stored["pending"], {"a": 100.0})
+
+    def test_a_rise_with_no_recorded_work_is_not_thrown_away(self) -> None:
+        """One burst of work can raise the reported percentage twice.
+
+        The first rise empties the tally of work done since the last one, so the
+        second arrives with nothing recorded against it. It still happened, so it
+        goes to whoever this window already credits rather than to nobody.
+        """
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+        ):
+            apply_quota_attribution(snapshot(20, [session("a", 100)]))
+            apply_quota_attribution(snapshot(21, [session("a", 130)]))
+            apply_quota_attribution(snapshot(22, [session("b", 40)]))
+            # A third rise while neither session's spend has moved at all.
+            apply_quota_attribution(snapshot(23, [session("a", 130), session("b", 40)]))
+
+            ledger = json.loads(quota_attribution_path().read_text())
+            stored = ledger_window(ledger, "claude", "five_hour")
+            allocations = stored["allocations"]
+
+        assert isinstance(allocations, dict)
+        self.assertAlmostEqual(sum(allocations.values()), 3.0, places=6)
+
+    def test_a_rise_is_split_by_tokens_rather_than_by_price(self) -> None:
+        """Two sessions, equal tokens, but one on a model that costs four times more.
+
+        A token costs about the same slice of the limit whichever model spent it,
+        so an equal split is right and a price-weighted one would hand the dearer
+        session four fifths of the rise.
+        """
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+        ):
+
+            def pair(cheap_cost: float, dear_cost: float, tokens: int) -> list[dict]:
+                rows = []
+                for name, cost in (("cheap", cheap_cost), ("dear", dear_cost)):
+                    row = session(name, cost)
+                    row["token_usage"] = {"input": tokens, "output": 0}
+                    rows.append(row)
+                return rows
+
+            apply_quota_attribution(snapshot(20, pair(0.0, 0.0, 0)))
+            apply_quota_attribution(snapshot(21, pair(1.0, 4.0, 1_000_000)))
+
+            ledger = json.loads(quota_attribution_path().read_text())
+            allocations = ledger_window(ledger, "claude", "five_hour")["allocations"]
+
+        assert isinstance(allocations, dict)
+        self.assertAlmostEqual(allocations["cheap"], 0.5, places=6)
+        self.assertAlmostEqual(allocations["dear"], 0.5, places=6)
 
     def test_reset_removes_share_and_forecast_from_the_previous_window(self) -> None:
         with (
@@ -502,21 +560,27 @@ class QuotaAttributionTests(unittest.TestCase):
             ledger = json.loads(quota_attribution_path().read_text())
             stored = next(iter(ledger["providers"]["claude"]["windows"].values()))
             self.assertEqual(stored["allocations"], {})
-            self.assertEqual(stored["calibration_samples"], [])
+            self.assertEqual(stored["history"], {})
             self.assertEqual(stored["pending"], {})
 
-    def test_rounded_provider_ticks_use_the_aggregate_calibration_rate(self) -> None:
+    def test_a_session_with_under_ten_prompts_is_scaled_to_ten(self) -> None:
+        """Five prompts costing one point project two over the next ten."""
         with (
             tempfile.TemporaryDirectory() as directory,
             patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
         ):
-            apply_quota_attribution(snapshot(20, [session("a", 100)]))
-            for used, tokens in ((22, 110), (24, 210), (26, 310)):
-                next_snapshot = snapshot(used, [session("a", tokens)])
-                next_snapshot["sessions"][0]["projected_next_10_tasks_usd"] = 50
-                apply_quota_attribution(next_snapshot)
-            window = next_snapshot["sessions"][0]["quota_attribution"]["windows"][0]
-            self.assertEqual(window["projected_next_10_percent"], 1.43)
+            apply_quota_attribution(snapshot(20, [session("a", 0, prompts=0)]))
+            for step in range(1, 6):
+                apply_quota_attribution(
+                    snapshot(
+                        20 + (step == 5), [session("a", step * 10.0, prompts=step)]
+                    )
+                )
+            latest = snapshot(21, [session("a", 50.0, prompts=5)])
+            apply_quota_attribution(latest)
+            window = latest["sessions"][0]["quota_attribution"]["windows"][0]
+
+        self.assertEqual(window["projected_next_10_percent"], 2.0)
 
     def test_each_window_gets_the_same_interval_and_a_reset_clears_its_ledger(
         self,
@@ -569,7 +633,7 @@ class QuotaAttributionTests(unittest.TestCase):
             ledger = json.loads(quota_attribution_path().read_text())
             five_hour_ledger = ledger_window(ledger, "claude", "five_hour")
             self.assertEqual(five_hour_ledger["allocations"], {})
-            self.assertEqual(five_hour_ledger["calibration_samples"], [])
+            self.assertEqual(five_hour_ledger["history"], {})
 
     def test_windows_retain_usage_until_each_one_advances(self) -> None:
         def snapshot_with_windows(
@@ -598,9 +662,7 @@ class QuotaAttributionTests(unittest.TestCase):
             five_hour = ledger_window(ledger, "claude", "five_hour")
             weekly = ledger_window(ledger, "claude", "weekly")
             self.assertEqual(five_hour["pending"], {"a": 200.0})
-            self.assertEqual(
-                weekly["calibration_samples"], [{"percent": 1.0, "weight": 400.0}]
-            )
+            self.assertEqual(weekly["allocations"], {"a": 1.0})
             self.assertEqual(weekly["pending"], {})
 
     def test_exhausted_plan_spend_starts_when_the_cutoff_is_observed(self) -> None:
@@ -640,15 +702,14 @@ if __name__ == "__main__":
 
 class QuotaWeightTests(unittest.TestCase):
     def test_forecast_never_exceeds_the_window_headroom(self) -> None:
-        """Whatever the calibrated rate says, a share of a window cannot exceed
-        what is left of that window."""
+        """However fast the last ten prompts were going, a share of a window
+        cannot exceed what is left of that window."""
         with (
             tempfile.TemporaryDirectory() as directory,
             patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
         ):
-            apply_quota_attribution(snapshot(90, [session("a", 100)]))
-            advanced = snapshot(97, [session("a", 200)])
-            advanced["sessions"][0]["projected_next_10_tasks_usd"] = 1_000_000.0
+            apply_quota_attribution(snapshot(90, [session("a", 100, prompts=1)]))
+            advanced = snapshot(97, [session("a", 200, prompts=2)])
             apply_quota_attribution(advanced)
             window = advanced["sessions"][0]["quota_attribution"]["windows"][0]
             self.assertLessEqual(window["projected_next_10_percent"], 3.0)

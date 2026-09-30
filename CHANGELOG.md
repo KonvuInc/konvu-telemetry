@@ -9,6 +9,15 @@
   so settings never point at a missing script.
 - Fail the release workflow, instead of silently skipping the release, when a
   pushed tag is not protected by a ruleset.
+- Divide each quota rise between sessions by the tokens they spent rather than by
+  what those tokens cost, because a token consumes about the same share of a limit
+  whichever model spent it while model prices differ severalfold.
+- Credit a rise that no running session recorded work for to the sessions the window
+  already credits, instead of discarding it.
+- Stop adding an estimate for work done since the provider last reported, which
+  inflated a session's share beyond the points actually reported.
+- Project the next ten prompts from the quota the session burned over its previous
+  ten, replacing a projected spend converted through a learned rate.
 
 ## 0.3.6 - 2026-09-29
 

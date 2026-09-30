@@ -7,25 +7,29 @@ import math
 from datetime import datetime
 from typing import TypedDict
 
+from .config import FORECAST_WINDOW
 from .storage import quota_attribution_path, write_private_json
 
 
 class SessionUsage(TypedDict):
     cost: float
     credits: float | None
+    tokens: float
 
 
 class StoredSessionUsage(SessionUsage, total=False):
     last_seen_at: float
 
 
-MIN_FORECAST_SAMPLES = 1
-MIN_FORECAST_PERCENT = 1.0
 RESET_TIMESTAMP_JITTER_SECONDS = 60.0
 LEGACY_RESET_MATCH_SECONDS = 2 * RESET_TIMESTAMP_JITTER_SECONDS
 SESSION_BASELINE_RETENTION_SECONDS = 32 * 24 * 60 * 60
 # 3: Session weight changed from raw token totals to recorded cost.
 # 4: Quota-window identity stopped including mutable reset timestamps.
+# Windows written before this release carry calibration samples instead of a
+# share history. Both are ignored by the version that does not use them, and a
+# window rebuilds whichever it needs from its next few ticks, so the shape
+# changed without a version bump.
 STATE_VERSION = 4
 
 
@@ -50,15 +54,28 @@ def _load_state() -> dict[str, object]:
     return state
 
 
-def _session_usage(session: dict[str, object]) -> SessionUsage | None:
-    """Weigh a session by recorded cost, not by a raw token count.
+def _session_tokens(session: dict[str, object]) -> float:
+    """Every token the provider metered for this session, cache reads included.
 
-    Summing every token bucket at parity made cache reads — which re-read the
-    whole conversation on every prompt — dominate the weight, so the calibrated
-    rate drifted with conversation length instead of tracking quota. Cost is
-    already priced per token type and per model, so it is the closest proxy we
-    hold for what a prompt actually consumes. Codex keeps credits, which are
-    what its quota is denominated in.
+    Measured against real quota movement, a token costs about the same amount of
+    limit whichever model spent it — within a fifth across the models observed —
+    while the models' prices differ fivefold. Splitting a rise by price therefore
+    over-credits whoever chose the dearer model.
+    """
+    usage = session.get("token_usage")
+    if not isinstance(usage, dict):
+        return 0.0
+    total = 0.0
+    for bucket in ("input", "output", "reasoning_output", "cache_write", "cache_read"):
+        total += _number(usage.get(bucket)) or 0.0
+    return total
+
+
+def _session_usage(session: dict[str, object]) -> SessionUsage | None:
+    """Weigh a session by the tokens it spent, falling back to its cost.
+
+    Cost remains as a fallback for a session whose token counts have not been
+    read yet, so a rise during that gap is still divided rather than dropped.
     """
     provider = session.get("provider")
     session_id = session.get("id")
@@ -68,41 +85,16 @@ def _session_usage(session: dict[str, object]) -> SessionUsage | None:
         return None
     cost = _number(session.get("total_cost_usd")) or 0.0
     credits = _number(session.get("total_credit_equivalent"))
-    return {"cost": cost, "credits": credits}
+    return {"cost": cost, "credits": credits, "tokens": _session_tokens(session)}
 
 
 def _weight(provider: str, usage: SessionUsage) -> float:
+    """What a session's work counts for when a rise is divided between sessions."""
+    if usage["tokens"] > 0:
+        return usage["tokens"]
     if provider == "codex" and usage["credits"] is not None:
         return usage["credits"]
     return usage["cost"]
-
-
-def _forecast_weight(provider: str, session: dict[str, object]) -> float | None:
-    """The projection must be measured the same way as the calibration weight,
-    or the rate and the number it multiplies are in different units."""
-    if provider == "codex":
-        return _number(session.get("projected_next_10_tasks_credit_equivalent"))
-    return _number(session.get("projected_next_10_tasks_usd"))
-
-
-def _calibration_rate(window: dict[str, object]) -> float | None:
-    raw_samples = window.get("calibration_samples")
-    if not isinstance(raw_samples, list):
-        return None
-    samples: list[tuple[float, float]] = []
-    for raw_sample in raw_samples:
-        if not isinstance(raw_sample, dict):
-            continue
-        percent = _number(raw_sample.get("percent"))
-        weight = _number(raw_sample.get("weight"))
-        if percent is not None and percent > 0 and weight is not None and weight > 0:
-            samples.append((percent, weight))
-    if len(samples) < MIN_FORECAST_SAMPLES:
-        return None
-    total_percent = sum(percent for percent, _ in samples)
-    if total_percent < MIN_FORECAST_PERCENT:
-        return None
-    return total_percent / sum(weight for _, weight in samples)
 
 
 def _snapshot_time(snapshot: dict[str, object]) -> float | None:
@@ -144,9 +136,9 @@ def _legacy_window_prefix(window: dict[str, object]) -> str | None:
 def _window_evidence(window: dict[str, object]) -> tuple[int, int, int]:
     allocations = window.get("allocations")
     pending = window.get("pending")
-    samples = window.get("calibration_samples")
+    history = window.get("history")
     return (
-        len(samples) if isinstance(samples, list) else 0,
+        len(history) if isinstance(history, dict) else 0,
         len(allocations) if isinstance(allocations, dict) else 0,
         len(pending) if isinstance(pending, dict) else 0,
     )
@@ -246,12 +238,84 @@ def _refresh_reset_timestamp(
         stored["resets_at"] = current_value
 
 
+def _record_share_history(
+    window: dict[str, object], session_id: str, prompts: float, share: float
+) -> None:
+    """Keep enough of a session's share history to look back ten prompts.
+
+    One entry per prompt count, so a session polled every two minutes between
+    prompts does not fill the list with copies of the same reading.
+    """
+    history = window.setdefault("history", {})
+    if not isinstance(history, dict):
+        window["history"] = history = {}
+    entries = history.setdefault(session_id, [])
+    if not isinstance(entries, list):
+        history[session_id] = entries = []
+    last = entries[-1] if entries else None
+    if isinstance(last, list) and len(last) == 2 and _number(last[0]) == prompts:
+        entries[-1] = [prompts, share]
+    else:
+        entries.append([prompts, share])
+    history[session_id] = entries[-(2 * FORECAST_WINDOW + 2) :]
+
+
+def _recent_burn(
+    window: dict[str, object], session_id: str, prompts: float, share: float
+) -> float | None:
+    """The quota this session was credited over its last ten prompts.
+
+    Used as the projection for its next ten. Backtested against what Codex
+    reported next over 2,565 real ten-prompt stretches, this beat converting a
+    projected spend through a learned rate, and it needs no conversion at all.
+    """
+    history = window.get("history")
+    entries = history.get(session_id) if isinstance(history, dict) else None
+    if not isinstance(entries, list) or not entries:
+        return None
+    earlier = [
+        entry
+        for entry in entries
+        if isinstance(entry, list)
+        and len(entry) == 2
+        and (_number(entry[0]) or 0.0) <= prompts - FORECAST_WINDOW
+    ]
+    if earlier:
+        return max(0.0, share - (_number(earlier[-1][1]) or 0.0))
+    # Fewer than ten prompts recorded: scale what the session has burned so far.
+    first = entries[0]
+    if not (isinstance(first, list) and len(first) == 2):
+        return None
+    span = prompts - (_number(first[0]) or 0.0)
+    if span <= 0:
+        return None
+    return max(0.0, (share - (_number(first[1]) or 0.0)) / span * FORECAST_WINDOW)
+
+
+def _spread_over_existing(allocations: dict[str, object], increase: float) -> None:
+    """Share a rise nobody was recorded for across whoever this window already credits.
+
+    Leaves it unattributed only when the window credits no one at all, because
+    there is then nothing to go on.
+    """
+    shares = {
+        session_id: value
+        for session_id, raw in allocations.items()
+        if isinstance(session_id, str) and (value := _number(raw)) and value > 0
+    }
+    total = sum(shares.values())
+    if total <= 0:
+        return
+    for session_id, value in shares.items():
+        allocations[session_id] = value + increase * value / total
+
+
 def _reset_window(
     stored: dict[str, object], raw_window: dict[str, object], used: float
 ) -> None:
     stored["used_percent"] = used
     stored["allocations"] = {}
-    stored["calibration_samples"] = []
+    stored["history"] = {}
     stored["pending"] = {}
     reset = raw_window.get("resets_at")
     if isinstance(reset, str):
@@ -346,6 +410,7 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
             stored_usage: StoredSessionUsage = {
                 "cost": usage["cost"],
                 "credits": usage["credits"],
+                "tokens": usage["tokens"],
             }
             if observed_at is not None:
                 stored_usage["last_seen_at"] = observed_at
@@ -354,6 +419,7 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
             if isinstance(earlier, dict):
                 old_cost = _number(earlier.get("cost")) or 0.0
                 old_credits = _number(earlier.get("credits"))
+                old_tokens = _number(earlier.get("tokens")) or 0.0
                 cost_delta = max(0.0, usage["cost"] - old_cost)
                 credit_delta = (
                     max(0.0, usage["credits"] - old_credits)
@@ -362,7 +428,11 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
                 )
                 weight = _weight(
                     provider,
-                    {"cost": cost_delta, "credits": credit_delta},
+                    {
+                        "cost": cost_delta,
+                        "credits": credit_delta,
+                        "tokens": max(0.0, usage["tokens"] - old_tokens),
+                    },
                 )
                 if weight > 0:
                     interval_weights[key] = weight
@@ -427,17 +497,23 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
                 continue
             increase = used - previous_used
             allocations = old_window.setdefault("allocations", {})
+            if not isinstance(allocations, dict):
+                old_window["allocations"] = allocations = {}
             total_weight = sum(_number(weight) or 0.0 for weight in pending.values())
-            if isinstance(allocations, dict) and total_weight > 0:
+            if total_weight > 0:
                 for session_id, raw_weight in pending.items():
                     weight = _number(raw_weight) or 0.0
                     allocations[session_id] = (
                         _number(allocations.get(session_id)) or 0.0
                     ) + increase * weight / total_weight
-                samples = old_window.setdefault("calibration_samples", [])
-                if isinstance(samples, list):
-                    samples.append({"percent": increase, "weight": total_weight})
-                    old_window["calibration_samples"] = samples[-8:]
+            else:
+                # One burst of work can raise the reported percentage twice. The
+                # first rise empties the tally, so the second arrives with nothing
+                # recorded against it. Dropping it loses the point for good, and
+                # on this machine that was 9 of 20 rises. The sessions already
+                # credited in this window are the best account of who did it.
+                _spread_over_existing(allocations, increase)
+                # No weight was measured, so this rise teaches nothing about rates.
             old_window["pending"] = {}
             old_window["used_percent"] = used
         for session in session_rows:
@@ -459,51 +535,39 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
                     if isinstance(allocations, dict)
                     else None
                 )
-                calibration = _calibration_rate(stored)
                 pending = stored.get("pending")
-                pending_weight = (
-                    _number(pending.get(session["id"]))
-                    if isinstance(pending, dict)
-                    else None
-                )
-                provisional_share = 0.0
+                # A session's share is its cut of the points the provider has
+                # actually reported, and nothing else. Work done since the last
+                # report has no measured cost yet, and pricing it from the
+                # learned rate inflated the share by more than the point the
+                # session was working towards.
+                share = confirmed_share or 0.0
+                prompts = _number(session.get("task_count"))
+                projection: float | None = None
+                if prompts is not None:
+                    projection = _recent_burn(
+                        stored, str(session["id"]), prompts, share
+                    )
+                    _record_share_history(stored, str(session["id"]), prompts, share)
+                # A session with no reported points yet is shown as zero rather
+                # than left blank. It is the truthful reading, and on a weekly
+                # window the wait for a first point runs to hours.
                 if (
-                    calibration is not None
-                    and pending_weight is not None
-                    and isinstance(pending, dict)
-                ):
-                    confirmed_total = (
-                        sum(_number(value) or 0.0 for value in allocations.values())
-                        if isinstance(allocations, dict)
-                        else 0.0
-                    )
-                    pending_total = sum(
-                        _number(value) or 0.0 for value in pending.values()
-                    )
-                    provisional_total = calibration * pending_total
-                    headroom = max(0.0, used_percent - confirmed_total)
-                    scale = (
-                        min(1.0, headroom / provisional_total)
-                        if provisional_total > 0
-                        else 0.0
-                    )
-                    provisional_share = calibration * pending_weight * scale
-                share = (confirmed_share or 0.0) + provisional_share
-                forecast_weight = _forecast_weight(provider, session)
-                if share > 0 or (
-                    forecast_weight is not None and calibration is not None
+                    share > 0
+                    or session["id"] in (pending if isinstance(pending, dict) else {})
+                    or projection is not None
                 ):
                     estimate: dict[str, object] = {
                         "period": raw_window.get("period"),
                         "estimated_percent": round(share, 2),
                         "scope": "observed_window",
                     }
-                    if forecast_weight is not None and calibration is not None:
-                        # A share of a window cannot exceed the window's
-                        # remaining headroom, whatever the calibrated rate says.
+                    if projection is not None:
+                        # A share of a window cannot exceed what is left of it,
+                        # however fast the last ten prompts were going.
                         headroom_percent = max(0.0, 100.0 - used_percent)
                         estimate["projected_next_10_percent"] = round(
-                            min(calibration * forecast_weight, headroom_percent), 2
+                            min(projection, headroom_percent), 2
                         )
                     estimates.append(estimate)
             session["quota_attribution"] = {

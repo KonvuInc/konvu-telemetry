@@ -590,7 +590,6 @@ def build_snapshot(
         costs_by_task: dict[float, float] = defaultdict(float)
         credit_equivalents_by_task: dict[float, float] = defaultdict(float)
         unpriced_tasks: set[float] = set()
-        unrated_credit_tasks: set[float] = set()
         starts = codex_task_boundaries.get(session_id, [])
         for event, cost, credits in zip(events, codex_costs, codex_credit_equivalents):
             task_index = bisect_right(starts, event.timestamp) - 1
@@ -599,10 +598,7 @@ def build_snapshot(
                     unpriced_tasks.add(starts[task_index])
             elif task_index >= 0:
                 costs_by_task[starts[task_index]] += cost
-            if credits is None:
-                if task_index >= 0 and requires_pricing(event):
-                    unrated_credit_tasks.add(starts[task_index])
-            elif task_index >= 0:
+            if credits is not None and task_index >= 0:
                 credit_equivalents_by_task[starts[task_index]] += credits
         for event, cost, credits in zip(
             child_events, child_costs, child_credit_equivalents
@@ -613,10 +609,7 @@ def build_snapshot(
                     unpriced_tasks.add(starts[task_index])
             elif task_index >= 0:
                 costs_by_task[starts[task_index]] += cost
-            if credits is None:
-                if task_index >= 0 and requires_pricing(event):
-                    unrated_credit_tasks.add(starts[task_index])
-            elif task_index >= 0:
+            if credits is not None and task_index >= 0:
                 credit_equivalents_by_task[starts[task_index]] += credits
         task_costs = [costs_by_task.get(start, 0.0) for start in starts]
         task_priced = [start not in unpriced_tasks for start in starts]
@@ -628,19 +621,9 @@ def build_snapshot(
             for start in starts
             if start not in unpriced_tasks
         ]
-        complete_task_credits = [
-            credit_equivalents_by_task.get(start, 0.0)
-            for start in starts
-            if start not in unrated_credit_tasks
-        ]
         next_10_forecast = (
             next_ten_forecast(complete_task_costs, "codex")
             if len(complete_task_costs) >= FORECAST_MIN_SAMPLES
-            else None
-        )
-        next_10_credit_forecast = (
-            next_ten_forecast(complete_task_credits, "codex")
-            if len(complete_task_credits) >= FORECAST_MIN_SAMPLES
             else None
         )
         task_count = len(starts)
@@ -670,11 +653,6 @@ def build_snapshot(
                 ),
                 "projected_next_10_tasks_usd": round(next_10_forecast, 6)
                 if isinstance(next_10_forecast, (int, float))
-                else None,
-                "projected_next_10_tasks_credit_equivalent": round(
-                    next_10_credit_forecast, 6
-                )
-                if isinstance(next_10_credit_forecast, (int, float))
                 else None,
                 "iterations": iteration_series(
                     starts, iteration_costs, all_events, task_priced
@@ -751,7 +729,6 @@ def build_snapshot(
     apply_out_of_plan_accounting(snapshot)
     for session in sessions:
         session.pop("total_credit_equivalent", None)
-        session.pop("projected_next_10_tasks_credit_equivalent", None)
     locate_compactions(snapshot)
     for session in sessions:
         for internal_field in (
