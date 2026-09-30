@@ -383,6 +383,18 @@ def is_konvu_hook(value: object, command: str) -> bool:
     ]
 
 
+def saved_claude_statusline() -> dict[str, object]:
+    """Read the wrapper's saved original status line, or nothing when unusable.
+
+    The state file is Konvu-owned, so an empty or corrupt one means the original
+    is unknown rather than that setup or uninstall should fail.
+    """
+    try:
+        return load_json_object(claude_statusline_state_path())
+    except (OSError, ValueError):
+        return {}
+
+
 def write_claude_statusline_wrapper(command: str) -> None:
     """Write private scripts that replay an existing status line before telemetry."""
     original = claude_statusline_original_path()
@@ -442,21 +454,21 @@ def install_claude_statusline(
     wrapper_command = shlex.quote(str(claude_statusline_path()))
     remove_wrapper = False
     if command == wrapper_command:
-        state_path = claude_statusline_state_path()
-        state = load_json_object(state_path) if state_path.is_file() else {}
-        original = state.get("statusLine")
+        original = saved_claude_statusline().get("statusLine")
         original_command = (
             original.get("command") if isinstance(original, dict) else None
         )
-        if (
-            isinstance(original, dict)
-            and isinstance(original_command, str)
-            and custom_statusline_invokes_konvu(original_command)
-        ):
+        if not isinstance(original, dict) or not isinstance(original_command, str):
+            # Nothing is left to replay, so the plain status line replaces a
+            # wrapper whose scripts may already be gone.
+            remove_wrapper = True
+        elif custom_statusline_invokes_konvu(original_command):
             if not _direct_konvu_statusline_command(original_command):
                 statusline = dict(original)
             remove_wrapper = True
         else:
+            # Rewriting the scripts heals a wrapper deleted since the last setup.
+            write_claude_statusline_wrapper(original_command)
             statusline["command"] = wrapper_command
     elif (
         command is not None
@@ -743,10 +755,8 @@ def remove_claude_statusline(create_backup: bool = True) -> bool:
         return False
     if create_backup:
         backup(path)
-    state_path = claude_statusline_state_path()
     if statusline.get("command") == shlex.quote(str(claude_statusline_path())):
-        state = load_json_object(state_path) if state_path.is_file() else {}
-        original = state.get("statusLine")
+        original = saved_claude_statusline().get("statusLine")
         if isinstance(original, dict):
             settings["statusLine"] = original
         else:
@@ -756,7 +766,7 @@ def remove_claude_statusline(create_backup: bool = True) -> bool:
     write_json(path, settings)
     claude_statusline_path().unlink(missing_ok=True)
     claude_statusline_original_path().unlink(missing_ok=True)
-    state_path.unlink(missing_ok=True)
+    claude_statusline_state_path().unlink(missing_ok=True)
     return True
 
 

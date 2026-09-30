@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Make `konvu-telemetry once` work while the collector service is running: it now
+  waits for the service's current write to finish instead of exiting.
+- Rerunning setup recreates a deleted Claude status line wrapper from its saved
+  state, and falls back to the plain Konvu status line when that state is gone,
+  so settings never point at a missing script.
+- Fail the release workflow, instead of silently skipping the release, when a
+  pushed tag is not protected by a ruleset.
+
 ## 0.3.6 - 2026-09-29
 
 - Add `konvu-telemetry --version`, and report the installed version plus the running

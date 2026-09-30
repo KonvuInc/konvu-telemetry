@@ -4,7 +4,7 @@
 
 1. Merge the release-readiness PRs and make the repository public.
 2. Confirm required CI checks pass on Intel and Apple Silicon.
-3. Require approval on the `release` environment and protect the `v*` tag pattern with a repository ruleset restricted to release maintainers.
+3. Require approval on the `release` environment and protect the `v*` tag pattern with a repository ruleset restricted to release maintainers. The release workflow fails, rather than silently skipping the release, when a pushed tag is not protected.
 4. Change `Unreleased` in `CHANGELOG.md` to the release version and date.
 5. Set the same version in `setup.cfg`.
 6. Create and push an annotated tag: `git tag -a v0.1.0 -m "Konvu Telemetry v0.1.0" && git push origin v0.1.0`.

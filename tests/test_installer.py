@@ -351,6 +351,120 @@ class InstallerTests(unittest.TestCase):
                 self.assertFalse(generated_original.exists())
                 self.assertFalse(saved.exists())
 
+    def test_setup_falls_back_to_the_plain_statusline_when_wrapper_state_is_gone(
+        self,
+    ) -> None:
+        """A wiped telemetry directory must not leave settings pointing at nothing."""
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            claude = home / ".claude"
+            telemetry = home / ".konvu" / "telemetry"
+            claude.mkdir()
+            telemetry.mkdir(parents=True)
+            launcher = telemetry / installer.LAUNCHER_NAME
+            launcher.write_text("#!/bin/sh\nexit 0\n")
+            launcher.chmod(0o700)
+            wrapper = telemetry / installer.CLAUDE_STATUSLINE_NAME
+            settings = claude / "settings.json"
+            settings.write_text(
+                json.dumps(
+                    {
+                        "statusLine": {
+                            "type": "command",
+                            "command": str(wrapper),
+                            "refreshInterval": 60,
+                        }
+                    }
+                )
+            )
+            for state in (None, "", json.dumps({}), json.dumps({"statusLine": 1})):
+                with self.subTest(state=state):
+                    saved = telemetry / installer.CLAUDE_STATUSLINE_STATE_NAME
+                    if state is None:
+                        saved.unlink(missing_ok=True)
+                    else:
+                        saved.write_text(state)
+                    with patch.object(installer.Path, "home", return_value=home):
+                        installer.install_claude_statusline(ensure_launcher=False)
+                    installed = json.loads(settings.read_text())["statusLine"]
+                    self.assertEqual(installed["command"], f"{launcher} statusline")
+                    self.assertFalse(wrapper.exists())
+                    self.assertFalse(saved.exists())
+                    settings.write_text(
+                        json.dumps(
+                            {"statusLine": {**installed, "command": str(wrapper)}}
+                        )
+                    )
+
+    def test_uninstall_drops_the_wrapper_when_its_state_file_is_empty(self) -> None:
+        """An unreadable Konvu-owned state file must not make uninstall fail."""
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            claude = home / ".claude"
+            telemetry = home / ".konvu" / "telemetry"
+            claude.mkdir()
+            telemetry.mkdir(parents=True)
+            wrapper = telemetry / installer.CLAUDE_STATUSLINE_NAME
+            wrapper.write_text("#!/bin/sh\nexit 0\n")
+            (telemetry / installer.CLAUDE_STATUSLINE_STATE_NAME).write_text("")
+            settings = claude / "settings.json"
+            settings.write_text(
+                json.dumps(
+                    {
+                        "statusLine": {"type": "command", "command": str(wrapper)},
+                        "theme": "dark",
+                    }
+                )
+            )
+            with patch.object(installer.Path, "home", return_value=home):
+                self.assertTrue(installer.remove_claude_statusline())
+            self.assertEqual(json.loads(settings.read_text()), {"theme": "dark"})
+            self.assertFalse(wrapper.exists())
+            self.assertEqual(sorted(path.name for path in telemetry.iterdir()), [])
+
+    def test_setup_recreates_a_deleted_statusline_wrapper_from_its_state(self) -> None:
+        """Settings still name the wrapper, so rerunning setup must rebuild it."""
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            claude = home / ".claude"
+            claude.mkdir()
+            console = home / "bin" / "konvu"
+            console.parent.mkdir()
+            console.write_text(
+                "#!/bin/sh\n"
+                'if [ "$1" = "statusline" ]; then\n'
+                "  cat >/dev/null\n"
+                "  printf telemetry\n"
+                "fi\n"
+            )
+            console.chmod(0o700)
+            original = {"type": "command", "command": "printf existing:; cat"}
+            settings = claude / "settings.json"
+            settings.write_text(json.dumps({"statusLine": original}))
+            with (
+                patch.object(installer.Path, "home", return_value=home),
+                patch.object(installer, "console_launcher", return_value=console),
+            ):
+                installer.install_claude_statusline()
+                wrapper = installer.claude_statusline_path()
+                wrapper.unlink()
+                installer.claude_statusline_original_path().unlink()
+                installer.install_claude_statusline()
+                installed = json.loads(settings.read_text())["statusLine"]
+                self.assertEqual(installed["command"], str(wrapper))
+                rendered = subprocess.run(
+                    [str(wrapper)],
+                    input='{"session_id":"session"}',
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                self.assertTrue(installer.remove_claude_statusline())
+            self.assertEqual(
+                rendered.stdout, 'existing:{"session_id":"session"}\ntelemetry'
+            )
+            self.assertEqual(json.loads(settings.read_text())["statusLine"], original)
+
     def test_setup_discards_saved_direct_konvu_statusline(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)

@@ -105,6 +105,7 @@ from konvu_telemetry.snapshot import (
 from konvu_telemetry.storage import (
     parse_timestamp,
     session_path,
+    snapshot_path,
     transcript_files,
     write_private_json_if_changed,
 )
@@ -167,7 +168,7 @@ class ServiceTests(unittest.TestCase):
         server.server_close.assert_called_once_with()
 
     def test_a_one_shot_run_never_takes_the_lock_from_a_running_collector(self) -> None:
-        """Only the long-running service hands over; `once` has nothing to serve."""
+        """Only the long-running service hands over; nothing else may evict it."""
         with (
             tempfile.TemporaryDirectory() as directory,
             patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
@@ -239,7 +240,7 @@ class ServiceTests(unittest.TestCase):
             patch("konvu_telemetry.collector.write_snapshot"),
             patch("konvu_telemetry.collector.write_health"),
             patch(
-                "konvu_telemetry.collector.collector_process_lock",
+                "konvu_telemetry.collector.collection_lock",
                 return_value=nullcontext(),
             ),
         ):
@@ -247,6 +248,41 @@ class ServiceTests(unittest.TestCase):
             cli_main(["once"])
         build.assert_called_once_with(100.0, provider_quotas=quotas)
         write_quotas.assert_called_once_with(quotas)
+
+    def test_once_collects_while_the_service_holds_the_collector_lock(self) -> None:
+        """`once` promises one snapshot; an installed service must not defeat it."""
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+            patch("konvu_telemetry.collector.time.time", return_value=100.0),
+            patch("konvu_telemetry.collector.ProviderLimitPoller") as poller,
+            patch("konvu_telemetry.collector.build_snapshot", return_value={}),
+            service.collector_process_lock(take_over=True),
+        ):
+            poller.return_value.refresh.return_value = {}
+            cli_main(["once"])
+            self.assertEqual(service.load_health(now=100.0)["status"], "healthy")
+            self.assertTrue(snapshot_path().is_file())
+
+    def test_once_waits_for_the_service_collection_to_finish_writing(self) -> None:
+        """Both rewrite the quota ledger whole, so their writes never interleave."""
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+            patch("konvu_telemetry.collector.time.time", return_value=100.0),
+            patch("konvu_telemetry.collector.ProviderLimitPoller") as poller,
+            patch("konvu_telemetry.collector.build_snapshot", return_value={}),
+        ):
+            poller.return_value.refresh.return_value = {}
+            once = Thread(target=cli_main, args=(["once"],), daemon=True)
+            with service.collection_lock():
+                once.start()
+                once.join(timeout=0.5)
+                self.assertTrue(once.is_alive())
+                self.assertFalse(snapshot_path().exists())
+            once.join(timeout=10)
+            self.assertFalse(once.is_alive())
+            self.assertTrue(snapshot_path().is_file())
 
     def test_usage_completeness_rejects_boolean_token_counters(self) -> None:
         self.assertTrue(

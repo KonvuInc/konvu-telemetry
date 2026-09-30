@@ -82,6 +82,6 @@ Setup enables anonymous product analytics by default and preserves an existing c
 - Dashboard responses use ETags, and the browser fetches detailed history only for the open session.
 - Hooks read the collector's existing session output and never force collection. Their only writes are the per-session `shown/` record, and only under the `usage-jump` cadence. Under the custom cadence they also execute the user's own `custom_rule.py`.
 - Failed analytics delivery retains stable event IDs and uses exponential backoff capped at 24 hours.
-- A second server cannot bind the same port and exits before starting another collector loop.
+- A second server cannot bind the same port and exits before starting another collector loop. `konvu-telemetry once` never evicts the running service; it waits for the service's current write phase on a shared collection lock, so the two never rewrite the quota-attribution ledger at the same time.
 
 JSON is sufficient for the first release because the process writes one bounded current snapshot, small state files, and one file per session. SQLite becomes useful when the product needs arbitrary historical queries, migrations, or concurrent writers.
