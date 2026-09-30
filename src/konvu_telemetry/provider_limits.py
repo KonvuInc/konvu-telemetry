@@ -16,10 +16,11 @@ import stat
 import subprocess
 import sys
 import time
-from typing import Callable, Literal, Protocol, cast
+from typing import Callable, Literal
 from urllib.error import HTTPError, URLError
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import Request
 
+from .outbound import HTTPResponse, open_without_redirects
 from .storage import (
     account_quotas_path,
     snapshot_path,
@@ -41,6 +42,7 @@ RATE_LIMIT_JITTER_FRACTION = 0.1
 RATE_LIMIT_MAX_JITTER_SECONDS = 5 * 60.0
 REQUEST_TIMEOUT_SECONDS = 10.0
 MAX_RESPONSE_BYTES = 256 * 1024
+PIPE_CHUNK_BYTES = 64 * 1024
 LOGGER = logging.getLogger(__name__)
 
 FailureReason = Literal[
@@ -52,16 +54,6 @@ FailureReason = Literal[
     "rate_limited",
     "service_unavailable",
 ]
-
-
-class HTTPResponse(Protocol):
-    headers: object
-
-    def read(self, size: int = -1) -> bytes: ...
-
-    def __enter__(self) -> HTTPResponse: ...
-
-    def __exit__(self, *args: object) -> None: ...
 
 
 OpenURL = Callable[[Request, float], HTTPResponse]
@@ -86,11 +78,6 @@ class RPCResponse:
 class CodexCredentials:
     access_token: str
     account_id: str | None
-
-
-class _NoRedirect(HTTPRedirectHandler):
-    def redirect_request(self, *args: object, **kwargs: object) -> None:
-        return None
 
 
 def stored_provider_quotas() -> dict[str, object]:
@@ -163,7 +150,18 @@ def _percentage(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     percentage = float(value)
-    return percentage if math.isfinite(percentage) and 0 <= percentage <= 100 else None
+    if not math.isfinite(percentage) or percentage < 0:
+        return None
+    # Providers report slightly over 100 once a window is exhausted; keep it.
+    return min(percentage, 100.0)
+
+
+def _remaining_percentage(value: object) -> float | None:
+    """Validate a remaining figure, where overshoot below zero means exhausted."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    remaining = float(value)
+    return _percentage(max(0.0, remaining)) if math.isfinite(remaining) else None
 
 
 def _iso_reset(value: object) -> str | None:
@@ -297,7 +295,7 @@ def decode_codex_usage(body: object, captured_at: str) -> dict[str, object] | No
             windows.append(window)
         monthly = raw_limits.get("individualLimit")
         if isinstance(monthly, dict):
-            remaining = _percentage(monthly.get("remainingPercent"))
+            remaining = _remaining_percentage(monthly.get("remainingPercent"))
             if remaining is not None:
                 monthly_window = _window(
                     "monthly",
@@ -505,15 +503,9 @@ def _retry_after(headers: object) -> float | None:
     return seconds if math.isfinite(seconds) and seconds >= 0 else None
 
 
-def _open_url(request: Request, timeout: float) -> HTTPResponse:
-    return cast(
-        HTTPResponse, build_opener(_NoRedirect()).open(request, timeout=timeout)
-    )
-
-
 def fetch_claude_limits(
     now: float | None = None,
-    opener: OpenURL = _open_url,
+    opener: OpenURL = open_without_redirects,
     token_reader: Callable[[], str | None] = read_claude_access_token,
 ) -> FetchResult:
     """Fetch Claude quota once; credentials remain in memory for this request only."""
@@ -583,51 +575,74 @@ def _codex_executable() -> str | None:
     return None
 
 
-def _send(process: subprocess.Popen[str], message: dict[str, object]) -> None:
+def _send(process: subprocess.Popen[bytes], message: dict[str, object]) -> None:
     if process.stdin is None:
         raise OSError("Codex app-server stdin unavailable")
-    process.stdin.write(json.dumps(message, separators=(",", ":")) + "\n")
+    process.stdin.write(json.dumps(message, separators=(",", ":")).encode() + b"\n")
     process.stdin.flush()
 
 
-def _response(
-    process: subprocess.Popen[str], request_id: int, deadline: float
-) -> RPCResponse | None:
+def _read_line(
+    process: subprocess.Popen[bytes], deadline: float, pending: bytearray
+) -> bytes | None:
+    """Return the next record, or None at the deadline, at EOF, or past the size limit."""
     if process.stdout is None:
         return None
-    with selectors.DefaultSelector() as selector:
-        selector.register(process.stdout, selectors.EVENT_READ)
-        while time.monotonic() < deadline:
-            events = selector.select(max(0.0, deadline - time.monotonic()))
-            if not events:
+    while True:
+        end = pending.find(b"\n")
+        if end >= 0:
+            line = bytes(pending[: end + 1])
+            del pending[: end + 1]
+            return line if len(line) <= MAX_RESPONSE_BYTES else None
+        if len(pending) > MAX_RESPONSE_BYTES:
+            return None
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        # Read the raw descriptor so the selector and the buffer agree on what is pending.
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            if not selector.select(remaining):
                 return None
-            line = process.stdout.readline(MAX_RESPONSE_BYTES + 1)
-            if not line or len(line) > MAX_RESPONSE_BYTES:
-                return None
-            try:
-                message = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(message, dict) or message.get("id") != request_id:
-                continue
-            result = message.get("result")
-            if isinstance(result, dict):
-                return RPCResponse(result=result)
-            error = message.get("error")
-            error_code = error.get("code") if isinstance(error, dict) else None
-            return RPCResponse(
-                error_code=(
-                    error_code
-                    if isinstance(error_code, int) and not isinstance(error_code, bool)
-                    else None
-                )
+        chunk = os.read(process.stdout.fileno(), PIPE_CHUNK_BYTES)
+        if not chunk:
+            return None
+        pending += chunk
+
+
+def _response(
+    process: subprocess.Popen[bytes],
+    request_id: int,
+    deadline: float,
+    pending: bytearray,
+) -> RPCResponse | None:
+    while True:
+        line = _read_line(process, deadline, pending)
+        if line is None:
+            return None
+        try:
+            message = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(message, dict) or message.get("id") != request_id:
+            continue
+        result = message.get("result")
+        if isinstance(result, dict):
+            return RPCResponse(result=result)
+        error = message.get("error")
+        error_code = error.get("code") if isinstance(error, dict) else None
+        return RPCResponse(
+            error_code=(
+                error_code
+                if isinstance(error_code, int) and not isinstance(error_code, bool)
+                else None
             )
-    return None
+        )
 
 
 def fetch_codex_direct_limits(
     now: float | None = None,
-    opener: OpenURL = _open_url,
+    opener: OpenURL = open_without_redirects,
     credential_reader: Callable[[], CodexCredentials | None] = read_codex_credentials,
 ) -> FetchResult:
     """Fetch Codex's weekly quota directly with the existing local credential."""
@@ -677,15 +692,15 @@ def fetch_codex_app_server_limits(now: float | None = None) -> FetchResult:
     executable = _codex_executable()
     if executable is None:
         return FetchResult(None, unavailable=True, failure="service_unavailable")
-    process: subprocess.Popen[str] | None = None
+    process: subprocess.Popen[bytes] | None = None
+    pending = bytearray()
     try:
         process = subprocess.Popen(
             [executable, "app-server", "--stdio"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            text=True,
-            bufsize=1,
+            bufsize=0,
         )
         deadline = time.monotonic() + REQUEST_TIMEOUT_SECONDS
         _send(
@@ -699,7 +714,7 @@ def fetch_codex_app_server_limits(now: float | None = None) -> FetchResult:
                 },
             },
         )
-        initialized = _response(process, 1, deadline)
+        initialized = _response(process, 1, deadline, pending)
         if initialized is None or initialized.result is None:
             return FetchResult(None, failure="service_unavailable")
         _send(process, {"method": "initialized"})
@@ -711,7 +726,7 @@ def fetch_codex_app_server_limits(now: float | None = None) -> FetchResult:
                 "params": {"refreshToken": False},
             },
         )
-        account_response = _response(process, 2, deadline)
+        account_response = _response(process, 2, deadline, pending)
         if account_response is None:
             return FetchResult(None, failure="service_unavailable")
         if account_response.result is None:
@@ -742,7 +757,7 @@ def fetch_codex_app_server_limits(now: float | None = None) -> FetchResult:
                 "params": {"excludeResetCreditDetails": True},
             },
         )
-        response = _response(process, 3, deadline)
+        response = _response(process, 3, deadline, pending)
         if response is None:
             return FetchResult(None, failure="service_unavailable")
         if response.result is None:
@@ -760,16 +775,27 @@ def fetch_codex_app_server_limits(now: float | None = None) -> FetchResult:
     except (OSError, ValueError):
         return FetchResult(None, failure="service_unavailable")
     finally:
-        if process is not None and process.poll() is None:
+        if process is not None:
+            _stop_process(process)
+
+
+def _stop_process(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is None:
+        try:
+            process.terminate()
+            process.wait(timeout=1)
+        except (OSError, subprocess.TimeoutExpired):
             try:
-                process.terminate()
+                process.kill()
                 process.wait(timeout=1)
             except (OSError, subprocess.TimeoutExpired):
-                try:
-                    process.kill()
-                    process.wait(timeout=1)
-                except (OSError, subprocess.TimeoutExpired):
-                    pass
+                pass
+    for stream in (process.stdin, process.stdout):
+        if stream is not None:
+            try:
+                stream.close()
+            except OSError:
+                pass
 
 
 def fetch_codex_limits(now: float | None = None) -> FetchResult:
@@ -963,9 +989,7 @@ class ProviderLimitPoller:
                         and failure == "authentication_failed"
                         and not temporary_auth_failure
                     ):
-                        self._failures[provider] = 3
-                    elif result.unavailable and not temporary_auth_failure:
-                        self._failures[provider] = 0
+                        self._failures[provider] = max(3, self._failures[provider] + 1)
                     else:
                         self._failures[provider] += 1
                     if result.snapshot is not None:

@@ -1,6 +1,7 @@
 import json
 from contextlib import redirect_stdout
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from io import StringIO
 from queue import SimpleQueue
 import tempfile
@@ -8,6 +9,7 @@ from threading import Event, Lock, Thread
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
+from urllib.error import HTTPError
 
 from konvu_telemetry import cli, tracking
 from konvu_telemetry.tracking import TrackingStore
@@ -505,15 +507,42 @@ class TrackingStoreTests(unittest.TestCase):
                 json.loads((directory / "tracking-queue.json").read_text()), []
             )
 
-    def test_redirected_delivery_is_not_accepted(self) -> None:
-        response = Mock()
-        response.status = 200
-        response.geturl.return_value = "https://example.com/redirected"
-        response.__enter__ = Mock(return_value=response)
-        response.__exit__ = Mock(return_value=False)
-        with patch("konvu_telemetry.tracking.urlopen", return_value=response):
-            with self.assertRaisesRegex(OSError, "redirected"):
-                tracking._send_to_posthog(b"{}")
+    def test_a_redirect_is_refused_before_any_request_follows_it(self) -> None:
+        received: list[tuple[str, bytes]] = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                self.respond(302)
+
+            def do_GET(self) -> None:
+                self.respond(200)
+
+            def respond(self, status: int) -> None:
+                length = int(self.headers.get("Content-Length") or 0)
+                received.append((self.path, self.rfile.read(length)))
+                self.send_response(status)
+                if status == 302:
+                    self.send_header("Location", "/elsewhere/")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *args: object) -> None:
+                return None
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            batch_url = f"http://127.0.0.1:{server.server_port}/batch/"
+            with patch("konvu_telemetry.tracking.POSTHOG_BATCH_URL", batch_url):
+                with self.assertRaises(OSError) as refused:
+                    tracking._send_to_posthog(b'{"batch":[]}')
+        finally:
+            server.shutdown()
+            server.server_close()
+
+        self.assertEqual(received, [("/batch/", b'{"batch":[]}')])
+        self.assertIsInstance(refused.exception, HTTPError)
+        refused.exception.close()
 
     def test_top_level_help_lists_telemetry_command(self) -> None:
         output = StringIO()
