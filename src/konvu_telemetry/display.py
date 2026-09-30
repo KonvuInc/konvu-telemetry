@@ -447,13 +447,14 @@ def meter(value: object, width: int = 10) -> str:
     return "█" * filled + "░" * (width - filled)
 
 
-def hook_quota_meters(quota_text: str) -> str:
-    """Convert recorded provider limit text into small, readable box meters."""
-    labels = {"5-hour": "5h", "weekly": "Week", "monthly": "Month"}
+def hook_quota_meters(quota_text: str, include_monthly: bool = False) -> str:
+    """Convert the applicable recorded limits into small, readable box meters."""
+    labels = {"5-hour": "5h", "weekly": "Week", "monthly": "Credits"}
     matches = re.findall(r"(\d+(?:\.\d+)?)% (5-hour|weekly|monthly) limit", quota_text)
     return "  ".join(
         f"{labels[label]} [{meter(float(used), 7)}] {percentage(float(used))}"
         for used, label in matches
+        if label != "monthly" or include_monthly
     )
 
 
@@ -508,7 +509,9 @@ def usage_box_lines(session: dict[str, object], quota_text: str) -> list[str]:
         context_row = f"Context [{meter(used, 7)}] {percentage(used)}"
     else:
         context_row = f"Context {context}"
-    quota_meters = hook_quota_meters(quota_text)
+    quota_meters = hook_quota_meters(
+        quota_text, usage_mode in {"api_billed", "exhausted"}
+    )
     if session.get("quota_status") == "stale" and quota_meters:
         quota_meters = f"Last known {quota_meters}"
     meter_row = f"{quota_meters}  {context_row}" if quota_meters else context_row

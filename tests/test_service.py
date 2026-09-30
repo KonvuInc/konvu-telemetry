@@ -2202,6 +2202,19 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(lines[-1], "╰─")
         self.assertIn("│ ⏱️ Week [░░░░░░░] 3.0%  Context [████░░░] 50.0%", lines)
 
+    def test_usage_box_hides_codex_credit_limit_until_the_plan_is_exhausted(
+        self,
+    ) -> None:
+        quota_text = "3.0% weekly limit · 100.0% monthly limit"
+        included = {**self.shared_row_session(), "usage_mode": "included"}
+        exhausted = {**self.shared_row_session(), "usage_mode": "exhausted"}
+
+        self.assertNotIn("Credits", "\n".join(usage_box_lines(included, quota_text)))
+        self.assertIn(
+            "Credits [███████] 100.0%",
+            "\n".join(usage_box_lines(exhausted, quota_text)),
+        )
+
     def test_usage_box_does_not_label_an_unavailable_plan_as_paying(self) -> None:
         session = {**self.shared_row_session(), "usage_mode": "unknown"}
 
