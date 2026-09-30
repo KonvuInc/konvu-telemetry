@@ -737,7 +737,10 @@ function groupHeading(group) {
     "<h2>" + (group.paying ? "Spending real money" : "Within your plan") + "</h2>" +
     '<span class="head-count">' + n + " session" + (n === 1 ? "" : "s") + "</span>" +
     (waiting ? '<span class="head-warn" title="Quota is spent, so the next prompts will be charged. Nothing has been billed yet.">Quota spent — billing starts on the next prompt</span>' : "") +
-    ('<div class="heading-controls"><div class="quota-inline">' + quotaInline(group.providers) + "</div>" +
+    ('<div class="heading-controls"><div class="quota-inline">' + quotaInline(
+      group.providers,
+      group.providers.some((provider) => providerExhausted(provider, group.rows))
+    ) + "</div>" +
         '<label class="sort-control">Sort<select class="sort-select" aria-label="Sort sessions">' +
         (group.paying
           ? [["spent", "Most spent"], ["forecast", "Highest forecast"], ["share", "Share of spend"], ["context", "Context used"], ["activity", "Last activity"]]
@@ -838,19 +841,21 @@ function kpiBanner(rows) {
   return tiles.length ? '<div class="kpi-grid">' + tiles.join("") + "</div>" : "";
 }
 /* Light meters, one bordered pill per provider, logo as the only label. */
-function quotaInline(providers) {
+function quotaInline(providers, showCodexCredits = false) {
   const quotas = state.payload?.account_quotas || {};
   return (providers && providers.length ? providers : ["claude", "codex"])
     .map((id) => {
       const quotaState = providerQuotaState(id, quotas[id]);
-      const wanted = id === "codex" ? ["weekly", "monthly"] : ["five_hour", "weekly"];
+      const wanted = id === "codex"
+        ? (showCodexCredits ? ["weekly", "monthly"] : ["weekly"])
+        : ["five_hour", "weekly"];
       const windows = Array.isArray(quotas[id]?.windows) ? quotas[id].windows : [];
       const meters = windows
         .filter((w) => w && finite(w.used_percent) && wanted.includes(w.period))
         .sort((a, b) => wanted.indexOf(a.period) - wanted.indexOf(b.period))
         .map((w) => {
           const used = Math.max(0, Math.min(100, w.used_percent));
-          const label = w.period === "five_hour" ? "5h" : w.period === "weekly" ? "week" : "month";
+          const label = w.period === "five_hour" ? "5h" : w.period === "weekly" ? "week" : "credits";
           return '<span class="qm"><i>' + label + '</i><u><em style="width:' + used + '%"></em></u><b>' + percentage(used) + "</b></span>";
         })
         .join("");
@@ -2335,6 +2340,13 @@ function browserAlerts(payload) {
   for (const [provider, quotas] of Object.entries(payload.account_quotas || {})) {
     if (quotas?.status === "stale") continue;
     for (const window of Array.isArray(quotas?.windows) ? quotas.windows : []) {
+      if (
+        provider === "codex" &&
+        window?.period === "monthly" &&
+        !providerExhausted(provider, payload.sessions || [])
+      ) {
+        continue;
+      }
       if (!finite(window?.used_percent)) continue;
       const threshold = [100, 80, 50].find((value) => window.used_percent >= value);
       const period = window.period || duration(window.window_minutes * 60);
