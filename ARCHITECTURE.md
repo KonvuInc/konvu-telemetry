@@ -55,14 +55,14 @@ Konvu Telemetry is one Python package with a single resident process. The proces
 | `~/.konvu/telemetry/collector.lock` | Held by the running service so a second collector exits, or hands over after an upgrade | `0600` |
 | `~/.konvu/telemetry/collection.lock` | Cross-process lock so `once` and the service never write one collection at the same time | `0600` |
 | `~/.konvu/telemetry/quota-attribution.json` | Quota-share ledger, read and rewritten whole on every collection | `0600` |
-| `~/.konvu/telemetry/custom_rule.py` | User-authored `should_show(context)` rule, kept outside the package so upgrades cannot erase it | User-owned |
+| `~/.konvu/telemetry/custom_rule.py` | User-authored `should_show(context)` rule, kept outside the package so upgrades cannot erase it; uninstall removes it with the rest of the directory | User-owned |
 | `~/.konvu/telemetry/shown/*.json` | Per-session record of the usage figure the last box displayed, pruned on the session retention schedule | `0600` |
 | `~/.konvu/telemetry/collector*.log` | LaunchAgent stdout and stderr | User-owned |
 | `~/Library/LaunchAgents/com.konvu.telemetry.plist` | Per-user service definition | User-owned |
 | `~/.claude/settings.json` | Optional Claude status line plus `UserPromptSubmit` hook merge | `0600` after write |
 | `~/.codex/hooks.json` | Optional Codex `Stop` and `UserPromptSubmit` hook merge | `0600` after write |
 
-Raw transcripts remain in `~/.claude/projects` and `~/.codex/sessions`. Normalized session files expire after seven days. Uninstall removes the service, launcher, and Konvu-owned config entries but preserves telemetry data for manual inspection or deletion.
+Raw transcripts remain in `~/.claude/projects` and `~/.codex/sessions`. Normalized session files expire after seven days. Uninstall removes the service, launcher, and Konvu-owned config entries, and deletes the whole `~/.konvu/telemetry` directory, including telemetry data, `custom_rule.py`, and the configuration backups setup wrote.
 
 ## Configuration
 
