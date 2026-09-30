@@ -485,8 +485,8 @@ class InstallerTests(unittest.TestCase):
             launcher.write_text("#!/bin/sh\nexit 0\n")
             launcher.chmod(0o700)
             old_command = (
-                "cd /Users/ag/Desktop/code/konvu-telemetry && exec env PYTHONPATH=src "
-                "/tmp/konvu-telemetry-ci-venv/bin/konvu-telemetry statusline"
+                "cd /path/to/checkout && exec env PYTHONPATH=src "
+                "/path/to/venv/bin/konvu-telemetry statusline"
             )
             wrapper = telemetry / installer.CLAUDE_STATUSLINE_NAME
             wrapper.write_text("#!/bin/sh\nexit 0\n")

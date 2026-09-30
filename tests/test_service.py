@@ -1261,6 +1261,127 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(first.prompts["session"], [1767225600.0])
         self.assertEqual(len(second.events), 2)
 
+    def test_incremental_reader_tracks_subagent_labels_like_the_whole_file_parser(
+        self,
+    ) -> None:
+        sidechain_prompt = {
+            "sessionId": "session",
+            "agentId": "agent",
+            "isSidechain": True,
+            "timestamp": "2026-01-01T00:00:00Z",
+            "message": {"role": "user", "content": "Review the release checklist."},
+        }
+        spawn_result = {
+            "timestamp": "2026-01-01T00:00:01Z",
+            "sessionId": "session",
+            "toolUseResult": {"agentId": "agent", "description": "Review tests"},
+        }
+        later_prompt = {
+            "sessionId": "session",
+            "agentId": "second",
+            "isSidechain": True,
+            "timestamp": "2026-01-01T00:00:02Z",
+            "message": {"role": "user", "content": "Write the changelog entry."},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / "session.jsonl"
+            transcript.write_text(json.dumps(sidechain_prompt) + "\n", encoding="utf-8")
+            state = IncrementalLiveState()
+            first = state._refresh_claude(transcript)
+            self.assertEqual(
+                first.spawn_labels,
+                {("session", "agent"): "Review the release checklist."},
+            )
+            with transcript.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(spawn_result) + "\n")
+                handle.write(json.dumps(later_prompt) + "\n")
+            second = state._refresh_claude(transcript)
+            self.assertEqual(
+                second.spawn_labels,
+                {
+                    ("session", "agent"): "Review tests",
+                    ("session", "second"): "Write the changelog entry.",
+                },
+            )
+            self.assertEqual(second.spawn_labels, spawned_agent_labels(transcript))
+
+    def test_snapshot_uses_incremental_subagent_labels_without_rereading(
+        self,
+    ) -> None:
+        prompt = {
+            "timestamp": "2026-01-01T00:00:00Z",
+            "sessionId": "session",
+            "message": {"role": "user", "content": "Ship the release."},
+        }
+        response = {
+            "timestamp": "2026-01-01T00:00:01Z",
+            "sessionId": "session",
+            "message": {
+                "id": "first",
+                "role": "assistant",
+                "model": "claude-test",
+                "usage": {"input_tokens": 10, "output_tokens": 1},
+            },
+        }
+        first_spawn = {
+            "timestamp": "2026-01-01T00:00:02Z",
+            "sessionId": "session",
+            "toolUseResult": {"agentId": "agent", "description": "Review tests"},
+        }
+        second_spawn = {
+            "timestamp": "2026-01-01T00:00:03Z",
+            "sessionId": "session",
+            "toolUseResult": {"agentId": "second", "description": "Write docs"},
+        }
+        prices = {
+            "claude-test": {
+                "input": 1,
+                "output": 1,
+                "cache_write": 1,
+                "cache_read": 1,
+                "web_search": 0,
+                "fast_multiplier": 1,
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "claude"
+            transcript = root / "project" / "session.jsonl"
+            transcript.parent.mkdir(parents=True)
+            transcript.write_text(
+                "\n".join(
+                    json.dumps(record) for record in [prompt, response, first_spawn]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            state = IncrementalLiveState()
+            with (
+                patch.dict(
+                    os.environ,
+                    {"KONVU_LIVE_USAGE_HOME": str(Path(directory) / "state")},
+                ),
+                patch("konvu_telemetry.live.claude_roots", return_value=[root]),
+                patch("konvu_telemetry.live.codex_roots", return_value=[]),
+                patch("konvu_telemetry.snapshot.spawned_agent_labels") as whole_file,
+                patch("konvu_telemetry.snapshot.load_pricing", return_value=prices),
+                patch("konvu_telemetry.snapshot.enrich_snapshot"),
+                patch("konvu_telemetry.snapshot.locate_compactions"),
+                patch("konvu_telemetry.snapshot.apply_session_hot_state"),
+            ):
+                first = build_snapshot(time.time(), state)
+                with transcript.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(second_spawn) + "\n")
+                second = build_snapshot(time.time(), state)
+            whole_file.assert_not_called()
+        self.assertEqual(
+            [agent["label"] for agent in first["sessions"][0]["subagents"]],
+            ["Review tests"],
+        )
+        self.assertEqual(
+            [agent["label"] for agent in second["sessions"][0]["subagents"]],
+            ["Review tests", "Write docs"],
+        )
+
     def test_fleet_telemetry_keeps_oversized_codex_compaction(self) -> None:
         session_id = "00000000-0000-0000-0000-000000000001"
         records = [

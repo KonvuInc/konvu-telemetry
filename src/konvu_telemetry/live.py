@@ -46,6 +46,7 @@ class ClaudeLiveFile:
     prompts: dict[str, list[float]] = field(default_factory=lambda: defaultdict(list))
     compacts: dict[str, list[float]] = field(default_factory=lambda: defaultdict(list))
     spawns: dict[tuple[str, str], float] = field(default_factory=dict)
+    spawn_labels: dict[tuple[str, str], str] = field(default_factory=dict)
     titles: dict[str, str] = field(default_factory=dict)
     clients: dict[str, str] = field(default_factory=dict)
     agent_id: str | None = None
@@ -388,6 +389,21 @@ class IncrementalLiveState:
                 agent_id = record.get("agentId")
                 if isinstance(agent_id, str) and agent_id:
                     state.spawns.setdefault((session_id, agent_id), timestamp)
+            if isinstance(session_id, str):
+                if isinstance(tool_result, dict):
+                    agent_id = tool_result.get("agentId")
+                    label = session_title(tool_result.get("description"))
+                    if isinstance(agent_id, str) and label:
+                        state.spawn_labels[(session_id, agent_id)] = label
+                elif (
+                    isinstance(message, dict)
+                    and record.get("isSidechain") is True
+                    and message.get("role") == "user"
+                ):
+                    agent_id = record.get("agentId")
+                    label = session_title(message.get("content"))
+                    if isinstance(agent_id, str) and label:
+                        state.spawn_labels.setdefault((session_id, agent_id), label)
             event = assistant_event(record)
             if event is not None and event.message_id is not None:
                 first_timestamp = state.first_timestamps.setdefault(

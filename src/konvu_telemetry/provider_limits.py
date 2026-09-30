@@ -259,10 +259,6 @@ def decode_codex_usage(body: object, captured_at: str) -> dict[str, object] | No
     limit_states: dict[str, str] = {}
     spend_control_values: list[bool] = []
     for limit_id, raw_limits in buckets:
-        metadata = {
-            "limit_name": raw_limits.get("limitName"),
-            "model": raw_limits.get("normalModelSlug"),
-        }
         for name in ("primary", "secondary"):
             raw = raw_limits.get(name)
             if not isinstance(raw, dict):
@@ -278,43 +274,27 @@ def decode_codex_usage(body: object, captured_at: str) -> dict[str, object] | No
             ):
                 continue
             duration = float(minutes)
-            window = _window(
-                _period(duration),
-                used,
-                _iso_reset(raw.get("resetsAt")),
-                duration,
-                limit_id,
+            windows.append(
+                _window(
+                    _period(duration),
+                    used,
+                    _iso_reset(raw.get("resetsAt")),
+                    duration,
+                    limit_id,
+                )
             )
-            window.update(
-                {
-                    key: value
-                    for key, value in metadata.items()
-                    if isinstance(value, str)
-                }
-            )
-            windows.append(window)
         monthly = raw_limits.get("individualLimit")
         if isinstance(monthly, dict):
             remaining = _remaining_percentage(monthly.get("remainingPercent"))
             if remaining is not None:
-                monthly_window = _window(
-                    "monthly",
-                    100.0 - remaining,
-                    _iso_reset(monthly.get("resetsAt")),
-                    limit_id=limit_id,
+                windows.append(
+                    _window(
+                        "monthly",
+                        100.0 - remaining,
+                        _iso_reset(monthly.get("resetsAt")),
+                        limit_id=limit_id,
+                    )
                 )
-                monthly_window.update(
-                    {
-                        key: value
-                        for key, value in metadata.items()
-                        if isinstance(value, str)
-                    }
-                )
-                for name in ("used", "limit"):
-                    value = monthly.get(name)
-                    if isinstance(value, str):
-                        monthly_window[name] = value
-                windows.append(monthly_window)
         reached = raw_limits.get("rateLimitReachedType")
         if isinstance(reached, str):
             limit_states[limit_id] = reached
