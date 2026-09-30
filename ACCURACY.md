@@ -12,6 +12,10 @@ For supported Codex model calls, Konvu also calculates subscription-credit equiv
 
 Account quota windows come only from the providers' live usage endpoints. A transient refresh failure marks the last provider result stale and retains each window until its provider-reported reset; Konvu never substitutes transcript or hook-derived limits.
 
+A session's share of a window is its cut of the percentage points the provider has actually reported. Providers report whole points, so each rise is divided between the sessions that were running, in proportion to the tokens each spent since the previous rise. A rise that no running session recorded work for goes to whoever that window already credits, rather than being discarded. Nothing is added for work done since the last report, so a share holds still between rises and a session that has not yet caused a reported point reads zero.
+
+The next-ten-prompt quota projection is the share the session was credited over its previous ten prompts. Under ten prompts of history, what it has burned so far is scaled to ten. The projection is capped at the window's remaining headroom.
+
 ## Prompts, subagents, and context
 
 Prompt boundaries come from explicit provider records. Subagent calls are deduplicated by message identity and included in the parent session total. Their spend is attributed to the parent prompt that spawned them when the provider records that relationship; otherwise timestamps are used and the per-prompt attribution is approximate.
