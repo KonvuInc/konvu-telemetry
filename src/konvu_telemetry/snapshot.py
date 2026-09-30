@@ -212,7 +212,12 @@ def build_snapshot(
         )
         for key, timestamp in spawns.items():
             agent_spawn_times.setdefault(key, timestamp)
-        for key, label in spawned_agent_labels(transcript).items():
+        spawn_labels = (
+            claude_cached.spawn_labels
+            if claude_cached is not None
+            else spawned_agent_labels(transcript)
+        )
+        for key, label in spawn_labels.items():
             agent_spawn_labels.setdefault(key, label)
         if root_session_id is not None:
             for agent_id, metadata in claude_subagent_metadata(transcript).items():

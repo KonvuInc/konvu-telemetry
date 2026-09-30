@@ -203,6 +203,9 @@ class ProviderLimitsTests(unittest.TestCase):
         assert isinstance(windows, list)
         self.assertEqual([row["used_percent"] for row in windows], [12.0, 34.0, 60.0])
         self.assertTrue(all(row["limit_id"] == "codex" for row in windows))
+        for row in windows:
+            for raw_field in ("limit_name", "model", "used", "limit"):
+                self.assertNotIn(raw_field, row)
         self.assertFalse(snapshot["ordinary_usage_allowed"])
         self.assertTrue(snapshot["spend_control_reached"])
         self.assertNotIn("account_id", snapshot)

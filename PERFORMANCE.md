@@ -12,6 +12,6 @@ The fixture contains no real prompts, paths, or usage data. It reports cold coll
 
 CI runs the same fixture with deliberately generous ceilings of 5 seconds cold, 4 seconds incremental, and 64 MiB of traced allocations. These limits catch severe regressions without treating runner noise as a benchmark result.
 
-On a 471,500-byte fixture with 50 sessions and 20 prompts each, the audit baseline on macOS and Python 3.9 was 0.41 seconds cold, 0.13 seconds unchanged incremental, and 8.1 MB peak traced Python allocations. Hardware and operating-system load affect these values; use them to detect large regressions, not as universal limits.
+On a 471,500-byte fixture with 50 sessions and 20 prompts each, the v0.3.6 baseline on macOS with Python 3.14 on an Apple Silicon laptop, run with the CI command above, was 0.64 seconds cold, 0.19 seconds unchanged incremental, and 7.1 MB peak traced Python allocations. Hardware and operating-system load affect these values; use them to detect large regressions, not as universal limits.
 
-For an empty corpus on macOS with system Python 3.9, the v0.1.0 service used about 32 MiB resident memory and 0% idle CPU after startup. This is a reference observation, not a cross-platform limit.
+For an empty corpus on macOS with Python 3.14 on an Apple Silicon laptop, the v0.3.6 service (`konvu-telemetry serve`) used about 22 MiB resident memory as reported by `ps` and 0% idle CPU 45 seconds after startup. This is a reference observation, not a cross-platform limit.
