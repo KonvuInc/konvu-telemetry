@@ -61,12 +61,13 @@ def run_once(_arguments: argparse.Namespace) -> None:
         ).refresh(now)
     except Exception:
         provider_quotas = stored_provider_quotas()
-    # Only the writes are serialized with a running service; the network fetch
-    # above must never hold up its next collection.
+    # The write phase is serialized with a running service; the network fetch
+    # above stays outside so it never holds up the service's next collection.
     with collection_lock():
-        write_provider_quotas(provider_quotas)
-        write_snapshot(build_snapshot(now, provider_quotas=provider_quotas))
-        write_health(now)
+        provider_quotas = write_provider_quotas(provider_quotas)
+        collected_at = time.time()
+        write_snapshot(build_snapshot(collected_at, provider_quotas=provider_quotas))
+        write_health(collected_at)
 
 
 def run_serve(arguments: argparse.Namespace) -> None:

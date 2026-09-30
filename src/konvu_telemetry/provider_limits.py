@@ -111,14 +111,40 @@ def stored_provider_quotas() -> dict[str, object]:
     }
 
 
-def write_provider_quotas(quotas: dict[str, object]) -> None:
-    """Persist the collector's provider quota view independently from sessions."""
-    normalized = {
-        provider: quota
-        for provider in ("claude", "codex")
-        if isinstance((quota := quotas.get(provider)), dict)
-    }
+def write_provider_quotas(quotas: dict[str, object]) -> dict[str, object]:
+    """Persist the collector's provider quota view and return what is now stored.
+
+    `once` and the service both poll before serializing their writes, so the
+    later writer may hold the older poll; the most recent poll stays on disk and
+    the writer builds its snapshot from the returned view.
+    """
+    stored = _read_json_object(account_quotas_path()) or {}
+    normalized: dict[str, object] = {}
+    for provider in ("claude", "codex"):
+        quota = quotas.get(provider)
+        if not isinstance(quota, dict):
+            continue
+        previous = stored.get(provider)
+        if isinstance(previous, dict) and _polled_before(quota, previous):
+            quota = previous
+        normalized[provider] = quota
     write_private_json_if_changed(account_quotas_path(), normalized)
+    return normalized
+
+
+def _last_polled_at(quota: dict[str, object]) -> float | None:
+    poll_state = quota.get("poll_state")
+    polled = poll_state.get("last_polled_at") if isinstance(poll_state, dict) else None
+    if isinstance(polled, bool) or not isinstance(polled, (int, float)):
+        return None
+    return float(polled)
+
+
+def _polled_before(quota: dict[str, object], other: dict[str, object]) -> bool:
+    """Whether both quotas record a poll time and `quota` comes from the older poll."""
+    polled = _last_polled_at(quota)
+    other_polled = _last_polled_at(other)
+    return polled is not None and other_polled is not None and polled < other_polled
 
 
 def _read_json_object(path: Path) -> dict[str, object] | None:

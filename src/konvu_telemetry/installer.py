@@ -387,12 +387,23 @@ def saved_claude_statusline() -> dict[str, object]:
     """Read the wrapper's saved original status line, or nothing when unusable.
 
     The state file is Konvu-owned, so an empty or corrupt one means the original
-    is unknown rather than that setup or uninstall should fail.
+    is unknown rather than that setup or uninstall should fail. The replay script
+    written next to it holds the last copy of the user's command when the state
+    file alone is gone.
     """
     try:
-        return load_json_object(claude_statusline_state_path())
+        state = load_json_object(claude_statusline_state_path())
     except (OSError, ValueError):
+        state = {}
+    if isinstance(state.get("statusLine"), dict):
+        return state
+    try:
+        lines = claude_statusline_original_path().read_text("utf-8").splitlines()
+    except OSError:
         return {}
+    if len(lines) < 2 or lines[0] != "#!/bin/sh":
+        return {}
+    return {"statusLine": {"type": "command", "command": "\n".join(lines[1:])}}
 
 
 def write_claude_statusline_wrapper(command: str) -> None:
@@ -467,8 +478,9 @@ def install_claude_statusline(
                 statusline = dict(original)
             remove_wrapper = True
         else:
-            # Rewriting the scripts heals a wrapper deleted since the last setup.
+            # Rewriting every wrapper file heals whichever was lost since setup.
             write_claude_statusline_wrapper(original_command)
+            write_json(claude_statusline_state_path(), {"statusLine": original})
             statusline["command"] = wrapper_command
     elif (
         command is not None

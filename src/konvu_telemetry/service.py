@@ -158,9 +158,9 @@ def collection_lock() -> Iterator[None]:
     """Serialize one collection's writes across processes.
 
     The service holds it only while writing, so `konvu-telemetry once` waits for
-    the current collection rather than exiting, and the quota-attribution ledger,
-    which every collection reads and rewrites whole, is never written by two
-    collectors at once.
+    the current collection rather than exiting, and the quota-attribution ledger
+    and health record, which every collection reads and rewrites whole, are never
+    written by two collectors at once.
     """
     path = collection_lock_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -399,7 +399,7 @@ def collect_forever(
             except Exception:
                 provider_quotas = stored_provider_quotas()
             with snapshot_lock, collection_lock():
-                write_provider_quotas(provider_quotas)
+                provider_quotas = write_provider_quotas(provider_quotas)
                 snapshot = build_snapshot(
                     started_at,
                     live_state,
@@ -411,12 +411,14 @@ def collect_forever(
             )
             if _DASHBOARD_DATA_AVAILABLE:
                 record_first_snapshot_ready()
-            write_health(time.time(), interval_seconds=interval_seconds)
+            with collection_lock():
+                write_health(time.time(), interval_seconds=interval_seconds)
         except Exception as error:
             collection_error = f"{type(error).__name__}: {error}"
             record_collector_failure()
             try:
-                write_health(time.time(), collection_error, interval_seconds)
+                with collection_lock():
+                    write_health(time.time(), collection_error, interval_seconds)
             except Exception as health_error:
                 LOGGER.error(
                     "Collector failed (%s); health write failed (%s)",

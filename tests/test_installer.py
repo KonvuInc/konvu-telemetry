@@ -447,23 +447,32 @@ class InstallerTests(unittest.TestCase):
             ):
                 installer.install_claude_statusline()
                 wrapper = installer.claude_statusline_path()
-                wrapper.unlink()
-                installer.claude_statusline_original_path().unlink()
-                installer.install_claude_statusline()
-                installed = json.loads(settings.read_text())["statusLine"]
-                self.assertEqual(installed["command"], str(wrapper))
-                rendered = subprocess.run(
-                    [str(wrapper)],
-                    input='{"session_id":"session"}',
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                )
+                replay = installer.claude_statusline_original_path()
+                state = installer.claude_statusline_state_path()
+                for missing in ((wrapper, replay), (state,), (wrapper, state)):
+                    with self.subTest(missing=[path.name for path in missing]):
+                        for path in missing:
+                            path.unlink()
+                        installer.install_claude_statusline()
+                        installed = json.loads(settings.read_text())["statusLine"]
+                        self.assertEqual(installed["command"], str(wrapper))
+                        rendered = subprocess.run(
+                            [str(wrapper)],
+                            input='{"session_id":"session"}',
+                            capture_output=True,
+                            text=True,
+                            check=True,
+                        )
+                        self.assertEqual(
+                            rendered.stdout,
+                            'existing:{"session_id":"session"}\ntelemetry',
+                        )
+                        self.assertTrue(state.is_file())
+                state.unlink()
                 self.assertTrue(installer.remove_claude_statusline())
-            self.assertEqual(
-                rendered.stdout, 'existing:{"session_id":"session"}\ntelemetry'
-            )
             self.assertEqual(json.loads(settings.read_text())["statusLine"], original)
+            self.assertFalse(wrapper.exists())
+            self.assertFalse(replay.exists())
 
     def test_setup_discards_saved_direct_konvu_statusline(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -167,8 +167,8 @@ class ServiceTests(unittest.TestCase):
         server.shutdown.assert_called_once_with()
         server.server_close.assert_called_once_with()
 
-    def test_a_one_shot_run_never_takes_the_lock_from_a_running_collector(self) -> None:
-        """Only the long-running service hands over; nothing else may evict it."""
+    def test_the_collector_lock_is_only_handed_over_on_request(self) -> None:
+        """Only the long-running service asks for a handover; nothing else evicts it."""
         with (
             tempfile.TemporaryDirectory() as directory,
             patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
@@ -236,7 +236,10 @@ class ServiceTests(unittest.TestCase):
             patch("konvu_telemetry.collector.time.time", return_value=100.0),
             patch("konvu_telemetry.collector.ProviderLimitPoller") as poller,
             patch("konvu_telemetry.collector.build_snapshot", return_value={}) as build,
-            patch("konvu_telemetry.collector.write_provider_quotas") as write_quotas,
+            patch(
+                "konvu_telemetry.collector.write_provider_quotas",
+                side_effect=lambda quotas: quotas,
+            ) as write_quotas,
             patch("konvu_telemetry.collector.write_snapshot"),
             patch("konvu_telemetry.collector.write_health"),
             patch(
@@ -280,9 +283,41 @@ class ServiceTests(unittest.TestCase):
                 once.join(timeout=0.5)
                 self.assertTrue(once.is_alive())
                 self.assertFalse(snapshot_path().exists())
+                self.assertEqual(service.load_health()["status"], "starting")
             once.join(timeout=10)
             self.assertFalse(once.is_alive())
             self.assertTrue(snapshot_path().is_file())
+            self.assertEqual(service.load_health()["status"], "healthy")
+
+    def test_the_service_writes_health_under_the_collection_lock(self) -> None:
+        """Health is a whole-file read-modify-write, so it is part of the write phase."""
+        coordinator = Mock()
+        coordinator.wait_for_refresh.side_effect = StopIteration
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+            patch("konvu_telemetry.service.build_snapshot", return_value={}),
+            patch("konvu_telemetry.service.write_snapshot"),
+            patch("konvu_telemetry.service.write_provider_quotas", return_value={}),
+        ):
+            collector = Thread(
+                target=lambda: collect_forever(
+                    60,
+                    IncrementalLiveState(),
+                    Lock(),
+                    coordinator,
+                    Mock(refresh=Mock(return_value={})),
+                ),
+                daemon=True,
+            )
+            with service.collection_lock():
+                collector.start()
+                collector.join(timeout=0.5)
+                self.assertTrue(collector.is_alive())
+                self.assertEqual(service.load_health()["status"], "starting")
+            collector.join(timeout=10)
+            self.assertFalse(collector.is_alive())
+            self.assertEqual(service.load_health()["status"], "healthy")
 
     def test_usage_completeness_rejects_boolean_token_counters(self) -> None:
         self.assertTrue(
