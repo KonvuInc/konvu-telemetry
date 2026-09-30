@@ -13,10 +13,11 @@ from queue import Empty, SimpleQueue
 from threading import Lock, Thread, Timer
 import time
 from typing import Callable, Iterator, Literal, TypedDict
-from urllib.request import Request, urlopen
+from urllib.request import Request
 from uuid import UUID, uuid4
 
 from .config import package_version
+from .outbound import open_without_redirects
 from .storage import (
     ensure_private_directory,
     tracking_queue_path,
@@ -55,9 +56,8 @@ def _send_to_posthog(payload: bytes) -> None:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urlopen(request, timeout=DELIVERY_TIMEOUT_SECONDS) as response:
-        if response.geturl() != POSTHOG_BATCH_URL:
-            raise OSError("PostHog redirected telemetry batch")
+    # A redirect raises here as an HTTPError, so the batch never follows it.
+    with open_without_redirects(request, DELIVERY_TIMEOUT_SECONDS) as response:
         if not 200 <= response.status < 300:
             raise OSError("PostHog rejected telemetry batch")
 
