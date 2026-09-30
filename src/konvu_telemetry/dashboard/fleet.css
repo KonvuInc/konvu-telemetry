@@ -2915,9 +2915,9 @@ select {
 .quota-pill {
   position: relative;
   display: inline-flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 14px;
-  padding: 10px 12px 7px;
+  padding: 10px 12px 8px;
   border: 1px solid var(--line);
   border-radius: 6px;
 }
@@ -2949,6 +2949,12 @@ select {
 
 .qm {
   display: inline-flex;
+  min-width: 88px;
+  flex-direction: column;
+  gap: 4px;
+}
+.qm-main {
+  display: inline-flex;
   align-items: center;
   gap: 6px;
 }
@@ -2977,6 +2983,14 @@ select {
   font-variant-numeric: tabular-nums;
   min-width: 26px;
   color: var(--mist);
+}
+.qm small {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1;
+  text-align: center;
+  white-space: nowrap;
 }
 
 /* ---------- KPI tiles ---------- */

@@ -261,6 +261,32 @@ def meter_segment(label: str, value: float, width: int) -> str:
     )
 
 
+def compact_status_meter(
+    label: str, value: float, width: int, inset: str | None = None
+) -> str:
+    """Render a cell-colored meter with optional centered reset text."""
+    if not inset or os.environ.get("NO_COLOR") or os.environ.get("TERM") == "dumb":
+        return meter_segment(label, value, width)
+    bounded = min(100.0, max(0.0, value))
+    filled = min(width, max(0, round(bounded / 100 * width)))
+    text = f"reset: {inset}"[:width].center(width)
+    fill_code = percentage_color(value).removeprefix("38;")
+    cells = "".join(
+        terminal_style(
+            character,
+            f"48;{fill_code};38;5;16" if index < filled else "48;5;238;38;5;245",
+        )
+        for index, character in enumerate(text)
+    )
+    return (
+        terminal_style(label, "38;5;245")
+        + " "
+        + cells
+        + " "
+        + terminal_style(f"{value:.0f}%", f"1;{percentage_color(value)}")
+    )
+
+
 def wrap_statusline_segments(segments: list[str], width: int) -> list[str]:
     """Wrap complete HUD cells without dropping context on narrow terminals."""
     separator = terminal_style("  ·  ", "38;5;245")
@@ -312,7 +338,8 @@ def claude_statusline_rows(
             ):
                 context = raw_context / raw_window * 100
         width = statusline_width()
-        cells = 4 if width < 62 else 6 if width < 84 else 8
+        cells = 13 if width < 62 else 14
+        resets = quota_reset_times("claude")
         quota_stale = session.get("quota_status") == "stale"
         included_label = (
             "● Last known: included · retrying" if quota_stale else "● Included"
@@ -323,9 +350,11 @@ def claude_statusline_rows(
         for label, period in (("5h", "five_hour"), ("Week", "weekly")):
             value = quotas.get(period)
             if value is not None:
-                segments.append(meter_segment(label, value, cells))
+                segments.append(
+                    compact_status_meter(label, value, cells, resets.get(period))
+                )
         if context is not None:
-            segments.append(meter_segment("Context", context, cells))
+            segments.append(compact_status_meter("Context", context, 8))
         rows = wrap_statusline_segments(segments, width)
         attribution = quota_window_value(session, "five_hour", "estimated_percent")
         forecast = quota_window_value(session, "five_hour", "projected_next_10_percent")
@@ -447,12 +476,51 @@ def meter(value: object, width: int = 10) -> str:
     return "█" * filled + "░" * (width - filled)
 
 
-def hook_quota_meters(quota_text: str, include_monthly: bool = False) -> str:
+def reset_in(value: object) -> str | None:
+    """Format a provider reset timestamp as a compact remaining duration."""
+    if not isinstance(value, str):
+        return None
+    try:
+        seconds = max(
+            0,
+            int(
+                datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+                - time.time()
+            ),
+        )
+    except ValueError:
+        return None
+    if seconds >= 86_400:
+        return f"{seconds / 86_400:.1f}d"
+    return f"{seconds / 3_600:.1f}h"
+
+
+def quota_reset_times(provider: str) -> dict[str, str]:
+    """Read current provider reset timers keyed by quota period."""
+    account = stored_provider_quotas().get(provider)
+    windows = account.get("windows") if isinstance(account, dict) else None
+    resets: dict[str, str] = {}
+    for window in windows if isinstance(windows, list) else []:
+        if not isinstance(window, dict) or not isinstance(window.get("period"), str):
+            continue
+        remaining = reset_in(window.get("resets_at"))
+        if remaining is not None:
+            resets[window["period"]] = remaining
+    return resets
+
+
+def hook_quota_meters(
+    quota_text: str, provider: str, include_monthly: bool = False
+) -> str:
     """Convert the applicable recorded limits into small, readable box meters."""
     labels = {"5-hour": "5h", "weekly": "Week", "monthly": "Credits"}
     matches = re.findall(r"(\d+(?:\.\d+)?)% (5-hour|weekly|monthly) limit", quota_text)
+    resets = quota_reset_times(provider)
+    periods = {"5-hour": "five_hour", "weekly": "weekly", "monthly": "monthly"}
     return "  ".join(
-        f"{labels[label]} [{meter(float(used), 7)}] {percentage(float(used))}"
+        f"{labels[label]}"
+        + (f" · reset: {resets[periods[label]]}" if periods[label] in resets else "")
+        + f" [{meter(float(used), 7)}] {percentage(float(used))}"
         for used, label in matches
         if label != "monthly" or include_monthly
     )
@@ -509,8 +577,11 @@ def usage_box_lines(session: dict[str, object], quota_text: str) -> list[str]:
         context_row = f"Context [{meter(used, 7)}] {percentage(used)}"
     else:
         context_row = f"Context {context}"
+    provider = session.get("provider")
     quota_meters = hook_quota_meters(
-        quota_text, usage_mode in {"api_billed", "exhausted"}
+        quota_text,
+        provider if isinstance(provider, str) else "",
+        usage_mode in {"api_billed", "exhausted"},
     )
     if session.get("quota_status") == "stale" and quota_meters:
         quota_meters = f"Last known {quota_meters}"
