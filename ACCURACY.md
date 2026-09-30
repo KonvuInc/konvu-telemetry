@@ -20,7 +20,7 @@ Context is the latest provider-recorded input plus cache traffic for a model cal
 
 ## Account limits
 
-Account-limit percentages and reset times are provider-reported rather than estimated. Every two minutes, the collector reads Claude's five-hour and weekly windows from Anthropic's usage endpoint and asks Codex's local app-server for every reported rolling, monthly, model-specific, and denial state. Invalid percentages are rejected. Authentication failures clear the provider immediately; transient failures retain unexpired windows with an explicit stale status, while expired windows and their plan flags are removed. A Claude 429 starts an exponential backoff of at least one hour, waits until the next cached reset when later, and adds jitter so clients do not retry together.
+Account-limit percentages and reset times are provider-reported rather than estimated. Every two minutes, the collector reads Claude's five-hour and weekly windows from Anthropic's usage endpoint and asks Codex's local app-server for every reported rolling, monthly, model-specific, and denial state. Invalid percentages are rejected, while usage reported above 100 percent (or remaining capacity below zero) is recorded as exactly exhausted so that window is never dropped. Authentication failures clear the provider immediately; transient failures retain unexpired windows with an explicit stale status, while expired windows and their plan flags are removed. A Claude 429 starts an exponential backoff of at least one hour, waits until the next cached reset when later, and adds jitter so clients do not retry together.
 
 ## Forecasts
 

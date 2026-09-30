@@ -1,8 +1,12 @@
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
+from threading import Thread
+import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError
@@ -29,12 +33,36 @@ from konvu_telemetry.provider_limits import (
 )
 from konvu_telemetry import provider_limits
 from konvu_telemetry.fleet_telemetry import enrich_snapshot
+from konvu_telemetry.quota_attribution import apply_usage_modes
+
+# A stand-in Codex app-server: answers each request id from REPLIES, then acts out
+# the STALL script, so tests can shape exactly what the pipe carries and when.
+FAKE_APP_SERVER = """\
+import json
+import sys
+import time
+
+REPLIES = json.loads(sys.argv[3]) if len(sys.argv) > 3 else {}
+STALL = json.loads(sys.argv[4]) if len(sys.argv) > 4 else None
+out = sys.stdout.buffer
+for raw in sys.stdin.buffer:
+    request_id = str(json.loads(raw).get("id"))
+    if request_id in REPLIES:
+        out.write(REPLIES[request_id].encode())
+        out.flush()
+    if STALL is not None and request_id == STALL["after"]:
+        out.write(STALL["partial"].encode())
+        out.flush()
+        time.sleep(STALL["seconds"])
+        sys.exit(0)
+"""
 
 
 class FakeResponse:
     def __init__(self, body: object) -> None:
         self.payload = json.dumps(body).encode()
         self.headers: dict[str, str] = {}
+        self.status = 200
 
     def read(self, size: int = -1) -> bytes:
         return self.payload[:size] if size >= 0 else self.payload
@@ -63,13 +91,77 @@ class ProviderLimitsTests(unittest.TestCase):
             [window["period"] for window in windows], ["five_hour", "weekly"]
         )
 
-    def test_claude_rejects_out_of_range_values_instead_of_clamping(self) -> None:
-        self.assertIsNone(
-            decode_claude_usage(
-                {"five_hour": {"utilization": 101}},
-                "2026-01-01T00:00:00+00:00",
-            )
+    def test_claude_keeps_an_over_reported_window_as_exactly_exhausted(self) -> None:
+        snapshot = decode_claude_usage(
+            {
+                "five_hour": {"utilization": 100.5},
+                "seven_day": {"utilization": 40},
+            },
+            "2026-01-01T00:00:00+00:00",
         )
+        assert snapshot is not None
+        windows = snapshot["windows"]
+        assert isinstance(windows, list)
+        self.assertEqual([row["used_percent"] for row in windows], [100.0, 40.0])
+        self.assertEqual([row["remaining_percent"] for row in windows], [0.0, 60.0])
+
+    def test_an_over_reported_five_hour_window_still_marks_the_plan_exhausted(
+        self,
+    ) -> None:
+        snapshot: dict[str, object] = {
+            "sessions": [{"provider": "claude"}],
+            "account_quotas": {
+                "claude": decode_claude_usage(
+                    {
+                        "five_hour": {"utilization": 100.5},
+                        "seven_day": {"utilization": 40},
+                    },
+                    "2026-01-01T00:00:00+00:00",
+                )
+            },
+        }
+
+        apply_usage_modes(snapshot)
+
+        sessions = snapshot["sessions"]
+        assert isinstance(sessions, list)
+        self.assertEqual(sessions[0]["usage_mode"], "exhausted")
+
+    def test_codex_monthly_remaining_above_100_reads_as_unused(self) -> None:
+        snapshot = decode_codex_usage(
+            {"rateLimits": {"individualLimit": {"remainingPercent": 100.5}}},
+            "2026-01-01T00:00:00+00:00",
+        )
+        assert snapshot is not None
+        windows = snapshot["windows"]
+        assert isinstance(windows, list)
+        self.assertEqual(
+            [(row["used_percent"], row["remaining_percent"]) for row in windows],
+            [(0.0, 100.0)],
+        )
+
+    def test_codex_monthly_remaining_below_zero_reads_as_exhausted(self) -> None:
+        snapshot = decode_codex_usage(
+            {"rateLimits": {"individualLimit": {"remainingPercent": -0.5}}},
+            "2026-01-01T00:00:00+00:00",
+        )
+        assert snapshot is not None
+        windows = snapshot["windows"]
+        assert isinstance(windows, list)
+        self.assertEqual(
+            [(row["used_percent"], row["remaining_percent"]) for row in windows],
+            [(100.0, 0.0)],
+        )
+        for value in (True, float("nan"), float("-inf"), "0", None):
+            self.assertIsNone(provider_limits._remaining_percentage(value), repr(value))
+
+    def test_percentages_still_reject_bools_negatives_and_non_finite_values(
+        self,
+    ) -> None:
+        for value in (True, False, -0.1, float("nan"), float("inf"), "50", None):
+            self.assertIsNone(provider_limits._percentage(value), repr(value))
+        self.assertEqual(provider_limits._percentage(0), 0.0)
+        self.assertEqual(provider_limits._percentage(100), 100.0)
 
     def test_codex_prefers_multi_bucket_limits_and_preserves_denials(self) -> None:
         snapshot = decode_codex_usage(
@@ -284,6 +376,118 @@ class ProviderLimitsTests(unittest.TestCase):
             {"id": 2, "method": "account/read", "params": {"refreshToken": False}},
             messages,
         )
+
+    def fake_app_server(
+        self,
+        directory: Path,
+        replies: dict[str, str],
+        stall: dict[str, object] | None = None,
+    ) -> str:
+        """Install the stand-in app-server as a validated codex executable."""
+        launcher = directory / "codex"
+        script = directory / "app_server.py"
+        script.write_text(FAKE_APP_SERVER)
+        launcher.write_text(
+            "#!/bin/sh\n"
+            + " ".join(
+                [
+                    f"exec {sys.executable} {script}",
+                    '"$@"',
+                    f"'{json.dumps(replies)}'",
+                    f"'{json.dumps(stall)}'" if stall is not None else "",
+                ]
+            )
+            + "\n"
+        )
+        launcher.chmod(0o700)
+        return str(launcher)
+
+    def test_two_app_server_replies_in_one_chunk_are_both_read(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            executable = self.fake_app_server(
+                Path(directory),
+                {
+                    "1": (
+                        '{"id":1,"result":{}}\n'
+                        '{"id":2,"result":{"account":{"type":"chatgpt"}}}\n'
+                    ),
+                    "3": (
+                        '{"id":3,"result":{"rateLimits":{"primary":'
+                        '{"usedPercent":12,"windowDurationMins":10080}}}}\n'
+                    ),
+                },
+            )
+            with (
+                patch(
+                    "konvu_telemetry.provider_limits._codex_executable",
+                    return_value=executable,
+                ),
+                patch("konvu_telemetry.provider_limits.REQUEST_TIMEOUT_SECONDS", 2.0),
+            ):
+                result = fetch_codex_app_server_limits(1_767_225_600)
+
+        assert result.snapshot is not None
+        self.assertEqual(result.snapshot["windows"][0]["used_percent"], 12.0)
+
+    def test_a_partial_line_then_a_stall_returns_by_the_deadline(self) -> None:
+        processes: list[subprocess.Popen[bytes]] = []
+        real_popen = subprocess.Popen
+
+        def recording_popen(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+            process = real_popen(*args, **kwargs)  # type: ignore[call-overload]
+            processes.append(process)
+            return process
+
+        with tempfile.TemporaryDirectory() as directory:
+            executable = self.fake_app_server(
+                Path(directory),
+                {"1": '{"id":1,"result":{}}\n'},
+                {"after": "2", "partial": '{"id":2,"result":{"acc', "seconds": 30},
+            )
+            with (
+                patch(
+                    "konvu_telemetry.provider_limits._codex_executable",
+                    return_value=executable,
+                ),
+                patch("konvu_telemetry.provider_limits.REQUEST_TIMEOUT_SECONDS", 2.0),
+                patch(
+                    "konvu_telemetry.provider_limits.subprocess.Popen",
+                    side_effect=recording_popen,
+                ),
+            ):
+                started = time.monotonic()
+                result = fetch_codex_app_server_limits(1_767_225_600)
+                elapsed = time.monotonic() - started
+
+        self.assertEqual(result, FetchResult(None, failure="service_unavailable"))
+        self.assertLess(elapsed, 5.0)
+        self.assertEqual(len(processes), 1)
+        self.assertIsNotNone(processes[0].poll(), "child was not stopped")
+
+    def test_a_reply_split_across_pipe_writes_is_assembled(self) -> None:
+        read_end, write_end = os.pipe()
+        stdout = os.fdopen(read_end, "rb", buffering=0)
+        process = SimpleNamespace(stdout=stdout)
+        pending = bytearray()
+
+        def write_in_halves() -> None:
+            os.write(write_end, b'{"id":7,"res')
+            time.sleep(0.2)
+            os.write(write_end, b'ult":{"ok":true}}\n')
+            os.close(write_end)
+
+        Thread(target=write_in_halves, daemon=True).start()
+        try:
+            response = provider_limits._response(
+                process,  # type: ignore[arg-type]
+                7,
+                time.monotonic() + 2.0,
+                pending,
+            )
+        finally:
+            stdout.close()
+
+        self.assertEqual(response, RPCResponse(result={"ok": True}))
 
     def test_credential_file_must_be_private_and_token_shape_is_exact(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -667,6 +871,73 @@ class ProviderLimitsTests(unittest.TestCase):
         self.assertEqual(claude.call_count, 2)
         poller.refresh(460)
         self.assertEqual(claude.call_count, 3)
+
+    def test_an_unavailable_provider_backs_off_instead_of_reprobing(self) -> None:
+        codex = Mock(
+            return_value=FetchResult(
+                None, unavailable=True, failure="service_unavailable"
+            )
+        )
+        poller = ProviderLimitPoller(
+            Mock(return_value=FetchResult({"windows": []})), codex
+        )
+
+        poller.refresh(0)  # first failure, wait 120s
+        poller.refresh(120)  # second, wait 240s
+        poller.refresh(240)
+        self.assertEqual(codex.call_count, 2)
+        poller.refresh(360)  # third, wait 480s
+        self.assertEqual(codex.call_count, 3)
+        poller.refresh(839)
+        self.assertEqual(codex.call_count, 3)
+        poller.refresh(840)
+        self.assertEqual(codex.call_count, 4)
+
+    def test_a_success_after_unavailable_results_resets_the_backoff(self) -> None:
+        codex = Mock(
+            side_effect=[
+                FetchResult(None, unavailable=True, failure="service_unavailable"),
+                FetchResult(None, unavailable=True, failure="service_unavailable"),
+                FetchResult({"windows": [{"used_percent": 7.0}]}),
+                FetchResult({"windows": [{"used_percent": 8.0}]}),
+            ]
+        )
+        poller = ProviderLimitPoller(
+            Mock(return_value=FetchResult({"windows": []})), codex
+        )
+
+        poller.refresh(0)
+        poller.refresh(120)
+        recovered = poller.refresh(360)["codex"]
+        self.assertEqual(recovered["windows"], [{"used_percent": 7.0}])
+        self.assertEqual(recovered["poll_state"]["failures"], 0)
+        poller.refresh(479)
+        self.assertEqual(codex.call_count, 3)
+        poller.refresh(480)
+        self.assertEqual(codex.call_count, 4)
+
+    def test_a_definitive_auth_failure_keeps_backing_off(self) -> None:
+        claude = Mock(
+            return_value=FetchResult(
+                None,
+                unavailable=True,
+                failure="authentication_failed",
+                error_code=401,
+            )
+        )
+        poller = ProviderLimitPoller(
+            claude, Mock(return_value=FetchResult({"windows": []}))
+        )
+
+        poller.refresh(100)  # wait 120s
+        poller.refresh(220)  # wait 240s
+        poller.refresh(460)  # definitive, wait 480s
+        self.assertEqual(poller.refresh(940)["claude"]["status"], "unavailable")
+        self.assertEqual(claude.call_count, 4)
+        poller.refresh(1839)  # fourth failure waits the 900s ceiling
+        self.assertEqual(claude.call_count, 4)
+        poller.refresh(1840)
+        self.assertEqual(claude.call_count, 5)
 
     def test_secure_file_does_not_follow_symlinks(self) -> None:
         if not hasattr(os, "O_NOFOLLOW"):
