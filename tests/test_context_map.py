@@ -876,6 +876,10 @@ class ContextMapTests(unittest.TestCase):
             "tests_and_builds",
         )
         self.assertEqual(
+            _category("exec_command", "exec_command", {"cmd": "cat > src/app.py"}),
+            "file_changes",
+        )
+        self.assertEqual(
             _category("Read", "src/webhook.py", {"path": "src/webhook.py"}),
             "repository_and_files",
         )
@@ -1053,7 +1057,7 @@ class ContextMapTests(unittest.TestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            transcript = Path(directory) / f"rollout-{SESSION_ID}.jsonl"
+            transcript = Path(directory) / f"{SESSION_ID}.jsonl"
             append_records(
                 transcript,
                 [codex_checkpoint("2026-01-01T00:00:00Z", 100, 5)],
@@ -1096,6 +1100,74 @@ class ContextMapTests(unittest.TestCase):
                 stored = context_map_path("codex", SESSION_ID).read_text()
             self.assertNotIn(secret, stored)
             self.assertIn("call-1", stored)
+
+    def test_file_write_arguments_are_attributed_without_double_counting(self) -> None:
+        secret = "private-patch-content"
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / f"rollout-{SESSION_ID}.jsonl"
+            append_records(
+                transcript,
+                [
+                    codex_checkpoint("2026-01-01T00:00:00Z", 100, 40),
+                    {
+                        "timestamp": "2026-01-01T00:00:01Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "custom_tool_call",
+                            "call_id": "call-1",
+                            "name": "exec",
+                            "input": f"await tools.apply_patch('{secret}')",
+                        },
+                    },
+                    codex_checkpoint("2026-01-01T00:00:02Z", 140, 0),
+                ],
+            )
+            with patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}):
+                ContextMapCollector(FixedTokenizer()).refresh(
+                    snapshot("codex", 140), live_state("codex", transcript)
+                )
+                stored = json.loads(context_map_path("codex", SESSION_ID).read_text())
+
+            categories = stored["epochs"][-1]["categories"]
+            self.assertEqual(categories["file_changes"], 10)
+            self.assertEqual(categories["assistant_output"], 30)
+            self.assertEqual(sum(categories.values()), 140)
+            self.assertNotIn(secret, json.dumps(stored))
+
+    def test_claude_file_write_arguments_are_attributed_without_double_counting(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / f"{SESSION_ID}.jsonl"
+            append_records(
+                transcript,
+                [
+                    claude_assistant(
+                        "2026-01-01T00:00:00Z",
+                        100,
+                        40,
+                        content=[
+                            {
+                                "type": "tool_use",
+                                "id": "call-1",
+                                "name": "apply_patch",
+                                "input": {"patch": "private-patch-content"},
+                            }
+                        ],
+                    ),
+                    claude_assistant("2026-01-01T00:00:01Z", 140, 0),
+                ],
+            )
+            with patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}):
+                ContextMapCollector(FixedTokenizer()).refresh(
+                    snapshot("claude", 140), live_state("claude", transcript)
+                )
+                stored = json.loads(context_map_path("claude", SESSION_ID).read_text())
+
+            categories = stored["epochs"][-1]["categories"]
+            self.assertEqual(categories["file_changes"], 10)
+            self.assertEqual(categories["assistant_output"], 30)
+            self.assertEqual(sum(categories.values()), 140)
 
     def test_partial_record_waits_and_replaced_file_rebuilds(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

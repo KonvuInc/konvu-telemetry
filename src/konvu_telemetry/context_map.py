@@ -22,7 +22,7 @@ from .parsers import is_human_claude_prompt
 from .storage import context_map_path, parse_timestamp, write_private_json_if_changed
 
 
-STATE_VERSION = 15
+STATE_VERSION = 16
 MAX_CONTEXT_RECORD_BYTES = 8 * 1024 * 1024
 CLAUDE_RESULT_FRAME_TOKENS = {"3.0": 40, "5.0": 23}
 CODEX_RESULT_FRAME_TOKENS = 10
@@ -157,6 +157,11 @@ def _argument_hints(arguments: object) -> str:
 
 
 def _shell_category(hints: str) -> str:
+    if re.search(
+        r"\bapply_patch\b|\b(?:cat|tee)\b[^\n]*(?:>>|>)|\b(?:sed|perl)\s+-i\b|\bgit\s+(?:mv|rm)\b",
+        hints,
+    ):
+        return "file_changes"
     if "tool-results/mcp-" in hints or "tools.mcp__" in hints:
         return "external_service_data"
     if re.search(r"\b(kubectl|k9s?|psql|mysql|datadog|sentry|posthog)\b", hints):
@@ -580,6 +585,99 @@ def _assistant_output_source(previous: dict[str, object]) -> dict[str, object] |
     )
 
 
+def _file_write_argument_source(
+    metadata: dict[str, object],
+    record: Record,
+    timestamp: float | None,
+    call_id: str,
+) -> dict[str, object] | None:
+    """Keep a derived file-write weight without persisting the patch text."""
+    if metadata.get("category") != "file_changes":
+        return None
+    tokens = _integer(metadata.get("argument_tokens"))
+    if tokens <= 0:
+        return None
+    return _source(
+        source_id=f"{record['digest']}:{record['start']}:{call_id}:arguments",
+        timestamp=timestamp,
+        category="file_changes",
+        tool=str(metadata.get("name") or "file write"),
+        label=str(metadata.get("label") or "File write"),
+        weight_tokens=tokens,
+        tokenizer=str(metadata.get("argument_tokenizer") or "unknown"),
+        source_start=record["start"],
+        source_end=record["end"],
+    )
+
+
+def _record_output_source(
+    state: dict[str, object], source: dict[str, object] | None
+) -> None:
+    if source is None:
+        return
+    checkpoint = state.get("previous_checkpoint")
+    if not isinstance(checkpoint, dict):
+        return
+    output_sources = checkpoint.setdefault("output_sources", [])
+    if not isinstance(output_sources, list):
+        checkpoint["output_sources"] = output_sources = []
+    source_id = str(source.get("id") or "")
+    call_suffix = source_id.rsplit(":", 2)[-2:]
+    if any(
+        isinstance(existing, dict)
+        and (
+            existing.get("id") == source_id
+            or str(existing.get("id") or "").rsplit(":", 2)[-2:] == call_suffix
+        )
+        for existing in output_sources
+    ):
+        return
+    output_sources.append(source)
+
+
+def _assistant_output_sources(previous: dict[str, object]) -> list[dict[str, object]]:
+    """Split provider-recorded output between file writes and ordinary output."""
+    total = _integer(previous.get("output_tokens"))
+    if total <= 0:
+        return []
+    raw_sources = previous.get("output_sources")
+    sources = (
+        [source for source in raw_sources if isinstance(source, dict)]
+        if isinstance(raw_sources, list)
+        else []
+    )
+    weights = sum(_integer(source.get("weight_tokens"), 1) for source in sources)
+    generic = _assistant_output_source(previous)
+    if generic is not None and total > weights:
+        generic["weight_tokens"] = total - weights
+        sources.append(generic)
+    if not sources and generic is not None:
+        sources.append(generic)
+    return sources
+
+
+def _append_assistant_output(
+    state: dict[str, object],
+    previous: dict[str, object],
+    total_tokens: int,
+    checkpoint_id: str,
+    confidence: str,
+) -> None:
+    sources = _assistant_output_sources(previous)
+    if not sources or total_tokens <= 0:
+        return
+    weights = [_integer(source.get("weight_tokens"), 1) for source in sources]
+    for source, tokens in zip(sources, _allocate(total_tokens, weights)):
+        _append_event(
+            state,
+            source,
+            tokens,
+            str(previous.get("model") or "unknown"),
+            checkpoint_id,
+            confidence,
+        )
+
+
 def _commit_checkpoint_window(
     state: dict[str, object],
     previous: dict[str, object],
@@ -593,7 +691,7 @@ def _commit_checkpoint_window(
     residual_label: str = "Unmatched context",
 ) -> None:
     previous_model = str(previous.get("model") or "unknown")
-    assistant = _assistant_output_source(previous)
+    assistant_sources = _assistant_output_sources(previous)
     growth = (
         input_tokens - _integer(previous.get("input_tokens"))
         if previous_model == model
@@ -602,15 +700,13 @@ def _commit_checkpoint_window(
     if growth is not None and growth < 0:
         growth = None
     if growth is None:
-        if assistant is not None:
-            _append_event(
-                state,
-                assistant,
-                _integer(previous.get("output_tokens")),
-                previous_model,
-                checkpoint_id,
-                "provider_reported",
-            )
+        _append_assistant_output(
+            state,
+            previous,
+            _integer(previous.get("output_tokens")),
+            checkpoint_id,
+            "provider_reported",
+        )
         _commit_window(
             state,
             sources,
@@ -621,12 +717,11 @@ def _commit_checkpoint_window(
         )
         return
     assistant_tokens = _integer(previous.get("output_tokens"))
-    if assistant is not None and growth >= assistant_tokens:
-        _append_event(
+    if assistant_sources and growth >= assistant_tokens:
+        _append_assistant_output(
             state,
-            assistant,
+            previous,
             assistant_tokens,
-            previous_model,
             checkpoint_id,
             "provider_reported",
         )
@@ -640,7 +735,7 @@ def _commit_checkpoint_window(
             residual_label=residual_label,
         )
         return
-    combined = ([assistant] if assistant is not None else []) + sources
+    combined = assistant_sources + sources
     _commit_window(
         state,
         combined,
@@ -748,16 +843,13 @@ def _start_epoch(
         _reconcile_epoch(previous, pre_tokens, record["digest"][:16])
     else:
         if isinstance(checkpoint, dict):
-            assistant = _assistant_output_source(checkpoint)
-            if assistant is not None:
-                _append_event(
-                    state,
-                    assistant,
-                    _integer(checkpoint.get("output_tokens")),
-                    str(checkpoint.get("model") or "unknown"),
-                    record["digest"][:16],
-                    "provider_reported",
-                )
+            _append_assistant_output(
+                state,
+                checkpoint,
+                _integer(checkpoint.get("output_tokens")),
+                record["digest"][:16],
+                "provider_reported",
+            )
         _commit_window(
             state,
             pending,
@@ -1236,12 +1328,19 @@ def _process_claude(
                     continue
                 call_id = block.get("id")
                 if isinstance(call_id, str):
-                    pending[call_id] = _call_metadata(
+                    metadata = _call_metadata(
                         tokenizer,
                         "claude",
                         model,
                         str(block.get("name") or "unknown"),
                         block.get("input"),
+                    )
+                    pending[call_id] = metadata
+                    _record_output_source(
+                        state,
+                        _file_write_argument_source(
+                            metadata, record, timestamp, call_id
+                        ),
                     )
         return
     if role == "user" and value.get("isMeta") is True:
@@ -1489,7 +1588,7 @@ def _process_codex(
     if item_type in {"custom_tool_call", "function_call", "local_shell_call"}:
         call_id = payload.get("call_id") or payload.get("id")
         if isinstance(call_id, str):
-            pending[call_id] = _call_metadata(
+            metadata = _call_metadata(
                 tokenizer,
                 "codex",
                 str(state.get("active_model") or "unknown"),
@@ -1500,21 +1599,25 @@ def _process_codex(
                     or payload.get("action")
                 ),
             )
+            pending[call_id] = metadata
+            _record_output_source(
+                state,
+                _file_write_argument_source(metadata, record, timestamp, call_id),
+            )
     elif item_type in {
         "custom_tool_call_output",
         "function_call_output",
         "local_shell_call_output",
     }:
         call_id = payload.get("call_id") or payload.get("id")
-        metadata = pending.pop(call_id, {}) if isinstance(call_id, str) else {}
-        if not isinstance(metadata, dict):
-            metadata = {}
+        popped_metadata = pending.pop(call_id, {}) if isinstance(call_id, str) else {}
+        call_metadata = popped_metadata if isinstance(popped_metadata, dict) else {}
         for source in _result_sources(
             tokenizer,
             "codex",
             str(state.get("active_model") or "unknown"),
             payload.get("output"),
-            metadata,
+            call_metadata,
             record,
             timestamp,
             call_id if isinstance(call_id, str) else "unknown",
