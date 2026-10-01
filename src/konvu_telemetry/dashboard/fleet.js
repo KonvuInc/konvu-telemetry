@@ -22,6 +22,7 @@ const state = {
   sort: "forecast",
   selected: null,
   chart: "cumulative",
+  inspectorTab: "overview",
   error: false,
   refreshInFlight: false,
   nextRefreshAt: null,
@@ -1474,6 +1475,7 @@ function saveUrl() {
   if (state.provider !== "all") q.set("tool", state.provider);
   if (state.sort !== "forecast") q.set("sort", state.sort);
   if (state.selected) q.set("session", state.selected);
+  if (state.selected && state.inspectorTab === "context") q.set("tab", "context");
   history.replaceState(null, "", location.pathname + (q.size ? "?" + q : "") + location.hash);
 }
 function initialUrl() {
@@ -1481,6 +1483,7 @@ function initialUrl() {
   state.provider = ["claude", "codex"].includes(q.get("tool")) ? q.get("tool") : "all";
   state.sort = ["activity", "spent", "forecast", "share", "context"].includes(q.get("sort")) ? q.get("sort") : "forecast";
   state.selected = q.get("session");
+  state.inspectorTab = q.get("tab") === "context" ? "context" : "overview";
   saveUrl();
 }
 function render() {
@@ -1690,7 +1693,8 @@ function bindEvents() {
     if (!(target instanceof Element)) return;
     const provider = target.closest("[data-provider]"),
       session = target.closest("[data-session]"),
-      chart = target.closest("[data-chart]");
+      chart = target.closest("[data-chart]"),
+      inspectorTab = target.closest("[data-inspector-tab]");
     if (provider) {
       axisPos.x = 1;
       axisPos.y = 1;
@@ -1702,6 +1706,11 @@ function bindEvents() {
       state.chart = chart.dataset.chart;
       renderInspector();
       document.querySelector('[data-chart="' + state.chart + '"]')?.focus();
+    } else if (inspectorTab) {
+      state.inspectorTab = inspectorTab.dataset.inspectorTab;
+      saveUrl();
+      renderInspector();
+      document.querySelector('[data-inspector-tab="' + state.inspectorTab + '"]')?.focus();
     }
   });
   $("#close").addEventListener("click", closeSession);
@@ -2180,6 +2189,80 @@ function subscriptionStats(s, pct) {
     "</div>"
   );
 }
+const contextCategoryLabels = {
+  prompts: "User prompts",
+  previous_compact: "Previous compacts",
+  assistant_output: "Conversation and reasoning",
+  skills_and_instructions: "Session instructions and tools",
+  repository_and_files: "Local code read",
+  file_changes: "Local code written",
+  documents: "Local documents read",
+  local_system_data: "Local system data read",
+  local_logs: "Local logs read",
+  tests_and_builds: "Tests and build output",
+  images: "Images loaded",
+  web_and_external: "Web content fetched",
+  external_service_data: "External service data fetched",
+  production_systems: "Production data fetched",
+  subagent_handoffs: "Subagent results",
+  other_tool_output: "Unclassified context",
+  starting_context: "Pre-existing context",
+  provider_internal: "Provider-managed context",
+};
+function contextCategoryLabel(category) {
+  return contextCategoryLabels[category] || "Other context";
+}
+const contextCategoryColors = {
+  previous_compact: 0,
+  repository_and_files: 1,
+  assistant_output: 2,
+  skills_and_instructions: 3,
+  prompts: 4,
+  file_changes: 5,
+  documents: 3,
+  local_system_data: 2,
+  local_logs: 4,
+  tests_and_builds: 1,
+  images: 5,
+  web_and_external: 2,
+  external_service_data: 3,
+  production_systems: 5,
+  subagent_handoffs: 2,
+};
+function contextCategoryColor(category) {
+  return contextCategoryColors[category] ?? 0;
+}
+function contextMapPanel(s) {
+  const map = s.context_map;
+  if (!map || map.state !== "ready" || !map.categories || typeof map.categories !== "object") {
+    return '<div class="context-map-empty"><strong>Mapping context</strong><p>Konvu is processing this session’s transcript. The breakdown appears after the next complete model checkpoint.</p></div>';
+  }
+  const observed = nonnegative(map.observed_context_tokens) ? map.observed_context_tokens : s.context_tokens;
+  if (!nonnegative(observed) || observed <= 0) return '<div class="context-map-empty"><strong>Mapping context</strong><p>Waiting for a provider context checkpoint.</p></div>';
+  const entries = Object.entries(map.categories)
+    .filter(([, value]) => nonnegative(value) && value > 0)
+    .sort((a, b) => b[1] - a[1]);
+  const categorized = entries.reduce((sum, entry) => sum + entry[1], 0);
+  if (categorized < observed) entries.push(["provider_internal", observed - categorized]);
+  const composition = entries
+    .map(([category, value]) =>
+      '<i class="context-map-segment segment-' + contextCategoryColor(category) + (category === "provider_internal" ? " remainder" : "") + '" style="width:' + Math.min(100, (value / observed) * 100) + '%" title="' + esc(contextCategoryLabel(category)) + ": " + tokens(value) + '"></i>',
+    )
+    .join("");
+  const categoryRows = entries
+    .map(([category, value]) =>
+      '<div class="context-map-row' + (category === "provider_internal" ? " remainder" : "") + '"><div><i class="segment-' + contextCategoryColor(category) + '"></i><span>' + esc(contextCategoryLabel(category)) + '</span><b>' + tokens(value) + " · " + percentage((value / observed) * 100) + '</b></div><span><i class="segment-' + contextCategoryColor(category) + '" style="width:' + Math.min(100, (value / observed) * 100) + '%"></i></span></div>',
+    )
+    .join("");
+  const mappedPercent = (entries.reduce((sum, entry) => sum + entry[1], 0) / observed) * 100;
+  return (
+    '<div class="context-map-summary"><div><span>Current context</span><strong>' + tokens(observed) + '</strong></div><div><span>Accounted for</span><strong>' + percentage(mappedPercent) + '</strong></div><div><span>Iterations</span><strong>' + (Number.isInteger(map.iteration) ? map.iteration : "—") + '</strong></div><div><span>Compactions</span><strong>' + (Number.isInteger(map.epoch_count) ? Math.max(0, map.epoch_count - 1) : "—") + '</strong></div></div>' +
+    '<div class="section-title"><h3>What fills this context</h3><span class="tiny">Reconciled to provider total</span></div>' +
+    '<div class="context-map-composition" role="img" aria-label="Current context composition">' + composition + '</div>' +
+    '<div class="context-map-rows">' + categoryRows + '</div>' +
+    '<p class="detail-foot">Every token is reconciled to the provider total. Provider-managed context contains hidden instructions, retained reasoning, framing, and any remaining estimation error.</p>'
+  );
+}
 function renderInspector() {
   const panel = $("#inspector"),
     s = allRows().find((s) => keyOf(s) === state.selected || s.id === state.selected);
@@ -2204,6 +2287,18 @@ function renderInspector() {
   const stats = included
     ? subscriptionStats(s, pct)
     : '<div class="inspector-stats"><div><span>Recorded spend</span><strong>' + money(cost(s)) + "</strong><small>" + count(s) + " prompts</small></div><div><span>" + (last?.completed === false ? "Current prompt" : "Last prompt") + "</span><strong>" + money(last?.priced === false ? null : last?.cost_usd) + "</strong><small>" + (last?.completed === false ? "still accumulating" : "recorded cost") + "</small></div><div><span>Next 10 prompts</span><strong>" + additional(forecast(s)) + "</strong><small>additional estimate</small></div><div><span>Context</span><strong>" + percentage(pct) + "</strong><small>" + tokens(s.context_tokens) + " / " + tokens(s.context_window_tokens) + "</small></div></div>";
+  const overview =
+    stats +
+    (!included && a.severity ? '<div class="inspector-signal"><strong>' + esc(a.action) + "</strong><p>" + esc(a.evidence) + "</p></div>" : "") +
+    (included ? '<div class="section-title"><h3>How context fills up</h3><span class="tiny">Share of the window, prompt by prompt</span></div>' + contextGraph(s) : "") +
+    (!included ? '<div class="section-title"><h3>How this session is spending</h3><div class="mini-tabs"><button data-chart="cumulative" class="' +
+    (state.chart === "cumulative" ? "on" : "") +
+    '">Cumulative</button><button data-chart="prompt" class="' +
+    (state.chart === "prompt" ? "on" : "") +
+    '">Per prompt</button></div></div>' + sessionGraph(s) : "") +
+    '<div class="section-title"><h3>Where the tokens went</h3><span class="tiny">Recorded token traffic</span></div>' +
+    tokenBreakdown(s) +
+    subagentDetails(s);
   $("#inspector-body").innerHTML =
     '<span class="eyebrow">' +
     providerName(s.provider) +
@@ -2221,17 +2316,12 @@ function renderInspector() {
     age(s.last_activity_at) +
     " ago · " +
     age(startTime(s)) +
-    ' old</div>' + stats +
-    (!included && a.severity ? '<div class="inspector-signal"><strong>' + esc(a.action) + "</strong><p>" + esc(a.evidence) + "</p></div>" : "") +
-    (included ? '<div class="section-title"><h3>How context fills up</h3><span class="tiny">Share of the window, prompt by prompt</span></div>' + contextGraph(s) : "") +
-    (!included ? '<div class="section-title"><h3>How this session is spending</h3><div class="mini-tabs"><button data-chart="cumulative" class="' +
-    (state.chart === "cumulative" ? "on" : "") +
-    '">Cumulative</button><button data-chart="prompt" class="' +
-    (state.chart === "prompt" ? "on" : "") +
-    '">Per prompt</button></div></div>' + sessionGraph(s) : "") +
-    '<div class="section-title"><h3>Where the tokens went</h3><span class="tiny">Recorded token traffic</span></div>' +
-    tokenBreakdown(s) +
-    subagentDetails(s);
+    ' old</div><div class="inspector-tabs" role="tablist" aria-label="Session details"><button type="button" role="tab" data-inspector-tab="overview" aria-selected="' +
+    String(state.inspectorTab === "overview") +
+    '" class="' + (state.inspectorTab === "overview" ? "on" : "") + '">Overview</button><button type="button" role="tab" data-inspector-tab="context" aria-selected="' +
+    String(state.inspectorTab === "context") +
+    '" class="' + (state.inspectorTab === "context" ? "on" : "") + '">Context map</button></div>' +
+    (state.inspectorTab === "context" ? contextMapPanel(s) : overview);
   $("#inspector-body").scrollTop = scroll;
   if (!wasOpen) $("#close").focus();
 }
@@ -2258,6 +2348,7 @@ async function openSession(id, opener) {
   state.lastOpener = opener;
   state.selected = id;
   state.chart = "cumulative";
+  state.inspectorTab = "overview";
   $("#inspector-body").scrollTop = 0;
   saveUrl();
   renderInspector();

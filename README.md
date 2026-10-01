@@ -2,7 +2,7 @@
 
 See what Claude Code, Claude Code Desktop, Codex CLI, and Codex Desktop are costing while you work.
 
-Konvu Telemetry reads the session data already on your Mac and shows local spend, context use, forecasts, subagents, and usage trends in a dashboard and CLI status line. Your prompts, code, transcripts, and usage data stay on your machine.
+Konvu Telemetry reads the session data already on your Mac and shows local spend, context use, forecasts, subagents, and usage trends in a dashboard and CLI status line. A session's Context map tab also estimates which local sources fill its current context window. Your prompts, code, transcripts, and usage data stay on your machine.
 
 ## Install
 
@@ -13,6 +13,8 @@ brew tap konvuinc/tap
 brew install konvuinc/tap/konvu-telemetry
 konvu-telemetry setup
 ```
+
+Direct Python installs require Python 3.12 or newer. Homebrew installs its own compatible Python.
 
 Setup starts the local collector, opens the dashboard at `http://127.0.0.1:7824`, and wires each client to exactly one place: the Claude Code CLI shows usage in its status line, Claude Desktop and Codex Desktop append a usage box to the reply, and the Codex CLI keeps its Stop hook summary. By default the box appears after a turn that called tools, so ordinary questions stay uncluttered; `konvu-telemetry cadence` changes that, and so does the settings panel in the dashboard. Every usage summary ends with a link to the dashboard, or, when the collector is not running, with a reminder to run `konvu-telemetry setup`. Restart both desktop apps after setup; in Codex, open `/hooks` and trust the Konvu hooks.
 
@@ -52,6 +54,7 @@ konvu-telemetry uninstall
 ## What it does
 
 - Tracks Claude Code, Claude Code Desktop, Codex CLI, and Codex Desktop sessions from their local transcripts.
+- Maps prompts, files, tool results, web data, attachments, instructions, agent output, and compaction summaries into the current context window without storing their contents.
 - Estimates spend from bundled model pricing and records subscription-credit equivalents for supported Codex models.
 - Runs only on your Mac and serves the dashboard only at `127.0.0.1`.
 - Uses browser notifications only when you enable them in the local dashboard. An active paid session alerts once its next ten prompts are forecast at $10 or more; repeat suppression stays in that browser.

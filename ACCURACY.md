@@ -22,6 +22,10 @@ Prompt boundaries come from explicit provider records. Subagent calls are dedupl
 
 Context is the latest provider-recorded input plus cache traffic for a model call. It is not cumulative token traffic. Codex supplies its context-window size directly. Claude uses the published capacity in the bundled model-price snapshot and labels it as model pricing rather than provider-observed capacity.
 
+The context map incrementally reads the same local transcripts and records only derived categories, bounded labels, token estimates, checkpoints, and byte cursors. Text is counted with pinned provider-family tokenizers: `tiktoken` with `o200k_base` for Codex and `ctok` for Claude. Python 3.12 is the minimum supported version, so every install uses the same tokenizers. Images and native documents use provider-specific weights until the next recorded input checkpoint.
+
+Provider input checkpoints are authoritative for the total, while tokenizers distribute each checkpoint's growth between the additions recorded in that interval. Model changes affect only later additions. Compaction closes the current epoch and starts a new one from the provider-recorded retained context. Any difference that cannot be tied to visible transcript data remains explicitly categorized as provider-managed context; it can include hidden instructions, retained reasoning, framing, oversized records, and estimation error.
+
 ## Account limits
 
 Account-limit percentages and reset times are provider-reported rather than estimated. Every two minutes, the collector reads Claude's five-hour and weekly windows from Anthropic's usage endpoint and asks Codex's local app-server for every reported rolling, monthly, model-specific, and denial state. Invalid percentages are rejected, while usage reported above 100 percent (or remaining capacity below zero) is recorded as exactly exhausted so that window is never dropped. Authentication failures clear the provider immediately; transient failures retain unexpired windows with an explicit stale status, while expired windows and their plan flags are removed. A Claude 429 starts an exponential backoff of at least one hour, waits until the next cached reset when later, and adds jitter so clients do not retry together.
@@ -37,6 +41,7 @@ Run `konvu-telemetry backtest-next-ten` against local Claude history to inspect 
 ## Known limits
 
 - Provider transcript formats can change before Konvu ships a parser update.
+- Context-map categories are estimates of responsibility, not proof that the model attended to or used a source. Native image and document attribution is less precise than visible text attribution.
 - API-equivalent prices can differ from subscriptions, credits, negotiated rates, taxes, and provider invoices.
 - Per-prompt Codex subagent attribution is timestamp-based when no spawn timestamp is recorded.
 - Forecasts describe recent local behavior; they are not guarantees and are hidden when evidence is insufficient.

@@ -6,7 +6,7 @@ Konvu Telemetry is one Python package with a single resident process. The proces
 
 - The collector never modifies provider transcripts.
 - The dashboard server binds only to IPv4 loopback and rejects non-local `Host` and `Origin` values.
-- The package has no runtime Python dependencies. The collector is the only Konvu component that fetches or writes account limits: every two minutes Claude calls Anthropic's usage endpoint and a validated installed Codex app-server contacts OpenAI. The Claude credential remains in memory for one request; the Codex credential never enters Konvu Telemetry. Only normalized limits are persisted. Authentication failures clear the provider immediately; transient failures retain unexpired provider windows with an explicit stale status. Claude 429 responses trigger exponential backoff with jitter for at least one hour and until the next known reset without blocking transcript collection.
+- The package requires Python 3.12 and pins `tiktoken` for Codex context estimates and `ctok` for Claude context estimates. The collector is the only Konvu component that fetches or writes account limits: every two minutes Claude calls Anthropic's usage endpoint and a validated installed Codex app-server contacts OpenAI. The Claude credential remains in memory for one request; the Codex credential never enters Konvu Telemetry. Only normalized limits are persisted. Authentication failures clear the provider immediately; transient failures retain unexpired provider windows with an explicit stale status. Claude 429 responses trigger exponential backoff with jitter for at least one hour and until the next known reset without blocking transcript collection.
 - A separate outbound client sends a small allowlisted set of anonymous product events to PostHog with a 500 ms timeout. Setup durably queues its event before the setup process exits; network delivery and resident-process events run in a background thread.
 - Product analytics uses a random install ID. It does not create person profiles and sends no transcripts, prompts, code, paths, command arguments, usage data, raw errors, environment variables, account IDs, or workspace IDs.
 - Browser notifications require an open dashboard tab and browser permission.
@@ -33,9 +33,10 @@ Konvu Telemetry is one Python package with a single resident process. The proces
 4. `parsers.py` converts provider records into the provider-neutral types in `models.py`.
 5. `pricing.py` applies the bundled local price table; `codex_credit_rates.py` calculates Codex credit equivalents from its published rate table. Both mark missing rates explicitly.
 6. `analytics.py` derives prompt series, the provider-level sparse-session forecast fallback, compaction state, and the current hot-session flag. Expired valid forecast fallbacks remain usable while one background refresh rebuilds them.
-7. `snapshot.py` writes a bounded dashboard summary plus detailed per-session documents; `provider_limits.py` independently writes the normalized account quota snapshot. Unchanged documents are not rewritten.
-8. `display.py` builds one set of usage rows from a per-session document and reads `service.load_health()` for the closing dashboard line, then frames them for the Codex `Stop` hook and both providers' desktop `UserPromptSubmit` context, or prints them flat for the Claude status line.
-9. `dashboard/` contains static HTML, CSS, JavaScript, and images served by the local process.
+7. `context_map.py` sends only changed transcript ranges to a bounded local worker. It persists byte cursors and derived token attribution, closes an epoch at compaction, and reconciles every completed epoch to provider-recorded input checkpoints. Worker failure retains the last valid map and cannot fail the main usage snapshot.
+8. `snapshot.py` writes a bounded dashboard summary plus detailed per-session documents; `provider_limits.py` independently writes the normalized account quota snapshot. Unchanged documents are not rewritten.
+9. `display.py` builds one set of usage rows from a per-session document and reads `service.load_health()` for the closing dashboard line, then frames them for the Codex `Stop` hook and both providers' desktop `UserPromptSubmit` context, or prints them flat for the Claude status line.
+10. `dashboard/` contains static HTML, CSS, JavaScript, and images served by the local process.
 
 ## Local files
 
@@ -45,6 +46,7 @@ Konvu Telemetry is one Python package with a single resident process. The proces
 | `~/.konvu/telemetry/live-sessions.json` | Bounded summary of sessions active in the dashboard's 20-minute window | `0600` |
 | `~/.konvu/telemetry/account-quotas.json` | Latest normalized provider limits and transient failure state | `0600` |
 | `~/.konvu/telemetry/sessions/*.json` | Per-session detail loaded on demand by the dashboard | `0600` |
+| `~/.konvu/telemetry/context-maps/*.json` | Per-session context epochs, byte cursors, categories, bounded labels, and token estimates; never raw source content | `0600` |
 | `~/.konvu/telemetry/baselines.json` | Provider-level sparse-session forecast fallback | `0600` |
 | `~/.konvu/telemetry/health.json` | Collector freshness, last error, and the version it is running | `0600` |
 | `~/.konvu/telemetry/tracking-state.json` | Anonymous install ID and local analytics preference | `0600` |
@@ -82,6 +84,7 @@ Setup enables anonymous product analytics by default and preserves an existing c
 - Uninstall refuses to delete the service definition when launchd still reports it running.
 - Unknown billable models mark the session partial; their iterations are omitted from forecasts while complete iterations remain usable.
 - Oversized transcript records are scanned with bounded prefix and suffix buffers; large payload text is not retained.
+- Context mapping runs in a subprocess only when a live transcript or its provider checkpoint changes. A timeout, malformed transcript, missing tokenizer, or worker failure leaves the last valid map in place and does not fail usage collection.
 - Dashboard responses use ETags, and the browser fetches detailed history only for the open session.
 - Hooks read the collector's existing session output and never force collection. Their only writes are the per-session `shown/` record, and only under the `usage-jump` cadence. Under the custom cadence they also execute the user's own `custom_rule.py`.
 - Failed analytics delivery retains stable event IDs and uses exponential backoff capped at 24 hours.

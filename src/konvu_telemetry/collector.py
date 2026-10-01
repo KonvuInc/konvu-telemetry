@@ -17,6 +17,7 @@ from .display import (
     statusline,
 )
 from .exporter import write_normalized_events
+from .live import IncrementalLiveState
 from .provider_limits import (
     ProviderLimitPoller,
     stored_provider_quotas,
@@ -24,6 +25,7 @@ from .provider_limits import (
 )
 from .service import (
     collection_lock,
+    enrich_context_maps,
     open_dashboard,
     run_local_service,
     write_health,
@@ -66,7 +68,14 @@ def run_once(_arguments: argparse.Namespace) -> None:
     with collection_lock():
         provider_quotas = write_provider_quotas(provider_quotas)
         collected_at = time.time()
-        write_snapshot(build_snapshot(collected_at, provider_quotas=provider_quotas))
+        live_state = IncrementalLiveState()
+        snapshot = build_snapshot(
+            collected_at,
+            live_state,
+            provider_quotas=provider_quotas,
+        )
+        enrich_context_maps(snapshot, live_state)
+        write_snapshot(snapshot)
         write_health(collected_at)
 
 

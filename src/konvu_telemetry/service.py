@@ -28,6 +28,7 @@ from .config import (
     LIVE_ACTIVITY_SECONDS,
     package_version,
 )
+from .context_map import ContextMapScheduler
 from .live import IncrementalLiveState
 from .provider_limits import (
     ProviderLimitPoller,
@@ -371,6 +372,7 @@ def collect_forever(
     refresh_coordinator: RefreshCoordinator | None = None,
     provider_limit_poller: ProviderLimitPoller | None = None,
     on_stale_install: Callable[[], None] | None = None,
+    context_map_collector: ContextMapScheduler | None = None,
 ) -> None:
     """Refresh local session files until the operating system stops the service."""
     global _DASHBOARD_DATA_AVAILABLE
@@ -378,6 +380,7 @@ def collect_forever(
     quota_poller = provider_limit_poller or ProviderLimitPoller(
         initial_snapshots=stored_provider_quotas()
     )
+    context_mapper = context_map_collector or ContextMapScheduler()
     while True:
         if package_was_replaced():
             # Exiting hands the service back to launchd, which starts it again
@@ -405,6 +408,7 @@ def collect_forever(
                     live_state,
                     provider_quotas=provider_quotas,
                 )
+                enrich_context_maps(snapshot, live_state, context_mapper)
                 write_snapshot(snapshot)
             _DASHBOARD_DATA_AVAILABLE = snapshot_has_dashboard_data(
                 snapshot, time.time()
@@ -428,6 +432,18 @@ def collect_forever(
         finally:
             coordinator.finish_collection(collection_error)
         coordinator.wait_for_refresh(interval_seconds)
+
+
+def enrich_context_maps(
+    snapshot: dict[str, object],
+    live_state: IncrementalLiveState,
+    collector: ContextMapScheduler | None = None,
+) -> None:
+    """Add optional context maps without failing core usage collection."""
+    try:
+        (collector or ContextMapScheduler()).refresh(snapshot, live_state)
+    except Exception as error:
+        LOGGER.warning("Context mapping failed: %s", type(error).__name__)
 
 
 class DashboardRequestHandler(SimpleHTTPRequestHandler):

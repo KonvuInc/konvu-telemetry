@@ -20,7 +20,7 @@ jobs:
         with:
           python-version: "3.14"
           cache: pip
-      - run: python -m pip install --disable-pip-version-check mypy==1.18.2 ruff==0.15.6
+      - run: python -m pip install --disable-pip-version-check . mypy==1.18.2 ruff==0.15.6
       - run: python -m ruff check src tests scripts
       - run: python -m ruff format --check src tests scripts
       - run: python -m mypy src/konvu_telemetry
@@ -66,10 +66,10 @@ jobs:
       - name: Smoke-test release artifacts
         run: |
           python -m venv /tmp/konvu-release-wheel
-          /tmp/konvu-release-wheel/bin/pip install --no-deps dist/*.whl
+          /tmp/konvu-release-wheel/bin/pip install dist/*.whl
           /tmp/konvu-release-wheel/bin/python -c 'from importlib.resources import files; root = files("konvu_telemetry"); assert root.joinpath("pricing.json").is_file(); assert root.joinpath("dashboard/index.html").is_file()'
           python -m venv /tmp/konvu-release-sdist
-          /tmp/konvu-release-sdist/bin/pip install --no-deps dist/*.tar.gz
+          /tmp/konvu-release-sdist/bin/pip install dist/*.tar.gz
           /tmp/konvu-release-sdist/bin/konvu-telemetry --help
           /tmp/konvu-release-wheel/bin/konvu-telemetry serve --port 17824 --interval 1 &
           pid=$!

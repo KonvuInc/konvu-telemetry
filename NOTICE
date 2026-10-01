@@ -7,3 +7,8 @@ LiteLLM is distributed under the MIT License: https://github.com/BerriAI/litellm
 The bundled snapshot is `src/konvu_telemetry/pricing.json`.
 SHA-256: e567614465f2231a7d4037a10eff019e313c867fc5844a7eb892385507b9f868
 It is local estimate data, not a provider billing ledger.
+
+Konvu Telemetry depends on pinned releases of OpenAI's tiktoken and Sander Land's ctok for local context-token estimates. Both are distributed under the MIT License.
+
+tiktoken: https://github.com/openai/tiktoken
+ctok: https://github.com/sanderland/ctok
