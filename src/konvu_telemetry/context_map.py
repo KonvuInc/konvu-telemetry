@@ -1610,15 +1610,16 @@ def _process_codex(
         "local_shell_call_output",
     }:
         call_id = payload.get("call_id") or payload.get("id")
-        metadata = pending.pop(call_id, {}) if isinstance(call_id, str) else {}
-        if not isinstance(metadata, dict):
-            metadata = {}
+        popped_metadata = pending.pop(call_id, {}) if isinstance(call_id, str) else {}
+        call_metadata = (
+            popped_metadata if isinstance(popped_metadata, dict) else {}
+        )
         for source in _result_sources(
             tokenizer,
             "codex",
             str(state.get("active_model") or "unknown"),
             payload.get("output"),
-            metadata,
+            call_metadata,
             record,
             timestamp,
             call_id if isinstance(call_id, str) else "unknown",
