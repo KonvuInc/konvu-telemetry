@@ -20,7 +20,7 @@ jobs:
         with:
           python-version: "3.14"
           cache: pip
-      - run: python -m pip install --disable-pip-version-check mypy==1.18.2 ruff==0.15.6
+      - run: python -m pip install --disable-pip-version-check . mypy==1.18.2 ruff==0.15.6
       - run: python -m ruff check src tests scripts
       - run: python -m ruff format --check src tests scripts
       - run: python -m mypy src/konvu_telemetry
