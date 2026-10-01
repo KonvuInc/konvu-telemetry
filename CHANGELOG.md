@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.7 - 2026-09-30
 
 - Make `konvu-telemetry once` work while the collector service is running: it now
   waits for the service's current write to finish instead of exiting.
