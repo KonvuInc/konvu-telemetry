@@ -22,7 +22,7 @@ from .parsers import is_human_claude_prompt
 from .storage import context_map_path, parse_timestamp, write_private_json_if_changed
 
 
-STATE_VERSION = 14
+STATE_VERSION = 15
 MAX_CONTEXT_RECORD_BYTES = 8 * 1024 * 1024
 CLAUDE_RESULT_FRAME_TOKENS = {"3.0": 40, "5.0": 23}
 CODEX_RESULT_FRAME_TOKENS = 10

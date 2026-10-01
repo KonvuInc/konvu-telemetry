@@ -2,18 +2,10 @@
 
 from __future__ import annotations
 
-import importlib
+import ctok  # type: ignore[import-untyped]
 import json
-import math
 import re
-from types import ModuleType
-
-
-def _load_optional(name: str) -> ModuleType | None:
-    try:
-        return importlib.import_module(name)
-    except (ImportError, OSError):
-        return None
+import tiktoken
 
 
 def _text(value: object) -> str:
@@ -44,42 +36,45 @@ def _text(value: object) -> str:
 def claude_tokenizer_version(model: str) -> str:
     """Choose the tokenizer family for the model consuming this addition."""
     normalized = model.lower()
-    if re.search(r"claude-(?:opus|sonnet|fable)-5(?:-|$)", normalized):
+    version = re.search(
+        r"claude-[a-z0-9]+-(\d)(?:(?:[.-](\d{1,2}))(?=-|$)|(?=-|$))",
+        normalized,
+    )
+    if version is None:
+        return "3.0"
+    major = int(version.group(1))
+    minor = int(version.group(2) or 0)
+    if major >= 5:
         return "5.0"
-    if re.search(r"claude-(?:opus|sonnet|fable)-4[.-]8(?:-|$)", normalized):
+    if major == 4 and minor >= 8:
         return "4.8"
-    if re.search(r"claude-(?:opus|sonnet|fable)-4[.-]7(?:-|$)", normalized):
+    if major == 4 and minor >= 7:
         return "4.7"
     return "3.0"
 
 
 class ContextTokenizer:
-    """Use provider tokenizers when installed and a stable fallback otherwise."""
+    """Count context text with the pinned provider-family tokenizers."""
 
     def __init__(self) -> None:
-        self._tiktoken = _load_optional("tiktoken")
-        self._ctok = _load_optional("ctok")
-        self._codex_encoding: object | None = None
+        self._tiktoken = tiktoken
+        self._ctok = ctok
+        self._codex_encoding: tiktoken.Encoding | None = None
 
     def count(self, provider: str, model: str, value: object) -> tuple[int, str]:
         content = _text(value)
         if not content:
             return 0, "empty"
-        if provider == "codex" and self._tiktoken is not None:
-            try:
-                if self._codex_encoding is None:
-                    self._codex_encoding = self._tiktoken.get_encoding("o200k_base")
-                encode = getattr(self._codex_encoding, "encode")
-                return len(encode(content, disallowed_special=())), "o200k_base"
-            except Exception:
-                pass
-        if provider == "claude" and self._ctok is not None:
-            try:
-                version = claude_tokenizer_version(model)
-                return int(
-                    self._ctok.token_count(content, version=version)
-                ), f"ctok-{version}"
-            except Exception:
-                pass
-        byte_count = len(content.encode("utf-8"))
-        return max(1, math.ceil(byte_count / 4)), "utf8-4-byte-fallback"
+        if provider == "codex":
+            if self._codex_encoding is None:
+                self._codex_encoding = self._tiktoken.get_encoding("o200k_base")
+            return (
+                len(self._codex_encoding.encode(content, disallowed_special=())),
+                "o200k_base",
+            )
+        if provider == "claude":
+            version = claude_tokenizer_version(model)
+            return int(
+                self._ctok.token_count(content, version=version)
+            ), f"ctok-{version}"
+        raise ValueError(f"Unsupported context provider: {provider}")

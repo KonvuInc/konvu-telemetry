@@ -14,6 +14,8 @@ brew install konvuinc/tap/konvu-telemetry
 konvu-telemetry setup
 ```
 
+Direct Python installs require Python 3.12 or newer. Homebrew installs its own compatible Python.
+
 Setup starts the local collector, opens the dashboard at `http://127.0.0.1:7824`, and wires each client to exactly one place: the Claude Code CLI shows usage in its status line, Claude Desktop and Codex Desktop append a usage box to the reply, and the Codex CLI keeps its Stop hook summary. By default the box appears after a turn that called tools, so ordinary questions stay uncluttered; `konvu-telemetry cadence` changes that, and so does the settings panel in the dashboard. Every usage summary ends with a link to the dashboard, or, when the collector is not running, with a reminder to run `konvu-telemetry setup`. Restart both desktop apps after setup; in Codex, open `/hooks` and trust the Konvu hooks.
 
 ## Use it

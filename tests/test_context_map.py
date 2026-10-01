@@ -213,9 +213,10 @@ class ContextMapTests(unittest.TestCase):
         encoding = RecordingEncoding()
         tokenizer._tiktoken = RecordingTiktoken(encoding)
 
-        count, name = tokenizer.count("codex", "gpt-5.6", "<|endoftext|>")
+        for model in ("gpt-5.6", "gpt-6-sol", "gpt-6-astra"):
+            count, name = tokenizer.count("codex", model, "<|endoftext|>")
 
-        self.assertEqual((count, name), (1, "o200k_base"))
+            self.assertEqual((count, name), (1, "o200k_base"))
         self.assertEqual(encoding.disallowed_special, ())
 
     def test_claude_models_select_the_pinned_tokenizer_family(self) -> None:
@@ -229,6 +230,9 @@ class ContextMapTests(unittest.TestCase):
             "claude-sonnet-4.7",
             "claude-opus-4-8",
             "claude-opus-5-5",
+            "claude-opus-5.5",
+            "claude-newfamily-5-1",
+            "claude-opus-4-20250514",
         ):
             count, name = tokenizer.count("claude", model, "context")
             self.assertEqual(count, 7)
@@ -236,8 +240,24 @@ class ContextMapTests(unittest.TestCase):
 
         self.assertEqual(
             versions,
-            ["ctok-3.0", "ctok-4.7", "ctok-4.8", "ctok-5.0"],
+            [
+                "ctok-3.0",
+                "ctok-4.7",
+                "ctok-4.8",
+                "ctok-5.0",
+                "ctok-5.0",
+                "ctok-5.0",
+                "ctok-3.0",
+            ],
         )
+
+    def test_claude_tokenizer_failure_never_falls_back_to_byte_estimates(self) -> None:
+        tokenizer = ContextTokenizer()
+        with (
+            patch.object(tokenizer._ctok, "token_count", side_effect=RuntimeError()),
+            self.assertRaises(RuntimeError),
+        ):
+            tokenizer.count("claude", "claude-opus-5-5", "context")
 
     def test_claude_commits_only_complete_checkpoint_windows(self) -> None:
         secret = "raw-result-must-not-be-copied"

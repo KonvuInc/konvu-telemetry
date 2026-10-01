@@ -15,7 +15,7 @@
 
 ## Formula requirements
 
-The formula should use the tagged source archive, depend on a Homebrew Python version supported by `python_requires`, install the package in an isolated virtual environment, and start an isolated server in its test block to verify `/healthz`. Do not install or start the LaunchAgent from the formula; the user controls that through `konvu-telemetry setup`.
+The formula should use the tagged source archive, depend on a Homebrew Python version supported by `python_requires`, and pin every Python dependency as a Homebrew resource with its release URL and SHA-256. It must install the package in an isolated virtual environment and start an isolated server in its test block to verify `/healthz`. Do not install or start the LaunchAgent from the formula; the user controls that through `konvu-telemetry setup`.
 
 ## Rollback
 
