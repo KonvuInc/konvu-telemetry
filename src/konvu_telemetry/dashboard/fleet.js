@@ -247,9 +247,10 @@ function subagentLabel(a) {
 function subagentContext(a) {
   return nonnegative(a.context_tokens) ? a.context_tokens : a.entry_context_tokens;
 }
-function subagentNode(a, index = null, showCosts = true) {
+function subagentNode(s, a, index = null) {
   const id = typeof a.id === "string" ? a.id : "",
-    label = subagentLabel(a) + (index === null ? "" : " " + (index + 1));
+    label = subagentLabel(a) + (index === null ? "" : " " + (index + 1)),
+    metric = subagentMetric(s, a.cost_usd);
   return (
     '<div class="agent-node"><div class="agent-identity"><span class="subagent-name" title="' +
     esc(a.label || label) +
@@ -268,14 +269,13 @@ function subagentNode(a, index = null, showCosts = true) {
     "<small>" +
     (nonnegative(subagentContext(a)) ? "current context" : "Not recorded") +
     '</small></div>' +
-    (showCosts ? '<div class="agent-cost">' + money(a.cost_usd) + "<small>" + (nonnegative(a.cost_usd) ? "API-equivalent" : "Not recorded") + "</small></div>" : "") +
+    '<div class="agent-cost">' + metric.value + "<small>" + metric.note + "</small></div>" +
     "</div>"
   );
 }
 function subagentDetails(s) {
   const agents = Array.isArray(s.subagents) ? s.subagents.filter((a) => a && typeof a === "object") : [];
   if (!agents.length) return "";
-  const showCosts = true;
   const grouped = new Map();
   for (const agent of agents) {
     const key = String(agent.label || "Subagent");
@@ -293,7 +293,7 @@ function subagentDetails(s) {
         (a, b) =>
           (nonnegative(b.cost_usd) ? b.cost_usd : -1) - (nonnegative(a.cost_usd) ? a.cost_usd : -1) || String(a.id || "").localeCompare(String(b.id || "")),
       );
-      if (children.length === 1) return '<div class="agent-branch">' + subagentNode(children[0], null, showCosts) + "</div>";
+      if (children.length === 1) return '<div class="agent-branch">' + subagentNode(s, children[0]) + "</div>";
       const key = keyOf(s) + "|" + label,
         live = children.filter((a) => a.live === true).length,
         contexts = children.map(subagentContext).filter(nonnegative),
@@ -309,8 +309,11 @@ function subagentDetails(s) {
           : contexts.length
             ? "current context · " + contexts.length + "/" + children.length + " recorded"
             : "Not recorded";
-      const costLabel = priced.length ? money(priced.reduce((sum, a) => sum + a.cost_usd, 0)) : "—",
-        costNote = priced.length === children.length ? "API-equivalent total" : priced.length ? priced.length + "/" + children.length + " estimated" : "Not recorded";
+      const metric = subagentMetric(
+        s,
+        priced.length ? priced.reduce((sum, a) => sum + a.cost_usd, 0) : null,
+        priced.length === children.length ? "total" : priced.length + "/" + children.length + " recorded",
+      );
       return (
         '<details class="agent-branch agent-group" data-agent-group="' +
         esc(key) +
@@ -329,9 +332,9 @@ function subagentDetails(s) {
         "<small>" +
         contextNote +
         '</small></div>' +
-        (showCosts ? '<div class="agent-cost">' + costLabel + "<small>" + costNote + "</small></div>" : "") +
+        '<div class="agent-cost">' + metric.value + "<small>" + metric.note + "</small></div>" +
         '</summary><div class="agent-children">' +
-        children.map((a, i) => subagentNode(a, i, showCosts)).join("") +
+        children.map((a, i) => subagentNode(s, a, i)).join("") +
         "</div></details>"
       );
     })
@@ -341,7 +344,7 @@ function subagentDetails(s) {
     agents.length +
     " spawned · " +
     agents.filter((a) => a.live === true).length +
-    ' live</span></div><div class="agent-map"><div class="agent-map-header"><span>Agent</span><span>Context received</span><span>Spent ↓</span></div><div class="agent-root"><i></i>This session</div><div class="agent-branches">' +
+    ' live</span></div><div class="agent-map"><div class="agent-map-header"><span>Agent</span><span>Context received</span><span>' + subagentMetricHeading(s) + '</span></div><div class="agent-root"><i></i>This session</div><div class="agent-branches">' +
     branches +
     "</div></div>"
   );
@@ -691,6 +694,7 @@ function responsibilityCell(s) {
 function subagentCell(s) {
   const total = Number.isInteger(s.subagent_total) && s.subagent_total >= 0 ? s.subagent_total : "—";
   const live = Number.isInteger(s.active_subagents) && s.active_subagents >= 0 ? s.active_subagents : "—";
+  const metric = subagentMetric(s, s.subagent_cost_usd);
   return (
     '<div class="subagent-cell"><span><strong>' +
     total +
@@ -699,7 +703,7 @@ function subagentCell(s) {
     '">' +
     live +
     '</strong> live</span>' +
-    (nonnegative(s.subagent_cost_usd) ? '<small title="API-equivalent subagent cost estimated from recorded local token usage">' + money(s.subagent_cost_usd) + " API-equivalent</small>" : "") +
+    (metric.value !== "—" ? '<small title="' + esc(metric.title) + '">' + metric.value + " " + metric.note + "</small>" : "") +
     "</div>"
   );
 }
@@ -768,6 +772,34 @@ function groupHeading(group) {
    a subscription session must never contribute to a dollar figure. */
 const avg = (values) => (values.length ? values.reduce((a, b) => a + b, 0) / values.length : null);
 const shareOf = (s) => quotaShare(s, s.provider === "codex" ? "weekly" : "five_hour");
+function subagentUsesDollars(s) {
+  return providerState(s.provider, allRows());
+}
+function subagentContextShare(s, costValue) {
+  const sessionContext = context(s);
+  if (!nonnegative(costValue) || !finite(sessionContext) || !nonnegative(s.total_cost_usd) || s.total_cost_usd <= 0) return null;
+  return (costValue / s.total_cost_usd) * sessionContext;
+}
+function subagentMetric(s, costValue, completeness = "recorded") {
+  if (!nonnegative(costValue)) return { value: "—", note: "Not recorded", title: "No recorded subagent usage." };
+  if (subagentUsesDollars(s)) {
+    return {
+      value: money(costValue),
+      note: "API-equivalent " + completeness,
+      title: "API-equivalent subagent cost estimated from recorded local token usage.",
+    };
+  }
+  const share = subagentContextShare(s, costValue);
+  if (!finite(share)) return { value: "—", note: "Context share unavailable", title: "The session context is not available yet." };
+  return {
+    value: percentage(share),
+    note: "estimated of session context",
+    title: "Estimated from this subagent's recorded API-equivalent share of the session, multiplied by the session's current context usage.",
+  };
+}
+function subagentMetricHeading(s) {
+  return subagentUsesDollars(s) ? "API-equivalent ↓" : "Estimated context share ↓";
+}
 /* The collector reports "observing" while it still lacks the history to
    attribute usage. Naming that beats a bare dash, which reads like a bug. */
 function windowUsedPercent(s) {
@@ -781,9 +813,6 @@ function shareAhead(s) {
   const period = s.provider === "codex" ? "weekly" : "five_hour";
   const row = s.quota_attribution?.windows?.find((w) => w?.period === period && finite(w.projected_next_10_percent));
   return row ? row.projected_next_10_percent : null;
-}
-function subagentsOf(rows) {
-  return rows.flatMap((s) => (Array.isArray(s.subagents) ? s.subagents.map((a) => ({ agent: a, session: s })) : []));
 }
 /* Four bands, worst last, so one scale covers every percentage on the page. */
 function band(value, warn, high, bad) {
@@ -811,21 +840,17 @@ function planTiles(rows) {
   const heaviest = rows.filter((s) => finite(shareOf(s))).sort((a, b) => shareOf(b) - shareOf(a))[0];
   const drifting = rows.filter((s) => finite(shareAhead(s))).sort((a, b) => shareAhead(b) - shareAhead(a))[0];
   const avgContext = avg(rows.map(context).filter(finite));
-  const agents = subagentsOf(rows);
-  const agentContext = avg(
-    agents
-      .map(({ agent, session }) =>
-        nonnegative(agent.entry_context_tokens) && session.context_window_tokens > 0 ? (agent.entry_context_tokens / session.context_window_tokens) * 100 : null
-      )
-      .filter(finite)
-  );
   const windowOf = (s) => (s.provider === "codex" ? "weekly" : "5-hour");
+  const topSubagent = rows
+    .map((s) => ({ session: s, share: subagentContextShare(s, s.subagent_cost_usd) }))
+    .filter(({ share }) => finite(share))
+    .sort((a, b) => b.share - a.share)[0];
   return [
     kpiTile("Spent beyond plan", money(0), "good", kpiFootnote("nothing is billing"), true),
     heaviest ? kpiTile("Using most of your " + windowOf(heaviest) + " limit", percentage(shareOf(heaviest)), band(shareOf(heaviest), 10, 20, 35), kpiSession(heaviest)) : "",
     drifting ? kpiTile("Growing fastest", "+" + percentage(shareAhead(drifting)), band(shareAhead(drifting), 4, 8, 12), kpiSession(drifting)) : "",
     finite(avgContext) ? kpiTile("Average context used", percentage(avgContext), band(avgContext, 50, 70, 88), kpiFootnote("across " + rows.length + " sessions")) : "",
-    agents.length ? kpiTile("Average subagent context", percentage(agentContext), band(agentContext, 30, 45, 60), kpiFootnote((agents.length / rows.length).toFixed(1) + " subagents per session")) : "",
+    topSubagent ? kpiTile("Most subagent context", percentage(topSubagent.share), band(topSubagent.share, 3, 6, 10), kpiSession(topSubagent.session, "estimated")) : "",
   ].filter(Boolean);
 }
 function moneyTiles(rows) {
@@ -833,15 +858,15 @@ function moneyTiles(rows) {
   const priciest = rows.filter((s) => finite(cost(s))).sort((a, b) => cost(b) - cost(a))[0];
   const hottest = rows.filter((s) => finite(forecast(s))).sort((a, b) => forecast(b) - forecast(a))[0];
   const avgContext = avg(rows.map(context).filter(finite));
-  const topAgent = subagentsOf(rows)
-    .filter(({ agent }) => nonnegative(agent.cost_usd))
-    .sort((a, b) => b.agent.cost_usd - a.agent.cost_usd)[0];
+  const topSubagent = rows
+    .filter((s) => nonnegative(s.subagent_cost_usd))
+    .sort((a, b) => b.subagent_cost_usd - a.subagent_cost_usd)[0];
   return [
     kpiTile("Spent beyond plan", money(spend), spend > 0 ? "bad" : "good", kpiFootnote("across " + rows.length + " billing sessions"), true),
     priciest ? kpiTile("Most expensive session", money(cost(priciest)), band((cost(priciest) / (spend || 1)) * 100, 25, 45, 65), kpiSession(priciest)) : "",
     hottest ? kpiTile("Biggest forecast", additional(forecast(hottest)), band(forecast(hottest), 5, 12, 20), kpiSession(hottest)) : "",
     finite(avgContext) ? kpiTile("Average context used", percentage(avgContext), band(avgContext, 50, 70, 88), kpiFootnote("across " + rows.length + " billing sessions")) : "",
-    topAgent ? kpiTile("Costliest subagent", money(topAgent.agent.cost_usd), band((topAgent.agent.cost_usd / (spend || 1)) * 100, 15, 30, 45), kpiSession(topAgent.session, subagentLabel(topAgent.agent))) : "",
+    topSubagent ? kpiTile("Highest subagent spend", money(topSubagent.subagent_cost_usd), band((topSubagent.subagent_cost_usd / (spend || 1)) * 100, 15, 30, 45), kpiSession(topSubagent)) : "",
   ].filter(Boolean);
 }
 /* Reuses planGroups so the banner and the tables can never disagree about
