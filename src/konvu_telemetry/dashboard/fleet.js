@@ -56,6 +56,17 @@ const duration = (seconds) => {
   ])
     if (seconds >= n || unit === "s") return Math.floor(seconds / n) + unit;
 };
+const resetCountdown = (timestamp) => {
+  const resetAt = Date.parse(timestamp);
+  if (!finite(resetAt)) return null;
+  const minutes = Math.max(0, Math.ceil((resetAt - state.now) / 60000));
+  const days = Math.floor(minutes / 1440);
+  const hours = Math.floor((minutes % 1440) / 60);
+  const remainingMinutes = minutes % 60;
+  if (days) return days + "d " + hours + "h";
+  if (hours) return hours + "h " + remainingMinutes + "m";
+  return remainingMinutes + "m";
+};
 const age = (timestamp) => {
   const time = Date.parse(timestamp);
   return finite(time) ? duration((state.now - time) / 1000) : "—";
@@ -856,7 +867,9 @@ function quotaInline(providers, showCodexCredits = false) {
         .map((w) => {
           const used = Math.max(0, Math.min(100, w.used_percent));
           const label = w.period === "five_hour" ? "5h" : w.period === "weekly" ? "week" : "credits";
-          return '<span class="qm"><i>' + label + '</i><u><em style="width:' + used + '%"></em></u><b>' + percentage(used) + "</b></span>";
+          const reset = resetCountdown(w.resets_at);
+          return '<span class="qm"><span class="qm-main"><i>' + label + '</i><u><em style="width:' + used + '%"></em></u><b>' + percentage(used) + "</b></span>" +
+            (reset ? '<small>Resets in ' + reset + "</small>" : "") + "</span>";
         })
         .join("");
       return (
