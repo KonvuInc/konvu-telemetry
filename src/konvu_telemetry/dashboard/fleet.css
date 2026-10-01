@@ -862,6 +862,108 @@ select {
   color: var(--mist);
   margin-bottom: 17px;
 }
+.inspector-tabs {
+  display: flex;
+  gap: 16px;
+  margin: 0 0 18px;
+  border-bottom: 1px solid var(--line);
+}
+.inspector-tabs button {
+  padding: 0 0 8px;
+  color: var(--mist);
+  font-size: 10px;
+}
+.inspector-tabs button.on {
+  color: var(--purple);
+  box-shadow: 0 1px 0 var(--purple);
+}
+.context-map-summary {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  margin-bottom: 18px;
+}
+.context-map-summary span {
+  display: block;
+  color: var(--mist);
+  font-size: 8px;
+}
+.context-map-summary strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 15px;
+  font-weight: 400;
+}
+.context-map-composition {
+  display: flex;
+  height: 16px;
+  overflow: hidden;
+  border-radius: 4px;
+  background: var(--soft);
+}
+.context-map-segment {
+  display: block;
+  height: 100%;
+}
+.context-map-rows {
+  margin-top: 14px;
+}
+.context-map-row {
+  margin: 11px 0;
+}
+.context-map-row > div {
+  display: grid;
+  grid-template-columns: 7px minmax(0, 1fr) auto;
+  gap: 7px;
+  align-items: center;
+  font-size: 9px;
+}
+.context-map-row > div > i {
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+}
+.context-map-row b {
+  color: var(--mist);
+  font-weight: 400;
+}
+.context-map-row > span {
+  display: block;
+  height: 4px;
+  margin-top: 5px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--soft);
+}
+.context-map-row > span > i {
+  display: block;
+  height: 100%;
+  background: var(--purple);
+}
+.segment-0 { background: var(--purple); }
+.segment-1 { background: var(--accent); }
+.segment-2 { background: var(--blue); }
+.segment-3 { background: var(--mint); }
+.segment-4 { background: var(--pink); }
+.segment-5 { background: var(--orange); }
+.context-map-row.remainder > div > i,
+.context-map-segment.remainder,
+.context-map-row.remainder > span > i {
+  background: var(--muted);
+}
+.context-map-empty {
+  padding: 18px;
+  background: var(--soft);
+  color: var(--mist);
+}
+.context-map-empty strong {
+  color: var(--ink);
+  font-size: 11px;
+}
+.context-map-empty p {
+  margin-top: 4px;
+  font-size: 9px;
+}
 .inspector-stats {
   display: grid;
   grid-template-columns: repeat(4, 1fr);

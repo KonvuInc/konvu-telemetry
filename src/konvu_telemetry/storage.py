@@ -156,6 +156,13 @@ def quota_attribution_path() -> Path:
     return home_dir() / "quota-attribution.json"
 
 
+def context_map_path(provider: str, session_id: str) -> Path:
+    """Return the private derived context map for one provider session."""
+    if provider not in ALLOWED_PROVIDERS or not valid_session_id(session_id):
+        raise ValueError("Invalid local telemetry session identity")
+    return home_dir() / "context-maps" / f"{provider}-{session_id}.json"
+
+
 def custom_rule_module_path() -> Path:
     """A user-owned rule, kept outside the package so upgrades cannot erase it."""
     return home_dir() / "custom_rule.py"

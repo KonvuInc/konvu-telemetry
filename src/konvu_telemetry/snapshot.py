@@ -770,7 +770,11 @@ def write_snapshot(snapshot: dict[str, object]) -> None:
     cutoff = time.time() - SESSION_FILE_RETENTION_SECONDS
     # "shown" holds one per-session record per cadence decision and ages out on
     # the same schedule as the session detail it refers to.
-    for directory in (home_dir() / "sessions", home_dir() / "shown"):
+    for directory in (
+        home_dir() / "sessions",
+        home_dir() / "shown",
+        home_dir() / "context-maps",
+    ):
         try:
             for candidate in directory.glob("*.json"):
                 if candidate.stat().st_mtime < cutoff:

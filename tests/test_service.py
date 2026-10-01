@@ -240,6 +240,7 @@ class ServiceTests(unittest.TestCase):
                 "konvu_telemetry.collector.write_provider_quotas",
                 side_effect=lambda quotas: quotas,
             ) as write_quotas,
+            patch("konvu_telemetry.collector.enrich_context_maps") as enrich,
             patch("konvu_telemetry.collector.write_snapshot"),
             patch("konvu_telemetry.collector.write_health"),
             patch(
@@ -249,7 +250,11 @@ class ServiceTests(unittest.TestCase):
         ):
             poller.return_value.refresh.return_value = quotas
             cli_main(["once"])
-        build.assert_called_once_with(100.0, provider_quotas=quotas)
+        call = build.call_args
+        self.assertEqual(call.args[0], 100.0)
+        self.assertIsInstance(call.args[1], IncrementalLiveState)
+        self.assertEqual(call.kwargs, {"provider_quotas": quotas})
+        enrich.assert_called_once_with({}, call.args[1])
         write_quotas.assert_called_once_with(quotas)
 
     def test_once_collects_while_the_service_holds_the_collector_lock(self) -> None:
@@ -318,6 +323,16 @@ class ServiceTests(unittest.TestCase):
             collector.join(timeout=10)
             self.assertFalse(collector.is_alive())
             self.assertEqual(service.load_health()["status"], "healthy")
+
+    def test_context_mapping_failure_does_not_fail_usage_collection(self) -> None:
+        snapshot: dict[str, object] = {"sessions": []}
+        mapper = Mock()
+        mapper.refresh.side_effect = ValueError("malformed transcript")
+
+        with self.assertLogs("konvu_telemetry.service", level="WARNING"):
+            service.enrich_context_maps(snapshot, IncrementalLiveState(), mapper)
+
+        self.assertEqual(snapshot, {"sessions": []})
 
     def test_usage_completeness_rejects_boolean_token_counters(self) -> None:
         self.assertTrue(
