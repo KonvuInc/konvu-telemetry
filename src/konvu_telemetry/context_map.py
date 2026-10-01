@@ -1611,9 +1611,7 @@ def _process_codex(
     }:
         call_id = payload.get("call_id") or payload.get("id")
         popped_metadata = pending.pop(call_id, {}) if isinstance(call_id, str) else {}
-        call_metadata = (
-            popped_metadata if isinstance(popped_metadata, dict) else {}
-        )
+        call_metadata = popped_metadata if isinstance(popped_metadata, dict) else {}
         for source in _result_sources(
             tokenizer,
             "codex",
