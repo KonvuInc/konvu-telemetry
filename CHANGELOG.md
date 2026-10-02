@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.8 - 2026-10-02
+
+- Add a local context map for active Claude and Codex sessions, including model
+  changes and compaction epochs, without storing raw transcript content.
+- Show subagent context share while usage is included and API-equivalent spend
+  while the provider is billing.
+- Count paid session and subagent spend only after the locally observed plan-exit
+  cutoff, so earlier included usage is never presented as paid.
+- Show the active reset countdown and context usage while paying, remove exhausted
+  plan-limit meters, and keep the Codex credits meter visible.
+
 ## 0.3.7 - 2026-09-30
 
 - Make `konvu-telemetry once` work while the collector service is running: it now
