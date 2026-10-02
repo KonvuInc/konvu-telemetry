@@ -92,6 +92,15 @@ const cost = (s) => {
   if (s.out_of_plan_spend_status === undefined) return null;
   return nonnegative(s.out_of_plan_spend_usd) ? s.out_of_plan_spend_usd : null;
 };
+function planExitCostOffset(s) {
+  if (s.usage_mode !== "exhausted") return 0;
+  if (!nonnegative(s.total_cost_usd) || !nonnegative(s.out_of_plan_spend_usd)) return 0;
+  return Math.max(0, s.total_cost_usd - s.out_of_plan_spend_usd);
+}
+function chartSpend(s, value) {
+  return Math.max(0, value - planExitCostOffset(s));
+}
+const chartSpendLabel = (s) => (s.usage_mode === "exhausted" ? "spend since plan exit" : "recorded spend");
 const forecast = (s) => (cost(s) !== null && nonnegative(s.projected_next_10_tasks_usd) ? s.projected_next_10_tasks_usd : null);
 const quotaShare = (s, period = "five_hour") => {
   const windows = s.quota_attribution?.windows;
@@ -248,10 +257,14 @@ function subagentLabel(a) {
 function subagentContext(a) {
   return nonnegative(a.context_tokens) ? a.context_tokens : a.entry_context_tokens;
 }
+function subagentSpend(s, item) {
+  if (!subagentUsesDollars(s)) return item.cost_usd;
+  return item.out_of_plan_cost_usd ?? item.out_of_plan_subagent_cost_usd;
+}
 function subagentNode(s, a, index = null) {
   const id = typeof a.id === "string" ? a.id : "",
     label = subagentLabel(a) + (index === null ? "" : " " + (index + 1)),
-    metric = subagentMetric(s, a.cost_usd);
+    metric = subagentMetric(s, subagentSpend(s, a));
   return (
     '<div class="agent-node"><div class="agent-identity"><span class="subagent-name" title="' +
     esc(a.label || label) +
@@ -284,21 +297,21 @@ function subagentDetails(s) {
     grouped.get(key).push(agent);
   }
   const groupCost = (children) => {
-    const priced = children.filter((a) => nonnegative(a.cost_usd));
-    return priced.length ? priced.reduce((sum, a) => sum + a.cost_usd, 0) : -1;
+    const priced = children.map((a) => subagentSpend(s, a)).filter(nonnegative);
+    return priced.length ? priced.reduce((sum, cost) => sum + cost, 0) : -1;
   };
   const groups = Array.from(grouped.entries()).sort((a, b) => groupCost(b[1]) - groupCost(a[1]) || a[0].localeCompare(b[0]));
   const branches = groups
     .map(([label, children]) => {
       children.sort(
         (a, b) =>
-          (nonnegative(b.cost_usd) ? b.cost_usd : -1) - (nonnegative(a.cost_usd) ? a.cost_usd : -1) || String(a.id || "").localeCompare(String(b.id || "")),
+          (nonnegative(subagentSpend(s, b)) ? subagentSpend(s, b) : -1) - (nonnegative(subagentSpend(s, a)) ? subagentSpend(s, a) : -1) || String(a.id || "").localeCompare(String(b.id || "")),
       );
       if (children.length === 1) return '<div class="agent-branch">' + subagentNode(s, children[0]) + "</div>";
       const key = keyOf(s) + "|" + label,
         live = children.filter((a) => a.live === true).length,
         contexts = children.map(subagentContext).filter(nonnegative),
-        priced = children.filter((a) => nonnegative(a.cost_usd));
+        priced = children.map((a) => subagentSpend(s, a)).filter(nonnegative);
       const contextRange = contexts.length
         ? Math.min(...contexts) === Math.max(...contexts)
           ? tokens(contexts[0])
@@ -312,8 +325,7 @@ function subagentDetails(s) {
             : "Not recorded";
       const metric = subagentMetric(
         s,
-        priced.length ? priced.reduce((sum, a) => sum + a.cost_usd, 0) : null,
-        priced.length === children.length ? "total" : priced.length + "/" + children.length + " recorded",
+        priced.length ? priced.reduce((sum, cost) => sum + cost, 0) : null,
       );
       return (
         '<details class="agent-branch agent-group" data-agent-group="' +
@@ -695,7 +707,7 @@ function responsibilityCell(s) {
 function subagentCell(s) {
   const total = Number.isInteger(s.subagent_total) && s.subagent_total >= 0 ? s.subagent_total : "—";
   const live = Number.isInteger(s.active_subagents) && s.active_subagents >= 0 ? s.active_subagents : "—";
-  const metric = subagentMetric(s, s.subagent_cost_usd);
+  const metric = subagentMetric(s, subagentSpend(s, s));
   return (
     '<div class="subagent-cell"><span><strong>' +
     total +
@@ -781,13 +793,13 @@ function subagentContextShare(s, costValue) {
   if (!nonnegative(costValue) || !finite(sessionContext) || !nonnegative(s.total_cost_usd) || s.total_cost_usd <= 0) return null;
   return (costValue / s.total_cost_usd) * sessionContext;
 }
-function subagentMetric(s, costValue, completeness = "recorded") {
+function subagentMetric(s, costValue) {
   if (!nonnegative(costValue)) return { value: "—", note: "Not recorded", title: "No recorded subagent usage." };
   if (subagentUsesDollars(s)) {
     return {
       value: money(costValue),
-      note: "API-equivalent " + completeness,
-      title: "API-equivalent subagent cost estimated from recorded local token usage.",
+      note: "API-equivalent since plan exit",
+      title: "API-equivalent subagent cost recorded since the plan was observed exhausted.",
     };
   }
   const share = subagentContextShare(s, costValue);
@@ -860,14 +872,14 @@ function moneyTiles(rows) {
   const hottest = rows.filter((s) => finite(forecast(s))).sort((a, b) => forecast(b) - forecast(a))[0];
   const avgContext = avg(rows.map(context).filter(finite));
   const topSubagent = rows
-    .filter((s) => nonnegative(s.subagent_cost_usd))
-    .sort((a, b) => b.subagent_cost_usd - a.subagent_cost_usd)[0];
+    .filter((s) => nonnegative(subagentSpend(s, s)))
+    .sort((a, b) => subagentSpend(b, b) - subagentSpend(a, a))[0];
   return [
     kpiTile("Spent beyond plan", money(spend), spend > 0 ? "bad" : "good", kpiFootnote("across " + rows.length + " billing sessions"), true),
     priciest ? kpiTile("Most expensive session", money(cost(priciest)), band((cost(priciest) / (spend || 1)) * 100, 25, 45, 65), kpiSession(priciest)) : "",
     hottest ? kpiTile("Biggest forecast", additional(forecast(hottest)), band(forecast(hottest), 5, 12, 20), kpiSession(hottest)) : "",
     finite(avgContext) ? kpiTile("Average context used", percentage(avgContext), band(avgContext, 50, 70, 88), kpiFootnote("across " + rows.length + " billing sessions")) : "",
-    topSubagent ? kpiTile("Highest subagent spend", money(topSubagent.subagent_cost_usd), band((topSubagent.subagent_cost_usd / (spend || 1)) * 100, 15, 30, 45), kpiSession(topSubagent)) : "",
+    topSubagent ? kpiTile("Highest subagent spend", money(subagentSpend(topSubagent, topSubagent)), band((subagentSpend(topSubagent, topSubagent) / (spend || 1)) * 100, 15, 30, 45), kpiSession(topSubagent, "since plan exit")) : "",
   ].filter(Boolean);
 }
 /* Reuses planGroups so the banner and the tables can never disagree about
@@ -1826,9 +1838,12 @@ async function refreshNow() {
   await refresh(true);
 }
 function contextCompactions(s) {
-  return compacts(s).filter((event) => nonnegative(event.cumulative_cost_usd));
+  return compacts(s)
+    .filter((event) => nonnegative(event.cumulative_cost_usd))
+    .map((event) => ({ ...event, chart_cost_usd: chartSpend(s, event.cumulative_cost_usd) }))
+    .filter((event) => s.usage_mode !== "exhausted" || event.chart_cost_usd > 0);
 }
-function compactionMarkers(marks, x, T, bottom, value) {
+function compactionMarkers(marks, x, T, bottom, value, spendLabel) {
   const groups = new Map();
   for (const event of marks) {
     const pixel = x(value(event)),
@@ -1844,8 +1859,9 @@ function compactionMarkers(marks, x, T, bottom, value) {
             "Compacted " +
             new Date(event.timestamp).toLocaleString() +
             " · " +
-            money(event.cumulative_cost_usd) +
-            " recorded by this event" +
+            money(event.chart_cost_usd) +
+            " " +
+            spendLabel +
             (event.iteration ? " · during prompt " + event.iteration : " · before the first prompt") +
             (nonnegative(event.pre_tokens)
               ? " · " + tokens(event.pre_tokens) + (nonnegative(event.post_tokens) ? " → " + tokens(event.post_tokens) : "") + " context tokens"
@@ -1887,8 +1903,13 @@ function compactionMarkers(marks, x, T, bottom, value) {
     .join("");
 }
 function promptCostGraph(s) {
-  const rows = series(s);
-  if (!rows.length) return '<div class="empty"><p>No recorded prompt costs yet.</p></div>';
+  const rawRows = series(s);
+  const rows = rawRows.map((row, index) => {
+    const prior = index > 0 ? chartSpend(s, rawRows[index - 1].cumulative_cost_usd) : 0;
+    const current = chartSpend(s, row.cumulative_cost_usd);
+    return { ...row, chart_cost_usd: Math.max(0, current - prior) };
+  }).filter((row) => s.usage_mode !== "exhausted" || row.chart_cost_usd > 0);
+  if (!rows.length) return '<div class="empty"><p>No recorded paid prompt costs yet.</p></div>';
   const W = 530,
     H = 240,
     L = 52,
@@ -1896,9 +1917,8 @@ function promptCostGraph(s) {
     T = 28,
     B = 44,
     n = Math.max(1, ...rows.map((q) => q.iteration));
-  const values = rows.map((q) => q.cost_usd),
-    c = comparison(s),
-    max = Math.max(0.01, ...values, c?.before || 0) * 1.1;
+  const values = rows.map((q) => q.chart_cost_usd),
+    max = Math.max(0.01, ...values) * 1.1;
   const step = tickValues(0, max, 5)[1] || max,
     ymax = Math.ceil(max / step) * step;
   const x = (i) => L + (i / n) * (W - L - R),
@@ -1931,22 +1951,22 @@ function promptCostGraph(s) {
         '<rect class="prompt-cost-bar" x="' +
         (x(q.iteration - 1) + 1) +
         '" y="' +
-        y(q.cost_usd) +
+        y(q.chart_cost_usd) +
         '" width="' +
         Math.max(0.5, (W - L - R) / n - 2) +
         '" height="' +
-        (y(0) - y(q.cost_usd)) +
+        (y(0) - y(q.chart_cost_usd)) +
         '" rx="1" fill="' +
         (q.completed === false ? COLORS.muted : COLORS.purple) +
         '"><title>Prompt ' +
         q.iteration +
         ": " +
-        money(q.cost_usd) +
+        money(q.chart_cost_usd) +
         "</title></rect>",
     )
     .join("");
   const marks = contextCompactions(s).filter((e) => e.iteration > 0);
-  svg += compactionMarkers(marks, x, T, H - B, (e) => e.iteration - 0.5);
+  svg += compactionMarkers(marks, x, T, H - B, (e) => e.iteration - 0.5, chartSpendLabel(s));
   svg +=
     '<text x="' +
     (L + W - R) / 2 +
@@ -1954,7 +1974,7 @@ function promptCostGraph(s) {
     (H - 5) +
     '" text-anchor="middle">Prompt number</text><text transform="translate(11 ' +
     (T + H - B) / 2 +
-    ') rotate(-90)" text-anchor="middle">Cost ($)</text>';
+    ') rotate(-90)" text-anchor="middle">' + (s.usage_mode === "exhausted" ? "Cost since plan exit ($)" : "Cost ($)") + '</text>';
   return (
     '<svg class="session-graph" viewBox="0 0 ' +
     W +
@@ -1973,7 +1993,8 @@ function sessionGraph(s) {
     history = Array.isArray(s.context_history) ? s.context_history : [];
   const rows = history
     .filter((q) => nonnegative(q.context_tokens) && q.context_tokens > 0 && nonnegative(q.cumulative_cost_usd) && finite(Date.parse(q.timestamp)))
-    .map((q) => ({ ...q, order: 0 }));
+    .map((q) => ({ ...q, chart_cost_usd: chartSpend(s, q.cumulative_cost_usd), order: 0 }))
+    .filter((q) => s.usage_mode !== "exhausted" || q.chart_cost_usd > 0);
   for (const event of marks) {
     for (const [key, order] of [
       ["pre_tokens", 1],
@@ -1982,7 +2003,7 @@ function sessionGraph(s) {
       if (nonnegative(event[key]) && event[key] > 0)
         rows.push({
           timestamp: event.timestamp,
-          cumulative_cost_usd: event.cumulative_cost_usd,
+          chart_cost_usd: event.chart_cost_usd,
           context_tokens: event[key],
           iteration: event.iteration,
           order,
@@ -2001,7 +2022,7 @@ function sessionGraph(s) {
     const step = tickValues(0, v, 5)[1] || v;
     return Math.ceil(v / step) * step;
   };
-  const xmax = Math.max(0.01, ...rows.map((q) => q.cumulative_cost_usd), ...marks.map((e) => e.cumulative_cost_usd)) * 1.05;
+  const xmax = Math.max(0.01, ...rows.map((q) => q.chart_cost_usd), ...marks.map((e) => e.chart_cost_usd)) * 1.05;
   const ymax = ceiling(Math.max(1, ...rows.map((q) => q.context_tokens / 1000)) * 1.04);
   const x = (v) => L + (v / xmax) * (W - L - R),
     y = (v) => H - B - (v / ymax) * (H - T - B);
@@ -2028,7 +2049,7 @@ function sessionGraph(s) {
   for (const v of tickValues(0, xmax, 5)) svg += '<text x="' + x(v) + '" y="' + (H - B + 16) + '" text-anchor="middle">' + axisMoney(v) + "</text>";
   svg +=
     '<polyline class="context-cost-path" points="' +
-    rows.map((q) => x(q.cumulative_cost_usd) + "," + y(q.context_tokens / 1000)).join(" ") +
+    rows.map((q) => x(q.chart_cost_usd) + "," + y(q.context_tokens / 1000)).join(" ") +
     '" fill="none" stroke="' +
     COLORS.purple +
     '" stroke-width="1.4" stroke-linejoin="round" opacity=".7"/>';
@@ -2040,13 +2061,13 @@ function sessionGraph(s) {
           " · " +
           tokens(q.context_tokens) +
           " context tokens · " +
-          money(q.cumulative_cost_usd) +
-          " recorded spend · " +
+          money(q.chart_cost_usd) +
+          " " + chartSpendLabel(s) + " · " +
           new Date(q.timestamp).toLocaleString() +
           (q.context_observed_at && q.context_observed_at !== q.timestamp ? " · context last observed " + timeLabel(q.context_observed_at) : "");
       return (
         '<circle class="context-cost-point" cx="' +
-        x(q.cumulative_cost_usd) +
+        x(q.chart_cost_usd) +
         '" cy="' +
         y(q.context_tokens / 1000) +
         '" r="' +
@@ -2063,13 +2084,13 @@ function sessionGraph(s) {
       );
     })
     .join("");
-  svg += compactionMarkers(marks, x, T, H - B, (e) => e.cumulative_cost_usd);
+  svg += compactionMarkers(marks, x, T, H - B, (e) => e.chart_cost_usd, chartSpendLabel(s));
   svg +=
     '<text x="' +
     (L + W - R) / 2 +
     '" y="' +
     (H - 5) +
-    '" text-anchor="middle">Total spent ($)</text><text transform="translate(11 ' +
+    '" text-anchor="middle">' + (s.usage_mode === "exhausted" ? "Spend since plan exit ($)" : "Total spent ($)") + '</text><text transform="translate(11 ' +
     (T + H - B) / 2 +
     ') rotate(-90)" text-anchor="middle">Context tokens (k)</text>';
   return (
@@ -2518,15 +2539,15 @@ function browserAlerts(payload) {
     if (!showsMoney(session) || !finite(session.projected_next_10_tasks_usd) || session.projected_next_10_tasks_usd < 10) continue;
     const key = "konvu-alert-" + session.provider + "-" + session.id;
     const previous = JSON.parse(localStorage.getItem(key) || "null");
-    const now = Date.now(), forecastUsd = session.projected_next_10_tasks_usd;
+    const now = Date.now(), forecastUsd = session.projected_next_10_tasks_usd, spentUsd = cost(session);
     if (previous && now - previous.at < 300000 && forecastUsd < previous.forecast + 5) continue;
     localStorage.setItem(key, JSON.stringify({ at: now, forecast: forecastUsd }));
     const notification = new Notification(providerName(session.provider) + " session running hot", {
       body:
         "🔥 " +
         (forecastUsd >= 50 ? "💸💸💸" : forecastUsd >= 30 ? "💸💸" : "💸") + " " + money(forecastUsd) +
-        " forecast for the next 10 prompts\n💸 " +
-        money(Number(session.total_cost_usd || 0)) + " API-equivalent so far",
+        " forecast for the next 10 prompts" +
+        (finite(spentUsd) ? "\n💸 " + money(spentUsd) + " spent since plan exit" : ""),
       icon: "/konvu-ghost.svg",
       requireInteraction: true,
       tag: key,

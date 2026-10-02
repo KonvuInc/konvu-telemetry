@@ -695,6 +695,50 @@ class QuotaAttributionTests(unittest.TestCase):
             apply_out_of_plan_accounting(second)
             self.assertEqual(second["sessions"][0]["out_of_plan_spend_usd"], 5.5)
 
+    def test_subagent_spend_starts_at_the_observed_plan_exit(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+        ):
+            first = {
+                "sessions": [
+                    {
+                        "id": "a",
+                        "provider": "claude",
+                        "usage_mode": "exhausted",
+                        "total_cost_usd": 12.0,
+                        "subagents": [
+                            {"id": "old", "cost_usd": 10.0},
+                        ],
+                    }
+                ]
+            }
+            apply_out_of_plan_accounting(first)
+            self.assertEqual(first["sessions"][0]["out_of_plan_subagent_cost_usd"], 0.0)
+
+            second = {
+                "sessions": [
+                    {
+                        "id": "a",
+                        "provider": "claude",
+                        "usage_mode": "exhausted",
+                        "total_cost_usd": 17.5,
+                        "subagents": [
+                            {"id": "old", "cost_usd": 12.0},
+                            {"id": "new", "cost_usd": 3.5},
+                        ],
+                    }
+                ]
+            }
+            apply_out_of_plan_accounting(second)
+
+        row = second["sessions"][0]
+        self.assertEqual(row["out_of_plan_subagent_cost_usd"], 5.5)
+        agents = row["subagents"]
+        assert isinstance(agents, list)
+        self.assertEqual(agents[0]["out_of_plan_cost_usd"], 2.0)
+        self.assertEqual(agents[1]["out_of_plan_cost_usd"], 3.5)
+
 
 if __name__ == "__main__":
     unittest.main()
