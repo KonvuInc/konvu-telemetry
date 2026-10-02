@@ -626,7 +626,7 @@ def apply_usage_modes(snapshot: dict[str, object]) -> None:
 
 
 def apply_out_of_plan_accounting(snapshot: dict[str, object]) -> None:
-    """Count exhausted-plan spend only from the first locally observed cutoff."""
+    """Count exhausted-plan session and subagent spend after the observed cutoff."""
     sessions = snapshot.get("sessions")
     if not isinstance(sessions, list):
         return
@@ -651,20 +651,73 @@ def apply_out_of_plan_accounting(snapshot: dict[str, object]) -> None:
         if not exhausted:
             billing["mode"] = "included"
             billing["offsets"] = {}
+            billing["subagent_offsets"] = {}
             continue
+        previously_exhausted = billing.get("mode") == "exhausted"
+        offsets_were_recorded = isinstance(billing.get("offsets"), dict)
         offsets = billing.setdefault("offsets", {})
         if not isinstance(offsets, dict):
             billing["offsets"] = offsets = {}
+        subagent_offsets_were_recorded = isinstance(
+            billing.get("subagent_offsets"), dict
+        )
+        subagent_offsets = billing.setdefault("subagent_offsets", {})
+        if not isinstance(subagent_offsets, dict):
+            billing["subagent_offsets"] = subagent_offsets = {}
+        if not previously_exhausted or not offsets_were_recorded:
+            offsets.clear()
+            for session in rows:
+                session_id = session.get("id")
+                total = _number(session.get("total_cost_usd"))
+                if isinstance(session_id, str) and total is not None:
+                    offsets[session_id] = total
+        if not previously_exhausted or not subagent_offsets_were_recorded:
+            subagent_offsets.clear()
+            for session in rows:
+                session_id = session.get("id")
+                agents = session.get("subagents")
+                if not isinstance(session_id, str) or not isinstance(agents, list):
+                    continue
+                agent_offsets: dict[str, float] = {}
+                for agent in agents:
+                    if not isinstance(agent, dict):
+                        continue
+                    agent_id = agent.get("id")
+                    agent_cost = _number(agent.get("cost_usd"))
+                    if isinstance(agent_id, str) and agent_cost is not None:
+                        agent_offsets[agent_id] = agent_cost
+                subagent_offsets[session_id] = agent_offsets
         for session in rows:
             session_id = session.get("id")
             total = _number(session.get("total_cost_usd"))
             if not isinstance(session_id, str) or total is None:
                 continue
-            prior = _number(offsets.get(session_id))
-            if prior is None:
-                offsets[session_id] = total
-                prior = total
+            prior = _number(offsets.get(session_id)) or 0.0
             session["out_of_plan_spend_usd"] = round(max(0.0, total - prior), 6)
             session["out_of_plan_spend_status"] = "since_observed_plan_exit"
+            agents = session.get("subagents")
+            if not isinstance(agents, list):
+                continue
+            raw_agent_offsets = subagent_offsets.setdefault(session_id, {})
+            agent_offsets = (
+                raw_agent_offsets if isinstance(raw_agent_offsets, dict) else {}
+            )
+            if agent_offsets is not raw_agent_offsets:
+                subagent_offsets[session_id] = agent_offsets
+            out_of_plan_subagent_cost = 0.0
+            for agent in agents:
+                if not isinstance(agent, dict):
+                    continue
+                agent_id = agent.get("id")
+                agent_cost = _number(agent.get("cost_usd"))
+                if not isinstance(agent_id, str) or agent_cost is None:
+                    continue
+                agent_prior = _number(agent_offsets.get(agent_id)) or 0.0
+                out_of_plan_cost = round(max(0.0, agent_cost - agent_prior), 6)
+                agent["out_of_plan_cost_usd"] = out_of_plan_cost
+                out_of_plan_subagent_cost += out_of_plan_cost
+            session["out_of_plan_subagent_cost_usd"] = round(
+                out_of_plan_subagent_cost, 6
+            )
         billing["mode"] = "exhausted"
     write_private_json(quota_attribution_path(), state)
