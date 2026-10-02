@@ -383,7 +383,21 @@ def claude_statusline_rows(
         if usage_mode == "exhausted" and isinstance(out_of_plan, (int, float)):
             paid = out_of_plan
         paid_forecast = session.get("projected_next_10_tasks_usd")
-        rows = [terminal_style("● Paying", "1;38;5;203")]
+        reset = paying_reset_in("claude") if usage_mode == "exhausted" else None
+        paying_label = "● Paying" + (f" · resets in {reset}" if reset else "")
+        rows = [terminal_style(paying_label, "1;38;5;203")]
+        context = context_percent
+        if context is None:
+            raw_context = session.get("context_tokens")
+            raw_window = session.get("context_window_tokens")
+            if (
+                isinstance(raw_context, int)
+                and isinstance(raw_window, int)
+                and raw_window > 0
+            ):
+                context = raw_context / raw_window * 100
+        if context is not None:
+            rows.append(compact_status_meter("Context", context, 8))
         if isinstance(paid, (int, float)) and isinstance(paid_forecast, (int, float)):
             rows.append(
                 terminal_style("Current spend", "38;5;245")
@@ -509,8 +523,52 @@ def quota_reset_times(provider: str) -> dict[str, str]:
     return resets
 
 
+def paying_reset_in(provider: str) -> str | None:
+    """Return when the exhausted ordinary quota windows will all have reset."""
+    account = stored_provider_quotas().get(provider)
+    windows = account.get("windows") if isinstance(account, dict) else None
+    provider_exhausted = (
+        isinstance(account, dict) and account.get("ordinary_usage_allowed") is False
+    )
+    candidates: list[tuple[float, str]] = []
+    exhausted: list[tuple[float, str]] = []
+    for window in windows if isinstance(windows, list) else []:
+        if not isinstance(window, dict) or window.get("period") not in {
+            "five_hour",
+            "weekly",
+        }:
+            continue
+        resets_at = window.get("resets_at")
+        if not isinstance(resets_at, str):
+            continue
+        try:
+            timestamp = datetime.fromisoformat(
+                resets_at.replace("Z", "+00:00")
+            ).timestamp()
+        except ValueError:
+            continue
+        candidates.append((timestamp, resets_at))
+        used = window.get("used_percent")
+        if (
+            isinstance(used, (int, float))
+            and not isinstance(used, bool)
+            and used >= 100
+        ):
+            exhausted.append((timestamp, resets_at))
+    applicable = exhausted
+    if not applicable and provider_exhausted:
+        applicable = candidates
+    if not applicable:
+        return None
+    return reset_in(max(applicable)[1])
+
+
 def hook_quota_meters(
-    quota_text: str, provider: str, include_monthly: bool = False
+    quota_text: str,
+    provider: str,
+    include_monthly: bool = False,
+    include_plan: bool = True,
+    include_resets: bool = True,
 ) -> str:
     """Convert the applicable recorded limits into small, readable box meters."""
     labels = {"5-hour": "5h", "weekly": "Week", "monthly": "Credits"}
@@ -519,10 +577,15 @@ def hook_quota_meters(
     periods = {"5-hour": "five_hour", "weekly": "weekly", "monthly": "monthly"}
     return "  ".join(
         f"{labels[label]}"
-        + (f" · reset: {resets[periods[label]]}" if periods[label] in resets else "")
+        + (
+            f" · reset: {resets[periods[label]]}"
+            if include_resets and periods[label] in resets
+            else ""
+        )
         + f" [{meter(float(used), 7)}] {percentage(float(used))}"
         for used, label in matches
-        if label != "monthly" or include_monthly
+        if (label == "monthly" and include_monthly)
+        or (label != "monthly" and include_plan)
     )
 
 
@@ -559,14 +622,20 @@ def hook_forecast_row(session: dict[str, object]) -> str:
     return "📈 Subscription forecast unavailable"
 
 
-def usage_box_lines(session: dict[str, object], quota_text: str) -> list[str]:
+def usage_box_lines(
+    session: dict[str, object], quota_text: str, provider: str = ""
+) -> list[str]:
     """Frame text-only meters and forecast data for Codex and desktop hooks."""
     usage_mode = session.get("usage_mode")
+    paying = usage_mode in {"api_billed", "exhausted"}
+    if not provider and isinstance(session.get("provider"), str):
+        provider = str(session["provider"])
+    reset = paying_reset_in(provider) if usage_mode == "exhausted" else None
     rows = (
         ["🟢 Included"]
         if usage_mode == "included"
-        else ["🔴 Paying"]
-        if usage_mode in {"api_billed", "exhausted"}
+        else ["🔴 Paying" + (f" · resets in {reset}" if reset else "")]
+        if paying
         else ["⚪ Subscription limit unavailable"]
     )
     context = context_usage_text(session)
@@ -577,11 +646,12 @@ def usage_box_lines(session: dict[str, object], quota_text: str) -> list[str]:
         context_row = f"Context [{meter(used, 7)}] {percentage(used)}"
     else:
         context_row = f"Context {context}"
-    provider = session.get("provider")
     quota_meters = hook_quota_meters(
         quota_text,
-        provider if isinstance(provider, str) else "",
-        usage_mode in {"api_billed", "exhausted"},
+        provider,
+        include_monthly=paying and provider == "codex",
+        include_plan=not paying,
+        include_resets=not paying,
     )
     if session.get("quota_status") == "stale" and quota_meters:
         quota_meters = f"Last known {quota_meters}"
@@ -601,7 +671,9 @@ def prompt_box_context(provider: str, session_id: str) -> str | None:
     session = refreshed_session(provider, session_id)
     if not isinstance(session, dict):
         return None
-    body = "\n".join(usage_box_lines(session, recorded_quota_usage_text(provider)))
+    body = "\n".join(
+        usage_box_lines(session, recorded_quota_usage_text(provider), provider)
+    )
     return json.dumps(
         {
             "hookSpecificOutput": {
@@ -847,7 +919,7 @@ def codex_hook() -> None:
     if not isinstance(session, dict):
         print(SUPPRESS_OUTPUT)
         return
-    lines = usage_box_lines(session, recorded_quota_usage_text("codex"))
+    lines = usage_box_lines(session, recorded_quota_usage_text("codex"), "codex")
     print(json.dumps({"systemMessage": "\n" + "\n".join(lines)}))
     record_usage_shown("codex", session_id)
 
