@@ -121,7 +121,7 @@ function displayTitle(s) {
     .trim()
     .replace(/^#{1,6}\s+/, "");
   if (!title || /^(Codex|Claude) session [a-f0-9]/.test(title)) return providerName(s.provider) + " session " + s.id.slice(0, 8);
-  if (title.startsWith("# Browser comments:")) {
+  if (title.startsWith("Browser comments:")) {
     const comment = title.match(/Comment:\s*([\s\S]+)/);
     return comment ? comment[1].slice(0, 180) : "Browser feedback · " + providerName(s.provider);
   }
