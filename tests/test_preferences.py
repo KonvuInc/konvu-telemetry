@@ -36,7 +36,44 @@ class PreferencesTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def test_defaults_apply_when_nothing_is_stored(self) -> None:
-        self.assertEqual(read_preferences()["cadence"], DEFAULT_CADENCE)
+        preferences = read_preferences()
+        self.assertEqual(preferences["cadence"], DEFAULT_CADENCE)
+        self.assertFalse(preferences["context_analysis_enabled"])
+        self.assertEqual(preferences["context_analysis_consent"], "unset")
+
+    def test_legacy_analysis_setting_requires_explicit_consent(self) -> None:
+        preferences_path().write_text(
+            json.dumps({
+                "cadence": DEFAULT_CADENCE,
+                "context_analysis_enabled": True,
+            })
+        )
+
+        preferences = read_preferences()
+
+        self.assertFalse(preferences["context_analysis_enabled"])
+        self.assertEqual(preferences["context_analysis_consent"], "unset")
+
+    def test_analysis_consent_is_explicit_and_survives_cadence_changes(self) -> None:
+        write_preferences(DEFAULT_CADENCE, context_analysis_enabled=True)
+        write_preferences("never")
+        enabled = read_preferences()
+        self.assertTrue(enabled["context_analysis_enabled"])
+        self.assertEqual(enabled["context_analysis_consent"], "enabled")
+
+        write_preferences("never", context_analysis_enabled=False)
+        disabled = read_preferences()
+        self.assertFalse(disabled["context_analysis_enabled"])
+        self.assertEqual(disabled["context_analysis_consent"], "disabled")
+
+    def test_paid_analysis_is_opt_in_and_survives_cadence_changes(self) -> None:
+        self.assertFalse(read_preferences()["context_analysis_allow_paid"])
+        write_preferences(DEFAULT_CADENCE, context_analysis_allow_paid=True)
+        write_preferences("never", context_analysis_enabled=False)
+        self.assertTrue(read_preferences()["context_analysis_allow_paid"])
+
+        write_preferences("never", context_analysis_allow_paid=False)
+        self.assertFalse(read_preferences()["context_analysis_allow_paid"])
 
     def test_an_unknown_cadence_is_rejected_rather_than_coerced(self) -> None:
         with self.assertRaises(ValueError):
@@ -279,6 +316,45 @@ class PreferencesTests(unittest.TestCase):
         # Unparseable content is a different case: there is no choice left to honour.
         preferences_path().write_bytes(b'{"cadence": "never"')
         self.assertEqual(read_preferences()["cadence"], DEFAULT_CADENCE)
+
+    def run_setup(self, arguments: list[str], answer: str | None, tty: bool) -> dict:
+        output = StringIO()
+        with (
+            patch("konvu_telemetry.cli.setup", return_value={"dashboard": "x"}),
+            patch("sys.stdin.isatty", return_value=tty),
+            patch("builtins.input", return_value=answer or "") as asked,
+            redirect_stdout(output),
+        ):
+            cli_main(["setup", *arguments])
+        self.asked = asked.called
+        return json.loads(output.getvalue()[output.getvalue().index("{") :])
+
+    def test_setup_asks_and_defaults_context_analysis_to_off(self) -> None:
+        result = self.run_setup([], "", tty=True)
+
+        self.assertTrue(self.asked)
+        self.assertEqual(result["context_analysis"], "off")
+        self.assertEqual(read_preferences()["context_analysis_consent"], "disabled")
+
+    def test_setup_enables_context_analysis_only_on_an_explicit_yes(self) -> None:
+        result = self.run_setup([], "y", tty=True)
+
+        self.assertEqual(result["context_analysis"], "on")
+        self.assertTrue(read_preferences()["context_analysis_enabled"])
+
+    def test_setup_never_asks_twice_or_without_a_terminal(self) -> None:
+        self.assertEqual(self.run_setup([], None, tty=False)["context_analysis"], "not chosen")
+        self.assertFalse(self.asked)
+        write_preferences(DEFAULT_CADENCE, context_analysis_enabled=True)
+
+        self.assertEqual(self.run_setup([], "n", tty=True)["context_analysis"], "on")
+        self.assertFalse(self.asked)
+
+    def test_setup_flag_answers_without_asking(self) -> None:
+        result = self.run_setup(["--context-analysis", "on"], None, tty=True)
+
+        self.assertFalse(self.asked)
+        self.assertEqual(result["context_analysis"], "on")
 
     def test_the_menu_keeps_the_threshold_passed_on_the_command_line(self) -> None:
         """A flag given without a cadence must reach the write, not be dropped."""

@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 import math
 from datetime import datetime
+from threading import Lock
 from typing import TypedDict
 
 from .config import FORECAST_WINDOW
-from .storage import quota_attribution_path, write_private_json
+from .storage import analysis_usage_path, quota_attribution_path, write_private_json
 
 
 class SessionUsage(TypedDict):
@@ -31,6 +32,171 @@ SESSION_BASELINE_RETENTION_SECONDS = 32 * 24 * 60 * 60
 # window rebuilds whichever it needs from its next few ticks, so the shape
 # changed without a version bump.
 STATE_VERSION = 4
+ANALYSIS_USAGE_VERSION = 1
+ANALYSIS_USAGE_RETENTION_SECONDS = 8 * 24 * 60 * 60
+_ANALYSIS_USAGE_LOCK = Lock()
+_ANALYSIS_SESSION_PREFIX = "analysis:"
+
+
+def record_analysis_usage(
+    provider: str,
+    parent_session_id: str,
+    run_id: str,
+    started_at: float,
+    completed_at: float,
+    tokens: int,
+    *,
+    model: str | None = None,
+    usage_mode: str | None = None,
+    token_usage: dict[str, int] | None = None,
+    cost_usd: float | None = None,
+) -> None:
+    """Queue one ephemeral analysis pass for normal quota attribution."""
+    if (
+        provider not in {"claude", "codex"}
+        or not parent_session_id
+        or not run_id
+        or tokens <= 0
+        or completed_at < started_at
+    ):
+        return
+    with _ANALYSIS_USAGE_LOCK:
+        try:
+            raw = json.loads(analysis_usage_path().read_text())
+        except (OSError, json.JSONDecodeError):
+            raw = {"version": ANALYSIS_USAGE_VERSION, "events": {}}
+        if not isinstance(raw, dict) or raw.get("version") != ANALYSIS_USAGE_VERSION:
+            raw = {"version": ANALYSIS_USAGE_VERSION, "events": {}}
+        events = raw.get("events")
+        if not isinstance(events, dict):
+            raw["events"] = events = {}
+        cutoff = completed_at - ANALYSIS_USAGE_RETENTION_SECONDS
+        events = {
+            event_id: event
+            for event_id, event in events.items()
+            if not isinstance(event, dict)
+            or (_number(event.get("completed_at")) or completed_at) >= cutoff
+        }
+        raw["events"] = events
+        details: dict[str, object] = {}
+        if model:
+            details["model"] = model
+        if usage_mode:
+            details["usage_mode"] = usage_mode
+        if token_usage:
+            details["token_usage"] = dict(token_usage)
+        if cost_usd is not None and math.isfinite(cost_usd) and cost_usd >= 0:
+            details["cost_usd"] = round(cost_usd, 6)
+        existing = events.get(run_id)
+        if isinstance(existing, dict):
+            # Runs recorded before pricing existed gain the fields they lack.
+            missing = {key: value for key, value in details.items() if key not in existing}
+            if not missing:
+                return
+            existing.update(missing)
+        else:
+            events[run_id] = {
+                "provider": provider,
+                "period": "five_hour" if provider == "claude" else "weekly",
+                "parent_session_id": parent_session_id,
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "tokens": tokens,
+                **details,
+            }
+        write_private_json(analysis_usage_path(), raw)
+
+
+def _analysis_usage_events(
+    reference_time: float | None = None,
+) -> dict[str, dict[str, object]]:
+    with _ANALYSIS_USAGE_LOCK:
+        try:
+            raw = json.loads(analysis_usage_path().read_text())
+        except (OSError, json.JSONDecodeError):
+            return {}
+        events = raw.get("events") if isinstance(raw, dict) else None
+        if not isinstance(events, dict):
+            return {}
+        valid = {
+            event_id: event
+            for event_id, event in events.items()
+            if isinstance(event_id, str) and isinstance(event, dict)
+        }
+        if reference_time is not None:
+            cutoff = reference_time - ANALYSIS_USAGE_RETENTION_SECONDS
+            valid = {
+                event_id: event
+                for event_id, event in valid.items()
+                if (_number(event.get("completed_at")) or reference_time) >= cutoff
+            }
+            if len(valid) != len(events):
+                raw["events"] = valid
+                write_private_json(analysis_usage_path(), raw)
+        return valid
+
+
+ANALYSIS_TOKEN_BUCKETS = (
+    "input",
+    "output",
+    "reasoning_output",
+    "cache_write",
+    "cache_read",
+)
+
+
+def _empty_analysis_usage() -> dict[str, object]:
+    return {
+        "run_count": 0,
+        "included_run_count": 0,
+        "spending_run_count": 0,
+        "unknown_mode_run_count": 0,
+        "tokens": {bucket: 0 for bucket in (*ANALYSIS_TOKEN_BUCKETS, "total")},
+        "cost_usd": 0.0,
+        "included_value_usd": 0.0,
+        "spending_usd": 0.0,
+        "unpriced_run_count": 0,
+        "limit": [],
+    }
+
+
+def _add_analysis_run(totals: dict[str, object], event: dict[str, object]) -> None:
+    """Fold one ledger run into its parent session's analysis totals."""
+    mode = event.get("usage_mode")
+    mode_key = (
+        "included_run_count"
+        if mode == "included"
+        else "spending_run_count"
+        if mode == "exhausted"
+        else "unknown_mode_run_count"
+    )
+    for key in ("run_count", mode_key):
+        totals[key] = int(_number(totals.get(key)) or 0) + 1
+    tokens = totals["tokens"]
+    assert isinstance(tokens, dict)
+    tokens["total"] += int(_number(event.get("tokens")) or 0)
+    breakdown = event.get("token_usage")
+    if isinstance(breakdown, dict):
+        for bucket in ANALYSIS_TOKEN_BUCKETS:
+            tokens[bucket] += int(_number(breakdown.get(bucket)) or 0)
+    cost = _number(event.get("cost_usd"))
+    if cost is None:
+        totals["unpriced_run_count"] = int(_number(totals["unpriced_run_count"]) or 0) + 1
+        return
+    totals["cost_usd"] = round((_number(totals["cost_usd"]) or 0.0) + cost, 6)
+    # In-plan runs are not billed; their API-price value is kept apart from real spend.
+    if mode == "included":
+        totals["included_value_usd"] = round(
+            (_number(totals["included_value_usd"]) or 0.0) + cost, 6
+        )
+    elif mode == "exhausted":
+        totals["spending_usd"] = round(
+            (_number(totals["spending_usd"]) or 0.0) + cost, 6
+        )
+
+
+def _analysis_session_id(parent_session_id: str) -> str:
+    return _ANALYSIS_SESSION_PREFIX + parent_session_id
 
 
 def _number(value: object) -> float | None:
@@ -98,7 +264,10 @@ def _weight(provider: str, usage: SessionUsage) -> float:
 
 
 def _snapshot_time(snapshot: dict[str, object]) -> float | None:
-    value = snapshot.get("generated_at")
+    return _timestamp(snapshot.get("generated_at"))
+
+
+def _timestamp(value: object) -> float | None:
     if not isinstance(value, str):
         return None
     try:
@@ -123,6 +292,31 @@ def _reset_timestamp(value: object) -> float | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
     except ValueError:
         return None
+
+
+def _window_start(window: dict[str, object]) -> float | None:
+    reset = _reset_timestamp(window.get("resets_at"))
+    minutes = _number(window.get("window_minutes"))
+    if minutes is None:
+        period = window.get("period")
+        minutes = {
+            "five_hour": 300.0,
+            "weekly": 10_080.0,
+            "monthly": 43_200.0,
+        }.get(period if isinstance(period, str) else "")
+    return reset - minutes * 60 if reset is not None and minutes is not None else None
+
+
+def _remove_analysis_rows(window: dict[str, object]) -> None:
+    for field in ("allocations", "pending", "history"):
+        rows = window.get(field)
+        if not isinstance(rows, dict):
+            continue
+        for session_id in tuple(rows):
+            if isinstance(session_id, str) and session_id.startswith(
+                _ANALYSIS_SESSION_PREFIX
+            ):
+                rows.pop(session_id, None)
 
 
 def _legacy_window_prefix(window: dict[str, object]) -> str | None:
@@ -371,6 +565,49 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
     observed_at = _snapshot_time(snapshot)
     providers = state["providers"]
     assert isinstance(providers, dict)
+    applied_events = state.setdefault("analysis_events_applied", {})
+    if not isinstance(applied_events, dict):
+        state["analysis_events_applied"] = applied_events = {}
+    retention_time = observed_at
+    if retention_time is None:
+        retention_time = max(
+            (
+                timestamp
+                for account in quotas.values()
+                if isinstance(account, dict)
+                for timestamp in [_timestamp(account.get("observed_at"))]
+                if timestamp is not None
+            ),
+            default=None,
+        )
+    analysis_events = _analysis_usage_events(retention_time)
+    retained_event_ids = set(analysis_events)
+    applied_events = {
+        event_id: value
+        for event_id, value in applied_events.items()
+        if event_id in retained_event_ids
+    }
+    state["analysis_events_applied"] = applied_events
+    analysis_run_counts: dict[tuple[str, str], int] = {}
+    analysis_totals: dict[tuple[str, str], dict[str, object]] = {}
+    for event in analysis_events.values():
+        provider = event.get("provider")
+        parent_id = event.get("parent_session_id")
+        if (
+            not isinstance(provider, str)
+            or provider not in {"claude", "codex"}
+            or not isinstance(parent_id, str)
+            or (_number(event.get("tokens")) or 0) <= 0
+            or _number(event.get("completed_at")) is None
+        ):
+            continue
+        analysis_key = (provider, parent_id)
+        analysis_run_counts[analysis_key] = (
+            analysis_run_counts.get(analysis_key, 0) + 1
+        )
+        _add_analysis_run(
+            analysis_totals.setdefault(analysis_key, _empty_analysis_usage()), event
+        )
     session_rows = [row for row in sessions if isinstance(row, dict)]
     for provider in ("claude", "codex"):
         account = quotas.get(provider)
@@ -436,6 +673,8 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
                 )
                 if weight > 0:
                     interval_weights[key] = weight
+        quota_observed_at = _timestamp(account.get("observed_at"))
+        primary_period = "five_hour" if provider == "claude" else "weekly"
         retained_sessions = {
             session_id: usage
             for session_id, usage in previous_sessions.items()
@@ -456,6 +695,22 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
             used = _number(raw_window.get("used_percent"))
             if window_key is None or used is None:
                 continue
+            period = raw_window.get("period")
+            if isinstance(old_window, dict) and period != primary_period:
+                _remove_analysis_rows(old_window)
+            window_start = _window_start(raw_window)
+            for event_id, event in analysis_events.items():
+                event_period = event.get("period", primary_period)
+                completed_at = _number(event.get("completed_at"))
+                if (
+                    event_id not in applied_events
+                    and event.get("provider") == provider
+                    and event_period == period
+                    and completed_at is not None
+                    and window_start is not None
+                    and completed_at < window_start
+                ):
+                    applied_events[event_id] = completed_at
             if not isinstance(old_window, dict):
                 new_window_keys.add(window_key)
                 windows_state[window_key] = {
@@ -493,6 +748,31 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
                 old_window["pending"] = pending = {}
             for session_id, weight in interval_weights.items():
                 pending[session_id] = (_number(pending.get(session_id)) or 0.0) + weight
+            if period == primary_period and quota_observed_at is not None:
+                for event_id, event in analysis_events.items():
+                    if (
+                        event_id in applied_events
+                        or event.get("provider") != provider
+                        or event.get("period", primary_period) != period
+                    ):
+                        continue
+                    parent_session_id = event.get("parent_session_id")
+                    completed_at = _number(event.get("completed_at"))
+                    tokens = _number(event.get("tokens"))
+                    if (
+                        not isinstance(parent_session_id, str)
+                        or completed_at is None
+                        or tokens is None
+                        or tokens <= 0
+                        or completed_at > quota_observed_at
+                        or (window_start is not None and completed_at < window_start)
+                    ):
+                        continue
+                    analysis_session_id = _analysis_session_id(parent_session_id)
+                    pending[analysis_session_id] = (
+                        _number(pending.get(analysis_session_id)) or 0.0
+                    ) + tokens
+                    applied_events[event_id] = completed_at
             if used <= previous_used:
                 continue
             increase = used - previous_used
@@ -530,8 +810,14 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
                 if not isinstance(stored, dict) or used_percent is None:
                     continue
                 allocations = stored.get("allocations")
-                confirmed_share = (
+                own_share = (
                     _number(allocations.get(session["id"]))
+                    if isinstance(allocations, dict)
+                    else None
+                )
+                analysis_session_id = _analysis_session_id(str(session["id"]))
+                analysis_share = (
+                    _number(allocations.get(analysis_session_id))
                     if isinstance(allocations, dict)
                     else None
                 )
@@ -541,20 +827,28 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
                 # report has no measured cost yet, and pricing it from the
                 # learned rate inflated the share by more than the point the
                 # session was working towards.
-                share = confirmed_share or 0.0
+                session_share = own_share or 0.0
+                analysis_share = analysis_share or 0.0
+                share = session_share + analysis_share
+                pending_rows = pending if isinstance(pending, dict) else {}
+                session_pending = session["id"] in pending_rows
+                analysis_pending = analysis_session_id in pending_rows
                 prompts = _number(session.get("task_count"))
                 projection: float | None = None
                 if prompts is not None:
                     projection = _recent_burn(
-                        stored, str(session["id"]), prompts, share
+                        stored, str(session["id"]), prompts, session_share
                     )
-                    _record_share_history(stored, str(session["id"]), prompts, share)
+                    _record_share_history(
+                        stored, str(session["id"]), prompts, session_share
+                    )
                 # A session with no reported points yet is shown as zero rather
                 # than left blank. It is the truthful reading, and on a weekly
                 # window the wait for a first point runs to hours.
                 if (
                     share > 0
-                    or session["id"] in (pending if isinstance(pending, dict) else {})
+                    or session_pending
+                    or analysis_pending
                     or projection is not None
                 ):
                     estimate: dict[str, object] = {
@@ -562,6 +856,22 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
                         "estimated_percent": round(share, 2),
                         "scope": "observed_window",
                     }
+                    if analysis_share > 0:
+                        estimate["analysis_estimated_percent"] = round(
+                            analysis_share, 2
+                        )
+                    if analysis_pending:
+                        estimate["analysis_pending"] = True
+                        pending_total = sum(
+                            _number(weight) or 0.0 for weight in pending_rows.values()
+                        )
+                        if pending_total > 0:
+                            # Share of the work done since the last reported point.
+                            estimate["analysis_unreported_work_share"] = round(
+                                (_number(pending_rows.get(analysis_session_id)) or 0.0)
+                                / pending_total,
+                                4,
+                            )
                     if projection is not None:
                         # A share of a window cannot exceed what is left of it,
                         # however fast the last ten prompts were going.
@@ -574,6 +884,32 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
                 "state": "observing" if not estimates else "estimated",
                 "windows": estimates,
             }
+            run_count = analysis_run_counts.get((provider, str(session["id"])), 0)
+            if run_count:
+                session["quota_attribution"]["analysis_run_count"] = run_count
+            totals = analysis_totals.get((provider, str(session["id"])))
+            if totals is not None:
+                totals["limit"] = [
+                    {
+                        "period": estimate.get("period"),
+                        "measured_percent": estimate.get(
+                            "analysis_estimated_percent", 0.0
+                        ),
+                        # The window has not moved a full point since these runs.
+                        "unreported": {
+                            "below_percent": 1.0,
+                            "share_of_unreported_work": estimate.get(
+                                "analysis_unreported_work_share"
+                            ),
+                        }
+                        if estimate.get("analysis_pending")
+                        else None,
+                    }
+                    for estimate in estimates
+                    if estimate.get("analysis_estimated_percent")
+                    or estimate.get("analysis_pending")
+                ]
+                session["analysis_usage"] = totals
             if not estimates:
                 session["quota_attribution"]["reason"] = _observation_reason(
                     provider,

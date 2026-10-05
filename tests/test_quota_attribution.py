@@ -5,11 +5,16 @@ import unittest
 from unittest.mock import patch
 
 from konvu_telemetry.quota_attribution import (
+    ANALYSIS_USAGE_RETENTION_SECONDS,
     apply_out_of_plan_accounting,
     apply_quota_attribution,
     apply_usage_modes,
+    record_analysis_usage,
 )
-from konvu_telemetry.storage import quota_attribution_path
+from konvu_telemetry.storage import analysis_usage_path, quota_attribution_path
+
+RUN_STARTED_AT = 1_767_225_610.0
+RUN_COMPLETED_AT = 1_767_225_620.0
 
 
 def session(
@@ -64,6 +69,303 @@ def ledger_window(
 
 
 class QuotaAttributionTests(unittest.TestCase):
+    def test_analysis_usage_ledger_prunes_events_outside_retention(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+        ):
+            reference = RUN_COMPLETED_AT + ANALYSIS_USAGE_RETENTION_SECONDS + 60
+            record_analysis_usage(
+                "claude", "a", "old", RUN_STARTED_AT, RUN_COMPLETED_AT, 100
+            )
+            record_analysis_usage(
+                "claude", "a", "recent", reference - 20, reference - 10, 100
+            )
+
+            usage = json.loads(analysis_usage_path().read_text())
+
+            self.assertEqual(set(usage["events"]), {"recent"})
+
+    def test_rerecording_a_run_adds_missing_price_without_duplicating_it(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+        ):
+            record_analysis_usage(
+                "claude", "a", "run-1", RUN_STARTED_AT, RUN_COMPLETED_AT, 100
+            )
+            record_analysis_usage(
+                "claude", "a", "run-1", RUN_STARTED_AT, RUN_COMPLETED_AT, 100,
+                cost_usd=0.02,
+            )
+            record_analysis_usage(
+                "claude", "a", "run-1", RUN_STARTED_AT, RUN_COMPLETED_AT, 100,
+                cost_usd=0.09,
+            )
+
+            events = json.loads(analysis_usage_path().read_text())["events"]
+
+            self.assertEqual(list(events), ["run-1"])
+            self.assertEqual(events["run-1"]["cost_usd"], 0.02)
+            self.assertEqual(events["run-1"]["tokens"], 100)
+
+    def test_analysis_usage_is_a_hidden_child_of_its_parent_session(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+        ):
+            first = snapshot(20, [session("a", 100), session("b", 100)])
+            first["account_quotas"]["claude"]["observed_at"] = (
+                "2026-01-01T00:00:00+00:00"
+            )
+            apply_quota_attribution(first)
+            record_analysis_usage(
+                "claude", "a", "run-1", RUN_STARTED_AT, RUN_COMPLETED_AT, 100
+            )
+
+            second = snapshot(21, [session("a", 200), session("b", 300)])
+            second["account_quotas"]["claude"]["observed_at"] = (
+                "2026-01-01T00:01:00+00:00"
+            )
+            apply_quota_attribution(second)
+
+            a_window = second["sessions"][0]["quota_attribution"]["windows"][0]
+            b_window = second["sessions"][1]["quota_attribution"]["windows"][0]
+            self.assertEqual(a_window["estimated_percent"], 0.5)
+            self.assertEqual(a_window["analysis_estimated_percent"], 0.25)
+            self.assertEqual(second["sessions"][0]["quota_attribution"]["analysis_run_count"], 1)
+            self.assertEqual(b_window["estimated_percent"], 0.5)
+
+    def test_analysis_usage_sums_runs_tokens_cost_and_measured_share(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+        ):
+            first = snapshot(20, [session("a", 100), session("b", 100)])
+            first["account_quotas"]["claude"]["observed_at"] = (
+                "2026-01-01T00:00:00+00:00"
+            )
+            apply_quota_attribution(first)
+            breakdown = {
+                "input": 10,
+                "output": 40,
+                "reasoning_output": 0,
+                "cache_write": 50,
+                "cache_read": 0,
+            }
+            record_analysis_usage(
+                "claude", "a", "in-plan", RUN_STARTED_AT, RUN_COMPLETED_AT, 100,
+                model="claude-haiku-4-5", usage_mode="included",
+                token_usage=breakdown, cost_usd=0.12,
+            )
+            record_analysis_usage(
+                "claude", "a", "paid", RUN_STARTED_AT, RUN_COMPLETED_AT, 100,
+                model="claude-haiku-4-5", usage_mode="exhausted",
+                token_usage=breakdown, cost_usd=0.05,
+            )
+
+            second = snapshot(21, [session("a", 200), session("b", 300)])
+            second["account_quotas"]["claude"]["observed_at"] = (
+                "2026-01-01T00:01:00+00:00"
+            )
+            apply_quota_attribution(second)
+
+            usage = second["sessions"][0]["analysis_usage"]
+            self.assertEqual(usage["run_count"], 2)
+            self.assertEqual(usage["included_run_count"], 1)
+            self.assertEqual(usage["spending_run_count"], 1)
+            self.assertEqual(usage["tokens"]["total"], 200)
+            self.assertEqual(usage["tokens"]["cache_write"], 100)
+            self.assertAlmostEqual(usage["cost_usd"], 0.17)
+            self.assertAlmostEqual(usage["included_value_usd"], 0.12)
+            self.assertAlmostEqual(usage["spending_usd"], 0.05)
+            self.assertEqual(
+                usage["limit"],
+                [{"period": "five_hour", "measured_percent": 0.4, "unreported": None}],
+            )
+            self.assertNotIn("analysis_usage", second["sessions"][1])
+
+    def test_analysis_usage_below_one_point_is_reported_as_a_bound(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+        ):
+            first = snapshot(20, [session("a", 100)])
+            first["account_quotas"]["claude"]["observed_at"] = (
+                "2026-01-01T00:00:00+00:00"
+            )
+            apply_quota_attribution(first)
+            record_analysis_usage(
+                "claude", "a", "run-1", RUN_STARTED_AT, RUN_COMPLETED_AT, 100
+            )
+
+            second = snapshot(20, [session("a", 200)])
+            second["account_quotas"]["claude"]["observed_at"] = (
+                "2026-01-01T00:01:00+00:00"
+            )
+            apply_quota_attribution(second)
+
+            usage = second["sessions"][0]["analysis_usage"]
+            self.assertEqual(usage["unpriced_run_count"], 1)
+            self.assertEqual(usage["unknown_mode_run_count"], 1)
+            self.assertEqual(
+                usage["limit"],
+                [
+                    {
+                        "period": "five_hour",
+                        "measured_percent": 0.0,
+                        "unreported": {
+                            "below_percent": 1.0,
+                            "share_of_unreported_work": 0.5,
+                        },
+                    }
+                ],
+            )
+
+    def test_analysis_usage_only_targets_the_primary_subscription_window(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+        ):
+            first = snapshot(20, [session("a", 100)])
+            first["account_quotas"]["claude"]["observed_at"] = (
+                "2026-01-01T00:00:00+00:00"
+            )
+            first["account_quotas"]["claude"]["windows"].append(
+                {
+                    "limit_id": "default",
+                    "period": "weekly",
+                    "used_percent": 30,
+                    "resets_at": "2026-01-08T00:00:00+00:00",
+                }
+            )
+            apply_quota_attribution(first)
+            record_analysis_usage(
+                "claude", "a", "run-1", RUN_STARTED_AT, RUN_COMPLETED_AT, 100
+            )
+
+            second = snapshot(21, [session("a", 100)])
+            second["account_quotas"]["claude"]["observed_at"] = (
+                "2026-01-01T00:01:00+00:00"
+            )
+            second["account_quotas"]["claude"]["windows"].append(
+                {
+                    "limit_id": "default",
+                    "period": "weekly",
+                    "used_percent": 31,
+                    "resets_at": "2026-01-08T00:00:00+00:00",
+                }
+            )
+            apply_quota_attribution(second)
+
+            windows = second["sessions"][0]["quota_attribution"]["windows"]
+            five_hour = next(row for row in windows if row["period"] == "five_hour")
+            self.assertEqual(five_hour["analysis_estimated_percent"], 1.0)
+            ledger = json.loads(quota_attribution_path().read_text())
+            weekly = ledger_window(ledger, "claude", "weekly")
+            self.assertFalse(
+                any(
+                    str(session_id).startswith("analysis:")
+                    for field in ("pending", "allocations")
+                    for session_id in weekly.get(field, {})
+                )
+            )
+
+    def test_analysis_usage_waits_for_a_provider_observation_after_it_finished(
+        self,
+    ) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+        ):
+            first = snapshot(20, [session("a", 100)])
+            first["account_quotas"]["claude"]["observed_at"] = (
+                "2026-01-01T00:00:00+00:00"
+            )
+            apply_quota_attribution(first)
+            record_analysis_usage(
+                "claude", "a", "run-1", RUN_STARTED_AT, RUN_COMPLETED_AT, 100
+            )
+
+            too_early = snapshot(21, [session("a", 200)])
+            too_early["account_quotas"]["claude"]["observed_at"] = (
+                "2026-01-01T00:00:15+00:00"
+            )
+            apply_quota_attribution(too_early)
+            self.assertNotIn(
+                "analysis_estimated_percent",
+                too_early["sessions"][0]["quota_attribution"]["windows"][0],
+            )
+
+            eligible = snapshot(21, [session("a", 200)])
+            eligible["account_quotas"]["claude"]["observed_at"] = (
+                "2026-01-01T00:00:30+00:00"
+            )
+            apply_quota_attribution(eligible)
+            window = eligible["sessions"][0]["quota_attribution"]["windows"][0]
+            self.assertTrue(window["analysis_pending"])
+
+    def test_analysis_usage_event_is_added_to_pending_only_once(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+        ):
+            first = snapshot(20, [session("a", 100)])
+            first["account_quotas"]["claude"]["observed_at"] = (
+                "2026-01-01T00:00:00+00:00"
+            )
+            apply_quota_attribution(first)
+            record_analysis_usage(
+                "claude", "a", "run-1", RUN_STARTED_AT, RUN_COMPLETED_AT, 100
+            )
+
+            for second in range(2):
+                current = snapshot(20, [session("a", 100)])
+                current["account_quotas"]["claude"]["observed_at"] = (
+                    "2026-01-01T00:00:30+00:00"
+                )
+                apply_quota_attribution(current)
+
+            ledger = json.loads(quota_attribution_path().read_text())
+            pending = ledger_window(ledger, "claude", "five_hour")["pending"]
+            self.assertEqual(pending["analysis:a"], 100)
+
+    def test_window_reset_clears_the_analysis_child_share(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+        ):
+            first = snapshot(20, [session("a", 100)])
+            first["account_quotas"]["claude"]["observed_at"] = (
+                "2026-01-01T00:00:00+00:00"
+            )
+            apply_quota_attribution(first)
+            record_analysis_usage(
+                "claude", "a", "run-1", RUN_STARTED_AT, RUN_COMPLETED_AT, 100
+            )
+            increased = snapshot(21, [session("a", 100)])
+            increased["account_quotas"]["claude"]["observed_at"] = (
+                "2026-01-01T00:00:30+00:00"
+            )
+            apply_quota_attribution(increased)
+            self.assertEqual(
+                increased["sessions"][0]["quota_attribution"]["windows"][0][
+                    "analysis_estimated_percent"
+                ],
+                1.0,
+            )
+
+            reset = snapshot(0, [session("a", 100)])
+            reset["generated_at"] = "2026-01-01T05:01:00+00:00"
+            reset["account_quotas"]["claude"]["observed_at"] = (
+                "2026-01-01T05:01:00+00:00"
+            )
+            reset["account_quotas"]["claude"]["windows"][0]["resets_at"] = (
+                "2026-01-01T10:00:00+00:00"
+            )
+            apply_quota_attribution(reset)
+            self.assertEqual(reset["sessions"][0]["quota_attribution"]["windows"], [])
+
     def test_session_reactivation_keeps_its_previous_usage_baseline(self) -> None:
         with (
             tempfile.TemporaryDirectory() as directory,

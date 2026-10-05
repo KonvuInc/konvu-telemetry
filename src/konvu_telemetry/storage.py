@@ -156,6 +156,10 @@ def quota_attribution_path() -> Path:
     return home_dir() / "quota-attribution.json"
 
 
+def analysis_usage_path() -> Path:
+    return home_dir() / "analysis-usage.json"
+
+
 def context_map_path(provider: str, session_id: str) -> Path:
     """Return the private derived context map for one provider session."""
     if provider not in ALLOWED_PROVIDERS or not valid_session_id(session_id):

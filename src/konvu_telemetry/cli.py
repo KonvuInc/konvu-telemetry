@@ -30,13 +30,56 @@ from .preferences import (
 from .tracking import set_tracking_enabled, tracking_status
 
 
+CONTEXT_ANALYSIS_QUESTION = """Context drift analysis (optional)
+After every 10 prompts, Konvu can ask the Claude or Codex account you already use to
+rate which parts of a session's context are still relevant, drifting, or stale, so
+you know when to compact or start fresh. It runs a small model (Claude Haiku or
+gpt-6-luna) through your local CLI login. Session text goes only to that provider,
+never to Konvu. A run usually costs a few cents at API prices, about 0.01% of a
+Claude 5-hour limit. Change it later in the dashboard or with
+`konvu-telemetry context-analysis on|off`.
+Turn it on? [y/N] """
+
+
+def _ask_context_analysis() -> bool | None:
+    """Ask once at setup; no answer from a terminal leaves the choice unset."""
+    if not sys.stdin.isatty():
+        return None
+    try:
+        answer = input(CONTEXT_ANALYSIS_QUESTION).strip().lower()
+    except EOFError:
+        return None
+    return answer in {"y", "yes"}
+
+
 def run_setup(arguments: argparse.Namespace) -> None:
-    print(
-        json.dumps(
-            setup(max(1, arguments.interval), not arguments.no_browser),
-            indent=2,
-        )
+    current = read_preferences()
+    enabled: bool | None = (
+        arguments.context_analysis == "on"
+        if arguments.context_analysis is not None
+        else _ask_context_analysis()
+        if current["context_analysis_consent"] == "unset"
+        else None
     )
+    result: dict[str, object] = dict(
+        setup(max(1, arguments.interval), not arguments.no_browser)
+    )
+    if enabled is not None:
+        current = read_preferences()
+        current = write_preferences(
+            current["cadence"],
+            current["custom_rule"],
+            current["jump_percent"],
+            context_analysis_enabled=enabled,
+        )
+    result["context_analysis"] = (
+        "on"
+        if current["context_analysis_enabled"]
+        else "off"
+        if current["context_analysis_consent"] == "disabled"
+        else "not chosen"
+    )
+    print(json.dumps(result, indent=2))
 
 
 def run_status(_arguments: argparse.Namespace) -> None:
@@ -54,6 +97,29 @@ def run_tracking(arguments: argparse.Namespace) -> None:
     elif arguments.state == "off":
         set_tracking_enabled(False)
     print(json.dumps({"enabled": tracking_status().enabled}))
+
+
+def run_context_analysis(arguments: argparse.Namespace) -> None:
+    current = read_preferences()
+    if arguments.state in {"on", "off"} or arguments.allow_paid is not None:
+        current = write_preferences(
+            current["cadence"],
+            current["custom_rule"],
+            current["jump_percent"],
+            context_analysis_enabled=arguments.state == "on"
+            if arguments.state in {"on", "off"}
+            else None,
+            context_analysis_allow_paid=arguments.allow_paid,
+        )
+    print(
+        json.dumps(
+            {
+                "enabled": current["context_analysis_enabled"],
+                "consent": current["context_analysis_consent"],
+                "allow_paid": current["context_analysis_allow_paid"],
+            }
+        )
+    )
 
 
 def _print_cadence(preference: Preferences) -> None:
@@ -215,6 +281,11 @@ def build_parser() -> argparse.ArgumentParser:
     install = register("setup", "Install the collector, status line and hooks.")
     install.add_argument("--interval", type=int, default=60)
     install.add_argument("--no-browser", action="store_true")
+    install.add_argument(
+        "--context-analysis",
+        choices=["on", "off"],
+        help="Answer the context drift analysis question without being asked.",
+    )
     install.set_defaults(run=run_setup)
 
     register("status", "Report whether the collector is running.").set_defaults(
@@ -227,6 +298,27 @@ def build_parser() -> argparse.ArgumentParser:
     tracking = register("telemetry", "Control anonymous product analytics.")
     tracking.add_argument("state", choices=["on", "off", "status"])
     tracking.set_defaults(run=run_tracking)
+
+    context_analysis = register(
+        "context-analysis", "Control local conversation-drift analysis."
+    )
+    context_analysis.add_argument("state", choices=["on", "off", "status"])
+    paid = context_analysis.add_mutually_exclusive_group()
+    paid.add_argument(
+        "--allow-paid",
+        dest="allow_paid",
+        action="store_const",
+        const=True,
+        help="Also analyze sessions beyond the plan or past the 95%% limit reserve.",
+    )
+    paid.add_argument(
+        "--plan-only",
+        dest="allow_paid",
+        action="store_const",
+        const=False,
+        help="Analyze only sessions within the plan (the default).",
+    )
+    context_analysis.set_defaults(run=run_context_analysis)
 
     cadence = register(
         "cadence", "Choose how often the Konvu usage box is shown inside a turn."

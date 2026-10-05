@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from konvu_telemetry.context_drift import _event_text
 from konvu_telemetry.context_map import (
     ContextMapCollector,
     ContextMapScheduler,
@@ -376,6 +377,41 @@ class ContextMapTests(unittest.TestCase):
             self.assertEqual(stored["version"], STATE_VERSION)
             self.assertEqual(stored["summary"]["observed_context_tokens"], 120)
 
+    def test_parser_rebuild_preserves_analysis_for_the_same_transcript(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / f"{SESSION_ID}.jsonl"
+            append_records(
+                transcript,
+                [claude_assistant("2026-01-01T00:00:00Z", 120, 5)],
+            )
+            stat = transcript.stat()
+            with patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}):
+                destination = context_map_path("claude", SESSION_ID)
+                destination.parent.mkdir(parents=True)
+                destination.write_text(
+                    json.dumps(
+                        {
+                            "version": STATE_VERSION - 1,
+                            "source_path": str(transcript),
+                            "source_device": stat.st_dev,
+                            "source_inode": stat.st_ino,
+                            "epochs": [{}],
+                            "analysis": {
+                                "version": 3,
+                                "state": "ready",
+                                "items": {},
+                            },
+                        }
+                    )
+                )
+                ContextMapCollector(FixedTokenizer()).refresh(
+                    snapshot("claude", 120), live_state("claude", transcript)
+                )
+                stored = json.loads(destination.read_text())
+
+            self.assertEqual(stored["version"], STATE_VERSION)
+            self.assertEqual(stored["analysis"]["version"], 3)
+
     def test_codex_uses_the_next_checkpoint_and_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             transcript = Path(directory) / f"rollout-{SESSION_ID}.jsonl"
@@ -424,6 +460,115 @@ class ContextMapTests(unittest.TestCase):
             web = [event for event in events if event["category"] == "web_and_external"]
             self.assertEqual(web[0]["estimated_tokens"], 30)
             self.assertEqual(web[0]["model"], "gpt-5.6-sol")
+
+    def test_reply_excerpts_point_at_reply_records_not_usage_records(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / f"{SESSION_ID}.jsonl"
+            thinking = claude_assistant(
+                "2026-01-01T00:00:01Z", 100, 20, content=[{"type": "thinking", "thinking": ""}]
+            )
+            reply = claude_assistant(
+                "2026-01-01T00:00:02Z", 100, 20, content=[{"type": "text", "text": "Fixed the cap."}]
+            )
+            following = claude_assistant("2026-01-01T00:00:03Z", 140, 5)
+            for record, message_id in ((thinking, "msg-1"), (reply, "msg-1"), (following, "msg-2")):
+                record["message"]["id"] = message_id  # type: ignore[index]
+            append_records(transcript, [thinking, reply, following])
+            with patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}):
+                ContextMapCollector(FixedTokenizer()).refresh(
+                    snapshot("claude", 140), live_state("claude", transcript)
+                )
+                events = stored_events("claude")
+            output = next(e for e in events if e["category"] == "assistant_output")
+            self.assertEqual(len(output["excerpt_ranges"]), 1)
+            self.assertEqual(_event_text(output, transcript), "Fixed the cap.")
+
+    def test_codex_reply_and_call_offsets_are_kept(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / f"rollout-{SESSION_ID}.jsonl"
+            append_records(
+                transcript,
+                [
+                    codex_checkpoint("2026-01-01T00:00:01Z", 100, 10),
+                    {
+                        "timestamp": "2026-01-01T00:00:02Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call",
+                            "call_id": "call-1",
+                            "name": "exec_command",
+                            "arguments": json.dumps({"cmd": "pytest -q"}),
+                        },
+                    },
+                    {
+                        "timestamp": "2026-01-01T00:00:03Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call_output",
+                            "call_id": "call-1",
+                            "output": "3 passed",
+                        },
+                    },
+                    {
+                        "timestamp": "2026-01-01T00:00:04Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "Tests pass."}],
+                        },
+                    },
+                    codex_checkpoint("2026-01-01T00:00:05Z", 140, 5),
+                    codex_checkpoint("2026-01-01T00:00:06Z", 170, 2),
+                ],
+            )
+            with patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}):
+                ContextMapCollector(FixedTokenizer()).refresh(
+                    snapshot("codex", 170), live_state("codex", transcript)
+                )
+                events = stored_events("codex")
+            result = next(e for e in events if e.get("tool") == "exec_command")
+            replies = [e for e in events if e.get("excerpt_ranges")]
+            self.assertEqual(len(result["call_range"]), 2)
+            self.assertEqual(len(replies), 1)
+
+    def test_codex_tracks_whether_the_current_turn_finished(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / f"rollout-{SESSION_ID}.jsonl"
+            append_records(
+                transcript,
+                [
+                    {
+                        "timestamp": "2026-01-01T00:00:00Z",
+                        "type": "event_msg",
+                        "payload": {"type": "task_started"},
+                    },
+                    codex_checkpoint("2026-01-01T00:00:01Z", 100, 5),
+                ],
+            )
+            state = live_state("codex", transcript)
+            data = snapshot("codex", 100)
+            with patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}):
+                collector = ContextMapCollector(FixedTokenizer())
+                collector.refresh(data, state)
+                running = json.loads(context_map_path("codex", SESSION_ID).read_text())
+                append_records(
+                    transcript,
+                    [
+                        {
+                            "timestamp": "2026-01-01T00:00:02Z",
+                            "type": "event_msg",
+                            "payload": {"type": "task_complete"},
+                        }
+                    ],
+                )
+                collector.refresh(data, state)
+                complete = json.loads(context_map_path("codex", SESSION_ID).read_text())
+
+            self.assertFalse(running["turn_complete"])
+            self.assertFalse(running["summary"]["turn_complete"])
+            self.assertTrue(complete["turn_complete"])
+            self.assertTrue(complete["summary"]["turn_complete"])
 
     def test_codex_tool_output_is_attributed_at_the_following_input(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
