@@ -893,7 +893,7 @@ def silent_hook(hook: Callable[[], None]) -> Callable[[], None]:
 
 @silent_hook
 def codex_hook() -> None:
-    """Return the boxed Codex CLI usage message from its local session file."""
+    """Return the boxed Codex usage message at the end of a completed turn."""
     request = codex_hook_request()
     if request is None:
         print(SUPPRESS_OUTPUT)
@@ -901,13 +901,9 @@ def codex_hook() -> None:
     payload, session_id = request
     turn_id = payload.get("turn_id")
     transcript = codex_hook_transcript(payload, session_id)
-    # Whether a tool-free turn earns a box is the cadence's call, so the count is
-    # handed to the gate rather than used to suppress the box ahead of it.
-    if (
-        not isinstance(turn_id, str)
-        or transcript is None
-        or codex_is_desktop(transcript)
-    ):
+    # The hook invocation is authoritative: spawned CLI sessions can inherit
+    # desktop transcript metadata from their parent.
+    if not isinstance(turn_id, str) or transcript is None:
         print(SUPPRESS_OUTPUT)
         return
     if not should_show_usage(
