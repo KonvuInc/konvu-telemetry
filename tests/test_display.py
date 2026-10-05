@@ -9,6 +9,7 @@ from unittest.mock import patch
 from konvu_telemetry.display import (
     ANSI_ESCAPE,
     claude_statusline_rows,
+    compact_duration,
     compact_status_meter,
     hook_quota_meters,
     usage_box_lines,
@@ -17,6 +18,14 @@ from konvu_telemetry.display import (
 
 class DisplayTests(unittest.TestCase):
     """Keep CLI and hook quota timers readable and tied to their limit."""
+
+    def test_compact_duration_steps_down_before_rounding_to_zero(self) -> None:
+        self.assertEqual(compact_duration(3.2 * 86_400), "3.2d")
+        self.assertEqual(compact_duration(0.1 * 86_400), "2.4h")
+        self.assertEqual(compact_duration(2.5 * 3_600), "2.5h")
+        self.assertEqual(compact_duration(0.1 * 3_600), "6m")
+        self.assertEqual(compact_duration(2.2 * 60), "2.2m")
+        self.assertEqual(compact_duration(0.1 * 60), "6s")
 
     def test_cli_meter_centers_the_reset_label_inside_its_fill(self) -> None:
         with patch.dict(os.environ, {"NO_COLOR": "", "TERM": "xterm-256color"}):
@@ -46,7 +55,7 @@ class DisplayTests(unittest.TestCase):
 
         self.assertEqual(
             rendered,
-            "5h · reset: 1.0h [█░░░░░░] 8.0%  Week · reset: 1.0d [██░░░░░] 35.0%",
+            "5h · reset: 1h [█░░░░░░] 8.0%  Week · reset: 1d [██░░░░░] 35.0%",
         )
 
     def test_paid_claude_hud_shows_reset_and_context_without_limit_meters(self) -> None:
@@ -81,7 +90,7 @@ class DisplayTests(unittest.TestCase):
         ):
             rows = claude_statusline_rows(session, 52.4)
 
-        self.assertEqual(rows[0], "● Paying · resets in 1.0h")
+        self.assertEqual(rows[0], "● Paying · resets in 1h")
         self.assertIn("Context", rows[1])
         self.assertIn("52%", rows[1])
         self.assertNotIn("5h", "\n".join(rows))
@@ -122,7 +131,7 @@ class DisplayTests(unittest.TestCase):
                 "codex",
             )
 
-        self.assertEqual(rows[1], "│ 🔴 Paying · resets in 1.0d")
+        self.assertEqual(rows[1], "│ 🔴 Paying · resets in 1d")
         self.assertIn("Credits [██░░░░░] 23.0%", rows[2])
         self.assertIn("Context [█████░░] 68.1%", rows[2])
         self.assertNotIn("Week", "\n".join(rows))

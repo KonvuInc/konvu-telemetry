@@ -508,9 +508,17 @@ def reset_in(value: object) -> str | None:
         )
     except ValueError:
         return None
-    if seconds >= 86_400:
-        return f"{seconds / 86_400:.1f}d"
-    return f"{seconds / 3_600:.1f}h"
+    return compact_duration(seconds)
+
+
+def compact_duration(seconds: int | float) -> str:
+    """Render a positive duration in its largest unit without a leading zero."""
+    remaining = max(0.0, float(seconds))
+    for unit, size in (("d", 86_400), ("h", 3_600), ("m", 60), ("s", 1)):
+        if remaining >= size or unit == "s":
+            amount = one_decimal(remaining / size).removesuffix(".0")
+            return f"{amount}{unit}"
+    return "0s"
 
 
 def quota_reset_times(provider: str) -> dict[str, str]:
