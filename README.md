@@ -2,7 +2,7 @@
 
 See what Claude Code, Claude Code Desktop, Codex CLI, and Codex Desktop are costing while you work.
 
-Konvu Telemetry reads the session data already on your Mac and shows local spend, context use, forecasts, subagents, and usage trends in a dashboard and CLI status line. A session's Context map tab also estimates which local sources fill its current context window. Your prompts, code, transcripts, and usage data stay on your machine.
+Konvu Telemetry reads the session data already on your Mac and shows local spend, context use, forecasts, subagents, and usage trends in a dashboard and CLI status line. Each session inspector shows context use and local source categories; eligible sessions also show AI-rated relevance and conversation topics. Konvu never receives your prompts, code, transcripts, or usage data.
 
 ## Install
 
@@ -24,6 +24,8 @@ Setup starts the local collector, opens the dashboard at `http://127.0.0.1:7824`
 konvu-telemetry dashboard  # Open the local dashboard
 konvu-telemetry status     # Check that collection is running
 konvu-telemetry cadence    # Choose how often the usage box appears
+konvu-telemetry context-analysis off  # Disable conversation-drift analysis
+konvu-telemetry context-analysis on --allow-paid  # Also analyze sessions beyond the plan
 konvu-telemetry --version  # Print the installed version
 ```
 
@@ -55,6 +57,7 @@ konvu-telemetry uninstall
 
 - Tracks Claude Code, Claude Code Desktop, Codex CLI, and Codex Desktop sessions from their local transcripts.
 - Maps prompts, files, tool results, web data, attachments, instructions, agent output, and compaction summaries into the current context window without storing their contents.
+- Uses the matching local Claude or Codex login to group mapped context by topic and estimate what remains relevant. By default it runs only while fresh provider limits confirm the account is within its plan (`--allow-paid` lifts this) and can be disabled with `konvu-telemetry context-analysis off`.
 - Estimates spend from bundled model pricing and records subscription-credit equivalents for supported Codex models.
 - Runs only on your Mac and serves the dashboard only at `127.0.0.1`.
 - Uses browser notifications only when you enable them in the local dashboard. An active paid session alerts once its next ten prompts are forecast at $10 or more; repeat suppression stays in that browser.
@@ -64,6 +67,8 @@ Costs are estimates, not provider invoices. See [ACCURACY.md](ACCURACY.md) for t
 ## Privacy
 
 Konvu Telemetry stores derived usage data in `~/.konvu/telemetry`; provider transcript files are never changed. The background collector is the only component that fetches account limits: every two minutes it calls Anthropic's usage endpoint for Claude and asks Codex's installed local app-server to contact OpenAI using Codex's own login. Konvu Telemetry holds the Claude credential only for that request and never receives the Codex credential. Credentials, raw provider response bodies, and account IDs are never copied to Konvu files or logs. For each limit window the collector keeps only its normalized form: the provider's limit bucket identifier, the window period and length, the percentage used, the reset time, and the provider's limit-reached and spend-control flags.
+
+Context drift analysis is off until you explicitly enable it: `konvu-telemetry setup` asks once (default no, or pass `--context-analysis on|off`), and you can switch it later in the dashboard settings or with `konvu-telemetry context-analysis on`. After every ten new prompts, the collector may send bounded excerpts from that session back to the same provider through its authenticated local CLI. Later runs send only new turns plus a small set of uncertain ratings for review. Claude content goes only to Anthropic and Codex content only to OpenAI; Konvu does not receive it. Claude tools are disabled; Codex runs ephemerally from an empty directory in its read-only sandbox. Each run is limited to 90 seconds and starts only while fresh provider limits show less than 95% usage, unless `--allow-paid` is set, in which case sessions beyond the plan are analyzed too and may spend credits. Short topic summaries, relevance scores, timestamps, provider-reported token use, and its API-price estimate are stored locally for eight days; that usage enters the same quota-attribution ledger as normal sessions under its parent session.
 
 Separately, setup enables a small amount of anonymous product telemetry to PostHog by default: successful setup, when the first dashboard-visible snapshot is ready, dashboard opens, one active-day event per day when data is visible, and collector failures, at most once per day. An existing telemetry choice remains unchanged.
 

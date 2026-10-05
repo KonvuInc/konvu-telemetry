@@ -1,0 +1,259 @@
+{
+  "generated_at": "2026-10-02T10:45:00Z",
+  "live_activity_window_seconds": 1200,
+  "sessions": [
+    {
+      "id": "preview-topics",
+      "provider": "codex",
+      "client": "cli",
+      "title": "Ship team sign-in",
+      "model": "GPT-6 Luna",
+      "effort": "medium",
+      "usage_mode": "included",
+      "context_tokens": 140000,
+      "context_window_tokens": 200000,
+      "task_count": 32,
+      "subagent_total": 0,
+      "active_subagents": 0,
+      "session_started_at": "2026-10-02T10:01:00Z",
+      "activity": {
+        "state": "idle"
+      },
+      "iterations": [
+        {
+          "iteration": 1,
+          "started_at": "2026-10-02T10:01:00Z",
+          "context_tokens": 16000,
+          "cost_usd": 0,
+          "cumulative_cost_usd": 0,
+          "completed": true
+        },
+        {
+          "iteration": 5,
+          "started_at": "2026-10-02T10:05:00Z",
+          "context_tokens": 30000,
+          "cost_usd": 0,
+          "cumulative_cost_usd": 0,
+          "completed": true
+        },
+        {
+          "iteration": 10,
+          "started_at": "2026-10-02T10:10:00Z",
+          "context_tokens": 48000,
+          "cost_usd": 0,
+          "cumulative_cost_usd": 0,
+          "completed": true
+        },
+        {
+          "iteration": 15,
+          "started_at": "2026-10-02T10:15:00Z",
+          "context_tokens": 70000,
+          "cost_usd": 0,
+          "cumulative_cost_usd": 0,
+          "completed": true
+        },
+        {
+          "iteration": 20,
+          "started_at": "2026-10-02T10:20:00Z",
+          "context_tokens": 90000,
+          "cost_usd": 0,
+          "cumulative_cost_usd": 0,
+          "completed": true
+        },
+        {
+          "iteration": 24,
+          "started_at": "2026-10-02T10:24:00Z",
+          "context_tokens": 108000,
+          "cost_usd": 0,
+          "cumulative_cost_usd": 0,
+          "completed": true
+        },
+        {
+          "iteration": 28,
+          "started_at": "2026-10-02T10:28:00Z",
+          "context_tokens": 123000,
+          "cost_usd": 0,
+          "cumulative_cost_usd": 0,
+          "completed": true
+        },
+        {
+          "iteration": 32,
+          "started_at": "2026-10-02T10:32:00Z",
+          "context_tokens": 140000,
+          "cost_usd": 0,
+          "cumulative_cost_usd": 0,
+          "completed": true
+        }
+      ],
+      "context_map": {
+        "state": "ready",
+        "observed_context_tokens": 140000,
+        "iteration": 32,
+        "categories": {
+          "repository_and_files": 60000,
+          "assistant_output": 40000,
+          "previous_compact": 30000,
+          "tests_and_builds": 10000
+        },
+        "analysis": {
+          "state": "ready",
+          "current_intent": "Test the finished sign-in flow before release.",
+          "themes": [
+            {
+              "id": "sign-in",
+              "label": "Build team sign-in",
+              "tokens": 50000,
+              "relevant_tokens": 48000,
+              "drifting_tokens": 2000,
+              "stale_tokens": 0
+            },
+            {
+              "id": "auth-options",
+              "label": "Compare sign-in approaches",
+              "tokens": 35000,
+              "relevant_tokens": 5000,
+              "drifting_tokens": 20000,
+              "stale_tokens": 10000
+            },
+            {
+              "id": "ci-detour",
+              "label": "Debug unrelated CI failure",
+              "tokens": 30000,
+              "relevant_tokens": 0,
+              "drifting_tokens": 3000,
+              "stale_tokens": 27000
+            },
+            {
+              "id": "release-tests",
+              "label": "Test sign-in before release",
+              "tokens": 17000,
+              "relevant_tokens": 15000,
+              "drifting_tokens": 2000,
+              "stale_tokens": 0
+            },
+            {
+              "id": "kickoff",
+              "label": "Old kickoff notes",
+              "tokens": 8000,
+              "relevant_tokens": 0,
+              "drifting_tokens": 0,
+              "stale_tokens": 8000
+            }
+          ],
+          "technical_categories": [
+            {
+              "id": "repository_and_files",
+              "label": "Local code read",
+              "tokens": 60000,
+              "relevant_tokens": 40000,
+              "drifting_tokens": 10000,
+              "stale_tokens": 10000
+            },
+            {
+              "id": "assistant_output",
+              "label": "Conversation and reasoning",
+              "tokens": 40000,
+              "relevant_tokens": 18000,
+              "drifting_tokens": 12000,
+              "stale_tokens": 10000
+            },
+            {
+              "id": "previous_compact",
+              "label": "Previous compacts",
+              "tokens": 30000,
+              "relevant_tokens": 2000,
+              "drifting_tokens": 5000,
+              "stale_tokens": 23000
+            },
+            {
+              "id": "tests_and_builds",
+              "label": "Tests and build output",
+              "tokens": 10000,
+              "relevant_tokens": 8000,
+              "drifting_tokens": 0,
+              "stale_tokens": 2000
+            }
+          ],
+          "relevant_percent": 48.6,
+          "drifting_percent": 19.3,
+          "stale_percent": 32.1,
+          "coverage_percent": 100.0,
+          "phases": [
+            {
+              "label": "Choose sign-in approach",
+              "start_iteration": 1,
+              "end_iteration": 8
+            },
+            {
+              "label": "Build sign-in flow",
+              "start_iteration": 9,
+              "end_iteration": 18
+            },
+            {
+              "label": "Investigate CI failure",
+              "start_iteration": 19,
+              "end_iteration": 24
+            },
+            {
+              "label": "Test and release",
+              "start_iteration": 25,
+              "end_iteration": 32
+            }
+          ],
+          "run_events": [
+            {
+              "iteration": 20,
+              "started_at": "2026-10-02T10:20:00Z"
+            },
+            {
+              "iteration": 30,
+              "started_at": "2026-10-02T10:40:00Z"
+            }
+          ]
+        }
+      },
+      "analysis_usage": {
+        "run_count": 2,
+        "included_run_count": 2,
+        "limit": [
+          {
+            "period": "weekly",
+            "measured_percent": 0.02
+          }
+        ]
+      },
+      "preview_account_quota": {
+        "status": "ready",
+        "windows": [
+          {
+            "period": "weekly",
+            "used_percent": 37.0,
+            "window_minutes": 10080
+          }
+        ]
+      },
+      "quota_attribution": {
+        "state": "estimated",
+        "windows": [
+          {
+            "period": "weekly",
+            "estimated_percent": 4.2,
+            "projected_next_10_percent": 1.1
+          }
+        ]
+      }
+    }
+  ],
+  "account_quotas": {
+    "codex": {
+      "status": "ready",
+      "windows": [
+        {
+          "period": "weekly",
+          "used_percent": 37.0,
+          "window_minutes": 10080
+        }
+      ]
+    }
+  }
+}

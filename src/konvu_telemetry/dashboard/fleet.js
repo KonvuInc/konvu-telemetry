@@ -14,7 +14,7 @@ const COLORS = {
 };
 const BURNING_FORECAST_USD = 10;
 const previewName = new URLSearchParams(location.search).get("preview");
-const previewMode = ["subscription", "states"].includes(previewName);
+const previewMode = ["subscription", "states", "topics"].includes(previewName);
 const state = {
   payload: null,
   view: "ledger",
@@ -23,6 +23,7 @@ const state = {
   selected: null,
   chart: "cumulative",
   inspectorTab: "overview",
+  topicMode: "sources",
   error: false,
   refreshInFlight: false,
   nextRefreshAt: null,
@@ -108,7 +109,8 @@ const compacts = (s) => (Array.isArray(s.compact_events) ? s.compact_events.filt
 function displayTitle(s) {
   let title = String(s.title || "")
     .replace(/\s+/g, " ")
-    .trim();
+    .trim()
+    .replace(/^#{1,6}\s+/, "");
   if (!title || /^(Codex|Claude) session [a-f0-9]/.test(title)) return providerName(s.provider) + " session " + s.id.slice(0, 8);
   if (title.startsWith("# Browser comments:")) {
     const comment = title.match(/Comment:\s*([\s\S]+)/);
@@ -350,27 +352,48 @@ function subagentDetails(s) {
     "</div></div>"
   );
 }
+function contextMapMatchesCurrent(s) {
+  const mapped = s.context_map?.observed_context_tokens;
+  const current = s.context_tokens;
+  if (!nonnegative(mapped) || !nonnegative(current) || mapped === 0 || current === 0) return true;
+  return Math.max(mapped, current) <= Math.min(mapped, current) * 1.5;
+}
+function analysisFor(s) {
+  const analysis = s.context_map?.analysis;
+  if (analysis?.state !== "ready" || !Array.isArray(analysis.themes) || !contextMapMatchesCurrent(s)) return null;
+  const technical = analysis.technical_categories;
+  const mapped = s.context_map?.observed_context_tokens;
+  if (Array.isArray(technical) && nonnegative(mapped) && mapped > 0) {
+    const estimated = technical.reduce((sum, row) => sum + (nonnegative(row?.tokens) ? row.tokens : 0), 0);
+    if (estimated > 0 && Math.max(estimated, mapped) > Math.min(estimated, mapped) * 1.5) return null;
+  }
+  return analysis;
+}
+function clampPercent(value) {
+  return nonnegative(value) ? Math.min(100, Math.max(0, value)) : 0;
+}
+function contextWindowSlices(s) {
+  const analysis = analysisFor(s);
+  const used = clampPercent(context(s));
+  const weights = analysis ? [analysis.relevant_percent, analysis.drifting_percent, analysis.stale_percent].map(clampPercent) : [];
+  const rated = weights.reduce((sum, value) => sum + value, 0);
+  const scale = rated > 100 ? 100 / rated : 1;
+  const portions = weights.map((value) => used * value * scale / 100);
+  const slices = analysis
+    ? [['#2c9d75', portions[0]], ['#e5ad34', portions[1]], ['#dc5b65', portions[2]], ['#b9b1c9', Math.max(0, used - portions.reduce((sum, value) => sum + value, 0))], ['#edeaf2', 100 - used]]
+    : [['#6d55aa', used], ['#edeaf2', 100 - used]];
+  let position = 0;
+  const background = 'conic-gradient(' + slices.map(([color, amount]) => {
+    const from = position;
+    position = Math.min(100, position + amount);
+    return color + ' ' + from.toFixed(2) + '% ' + position.toFixed(2) + '%';
+  }).join(',') + ')';
+  return { analysis, used, portions, background };
+}
 function donut(s) {
-  const pct = context(s),
-    r = 15,
-    c = 2 * Math.PI * r;
-  return (
-    '<div class="context-donut" title="' +
-    tokens(s.context_tokens) +
-    " of " +
-    tokens(s.context_window_tokens) +
-    ' context tokens"><svg viewBox="0 0 38 38" aria-hidden="true"><circle class="donut-track" cx="19" cy="19" r="15"/><circle class="donut-fill" style="stroke:' +
-    contextColor(pct) +
-    '" cx="19" cy="19" r="15" stroke-dasharray="' +
-    (c * Math.min(100, pct ?? 0)) / 100 +
-    " " +
-    c +
-    '" transform="rotate(-90 19 19)"/></svg><span style="color:' +
-    contextColor(pct) +
-    '">' +
-    percentage(pct) +
-    "</span></div>"
-  );
+  const slices = contextWindowSlices(s);
+  const label = percentage(slices.used) + ' of context window used' + (slices.analysis ? '; colors show relevance as a share of the full window' : '; relevance not analyzed yet');
+  return '<div class="context-donut" role="img" aria-label="' + esc(label) + '"><i class="context-donut-ring" style="background:' + slices.background + '"></i><span>' + percentage(slices.used) + '<small>window used</small></span></div>';
 }
 function roundedDollarCeiling(value) {
   const total = Math.max(0.01, value),
@@ -704,7 +727,7 @@ function subagentCell(s) {
     '">' +
     live +
     '</strong> live</span>' +
-    (metric.value !== "—" ? '<small title="' + esc(metric.title) + '">' + metric.value + " " + metric.note + "</small>" : "") +
+    (metric.value !== "—" ? '<small title="' + esc(metric.title) + '">' + metric.value + (subagentUsesDollars(s) ? " est. cost" : " est. context") + "</small>" : "") +
     "</div>"
   );
 }
@@ -1484,6 +1507,7 @@ function initialUrl() {
   state.sort = ["activity", "spent", "forecast", "share", "context"].includes(q.get("sort")) ? q.get("sort") : "forecast";
   state.selected = q.get("session");
   state.inspectorTab = q.get("tab") === "context" ? "context" : "overview";
+  if (previewName === "topics") state.topicMode = "topics";
   saveUrl();
 }
 function render() {
@@ -1522,7 +1546,7 @@ function renderFreshness(stale) {
    Codex desktop and Claude desktop. A custom rule
    needs code, so the dashboard stores the wording and hands back a prompt for
    the user's own agent rather than pretending it took effect. */
-const cadenceState = { options: [], cadence: "", custom_rule: "", loaded: false };
+const cadenceState = { options: [], cadence: "", custom_rule: "", context_analysis_enabled: false, context_analysis_consent: "unset", context_analysis_allow_paid: false, loaded: false };
 async function loadPreferences() {
   if (previewMode) return;
   try {
@@ -1531,6 +1555,7 @@ async function loadPreferences() {
     const value = await response.json();
     Object.assign(cadenceState, value, { loaded: true });
     renderCadenceOptions();
+    renderAnalysisToggles();
   } catch {
     return;
   }
@@ -1587,6 +1612,23 @@ function renderCadenceOptions() {
   }
   renderSaveState();
 }
+function renderAnalysisToggles() {
+  const enabled = $("#context-analysis-enabled");
+  const paid = $("#context-analysis-allow-paid");
+  if (enabled) enabled.checked = cadenceState.context_analysis_enabled === true;
+  if (paid) {
+    paid.checked = cadenceState.context_analysis_allow_paid === true;
+    // Paid runs only matter while analysis itself is on.
+    paid.disabled = enabled ? !enabled.checked : true;
+  }
+}
+function toggleAnalysisInfo() {
+  const button = $("#analysis-info");
+  const popover = $("#analysis-popover");
+  if (!button || !popover) return;
+  popover.hidden = !popover.hidden;
+  button.setAttribute("aria-expanded", String(!popover.hidden));
+}
 function openSettings() {
   $("#settings-panel").hidden = false;
   $("#settings-backdrop").hidden = false;
@@ -1618,7 +1660,12 @@ async function saveCadence() {
     $("#cadence-rule")?.focus();
     return;
   }
-  const body = { cadence: cadenceState.cadence, custom_rule: $("#cadence-rule")?.value || "" };
+  const body = {
+    cadence: cadenceState.cadence,
+    custom_rule: $("#cadence-rule")?.value || "",
+    context_analysis_enabled: $("#context-analysis-enabled")?.checked === true,
+    context_analysis_allow_paid: $("#context-analysis-allow-paid")?.checked === true,
+  };
   try {
     const response = await fetch("/api/preferences", {
       method: "POST",
@@ -1645,6 +1692,11 @@ function bindSettings() {
   $("#settings-close")?.addEventListener("click", closeSettings);
   $("#settings-backdrop")?.addEventListener("click", closeSettings);
   $("#cadence-save")?.addEventListener("click", saveCadence);
+  $("#analysis-info")?.addEventListener("click", toggleAnalysisInfo);
+  $("#context-analysis-enabled")?.addEventListener("change", () => {
+    const paid = $("#context-analysis-allow-paid");
+    if (paid) paid.disabled = !$("#context-analysis-enabled").checked;
+  });
   // Copy is the only way out: the prompt is the whole point of the dialog.
   $("#cadence-copy")?.addEventListener("click", async () => {
     const text = $("#cadence-prompt-text").textContent || "";
@@ -1675,6 +1727,7 @@ function bindSettings() {
     // The prompt dialog deliberately ignores Escape.
     if (event.key === "Escape" && !$("#settings-panel").hidden) closeSettings();
   });
+  loadPreferences();
 }
 function bindEvents() {
   $("#freshness").addEventListener("click", refreshNow);
@@ -1694,7 +1747,18 @@ function bindEvents() {
     const provider = target.closest("[data-provider]"),
       session = target.closest("[data-session]"),
       chart = target.closest("[data-chart]"),
-      inspectorTab = target.closest("[data-inspector-tab]");
+      inspectorTab = target.closest("[data-inspector-tab]"),
+      topicMode = target.closest("[data-topic-mode]"),
+      contextExpand = target.closest("[data-context-expand]"),
+      contextClose = target.closest("[data-context-close]");
+    if (contextClose) {
+      document.querySelector("#context-breakdown-dialog")?.close();
+      return;
+    }
+    if (contextExpand) {
+      openContextBreakdown();
+      return;
+    }
     if (provider) {
       axisPos.x = 1;
       axisPos.y = 1;
@@ -1706,6 +1770,10 @@ function bindEvents() {
       state.chart = chart.dataset.chart;
       renderInspector();
       document.querySelector('[data-chart="' + state.chart + '"]')?.focus();
+    } else if (topicMode) {
+      state.topicMode = topicMode.dataset.topicMode;
+      renderInspector();
+      document.querySelector('[data-topic-mode="' + state.topicMode + '"]')?.focus();
     } else if (inspectorTab) {
       state.inspectorTab = inspectorTab.dataset.inspectorTab;
       saveUrl();
@@ -1722,6 +1790,11 @@ function bindEvents() {
     render();
   });
   document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && document.querySelector("#context-breakdown-dialog")?.open) {
+      event.preventDefault();
+      document.querySelector("#context-breakdown-dialog").close();
+      return;
+    }
     if (state.selected) {
       if (event.key === "Escape") {
         event.preventDefault();
@@ -1759,7 +1832,7 @@ async function refresh(triggerCollector = false, healthAlreadyRefreshed = false)
     }
     const health = previewMode || healthAlreadyRefreshed ? Promise.resolve(false) : refreshHealth();
     const headers = state.snapshotEtag ? { "If-None-Match": state.snapshotEtag } : {};
-    const previewPath = previewName === "states" ? "/onboarding-states-preview.json" : "/subscription-preview.json";
+    const previewPath = previewName === "states" ? "/onboarding-states-preview.json" : previewName === "topics" ? "/conversation-topics-preview.json" : "/subscription-preview.json";
     const response = await fetch(previewMode ? previewPath : "/api/live-sessions", { cache: "no-store", headers });
     await health;
     if (response.status === 304) {
@@ -2123,23 +2196,48 @@ function contextGraph(s) {
     .filter((v, i, a) => a.indexOf(v) === i)
     .map((it) => '<text class="cg-xlab" x="' + x(it).toFixed(1) + '" y="' + (H - B + 18) + '">' + it + "</text>")
     .join("");
-  // A compaction is the one moment context legitimately falls; mark it.
-  const drops = rows
-    .map((r, i) => (i && rows[i - 1].context_tokens - r.context_tokens > windowTokens * 0.08 ? r : null))
-    .filter(Boolean)
-    .map((r) => '<line class="cg-compact" x1="' + x(r.iteration).toFixed(1) + '" x2="' + x(r.iteration).toFixed(1) + '" y1="' + T + '" y2="' + (H - B) + '"><title>Context compacted</title></line>')
-    .join("");
+  const compactIterations = [...new Set(contextCompactions(s)
+    .map((event) => event.iteration)
+    .filter((iteration) => finite(iteration) && iteration >= firstIter && iteration <= lastIter))];
+  const lastCompact = compactIterations.at(-1);
+  const compactionLines = compactIterations
+    .map((iteration) => {
+      const row = rows.find((item) => item.iteration === iteration);
+      const point = row ? '<rect class="cg-compact-point" x="' + (x(iteration) - 3).toFixed(1) + '" y="' + (y(row.context_tokens) - 3).toFixed(1) + '" width="6" height="6" rx="1"/>' : '';
+      return '<g role="img" aria-label="Compaction at prompt ' + iteration + '"><title>Compaction at prompt ' + iteration + '</title><line class="cg-compact' + (iteration === lastCompact ? ' latest' : '') + '" x1="' + x(iteration).toFixed(1) + '" x2="' + x(iteration).toFixed(1) + '" y1="' + T + '" y2="' + (H - B) + '"/>' + point + '</g>';
+    }).join("");
+  const analysis = s.context_map?.analysis;
+  const runs = Array.isArray(analysis?.run_events) ? analysis.run_events : analysis?.last_run ? [analysis.last_run] : [];
+  const analysisIterations = runs.map((run) => {
+    if (finite(run?.iteration) && run.iteration > 0) return run.iteration;
+    const started = Date.parse(run?.started_at || run?.completed_at);
+    if (!Number.isFinite(started)) return null;
+    const matching = rows.filter((row) => Date.parse(row.started_at) <= started);
+    return matching.length ? matching[matching.length - 1].iteration : firstIter;
+  }).filter((iteration) => finite(iteration) && iteration >= firstIter && iteration <= lastIter);
+  const analysisCounts = new Map();
+  for (const iteration of analysisIterations) analysisCounts.set(iteration, (analysisCounts.get(iteration) || 0) + 1);
+  const lastAnalysis = analysisIterations.at(-1);
+  const analysisLines = [...analysisCounts]
+    .map(([iteration, count]) => {
+      const label = count + (count === 1 ? ' AI analysis' : ' AI analyses') + ' after prompt ' + iteration;
+      return '<g class="cg-analysis" role="img" aria-label="' + label + '"><title>' + label + '</title><line x1="' + x(iteration).toFixed(1) + '" x2="' + x(iteration).toFixed(1) + '" y1="' + T + '" y2="' + (H - B) + '"/><circle cx="' + x(iteration).toFixed(1) + '" cy="' + T + '" r="3"/>' + '</g>';
+    }).join("");
+  const key = '<figcaption class="context-graph-key">' +
+    (compactIterations.length ? '<span><i class="cg-compact-swatch"></i><strong>Compaction</strong><small>last at prompt ' + lastCompact + '</small></span>' : '') +
+    (analysisIterations.length ? '<span><i class="cg-analysis-swatch"></i><strong>AI analysis</strong><small>' + analysisIterations.length + (analysisIterations.length === 1 ? ' run' : ' runs') + ' · last after prompt ' + lastAnalysis + '</small></span>' : '') +
+    '</figcaption>';
   const end = points[points.length - 1];
   const nowPct = (rows[rows.length - 1].context_tokens / windowTokens) * 100;
   return (
-    '<figure class="context-graph"><svg viewBox="0 0 ' + W + " " + H + '" role="img" aria-label="Context used against prompt number">' +
-    grid + drops +
-    '<path class="cg-area" d="' + area + '"/><path class="cg-line" d="' + line + '"/>' +
+    '<figure class="context-graph">' + key + '<svg viewBox="0 0 ' + W + " " + H + '" role="img" aria-label="Context used against prompt number; dotted vertical lines mark compactions and green vertical lines mark AI analyses">' +
+    grid + '<path class="cg-area" d="' + area + '"/>' + compactionLines + analysisLines +
+    '<path class="cg-line" d="' + line + '"/>' +
     '<circle class="cg-end" cx="' + end[0].toFixed(1) + '" cy="' + end[1].toFixed(1) + '" r="3.5"/>' +
     '<text class="cg-end-label" x="' + Math.min(end[0] + 8, W - R - 30) + '" y="' + Math.max(end[1] - 8, T + 10) + '">' + percentage(nowPct) + "</text>" +
     ticks +
     '<text class="cg-axis" x="' + ((L + W - R) / 2) + '" y="' + (H - 2) + '">Prompt</text>' +
-    "</svg></figure>"
+    '</svg></figure>'
   );
 }
 function tokenBreakdown(s) {
@@ -2160,34 +2258,18 @@ function tokenBreakdown(s) {
     '</div><p class="detail-foot" style="margin-top:8px">Token traffic across the recorded session. Cache reads can repeat the same tokens; this is not a breakdown of the current context.</p>'
   );
 }
-function subscriptionStats(s, pct) {
+function subscriptionStats(s) {
   const ahead = shareAhead(s);
   const share = shareOf(s);
   const window = quotaWindowName(s);
   const providerState = providerQuotaState(s.provider, accountQuotaFor(s));
-  const subscription = providerState.kind !== "ready"
-    ? dataStateMarkup(providerState)
-    : s.usage_mode === "included"
-    ? "Included"
-    : dataStateMarkup(sessionDataState(s, "plan"));
-  const next = providerState.kind !== "ready"
-    ? dataStateMarkup(providerState)
-    : finite(ahead)
-    ? "+" + percentage(ahead) + " of " + window + " limit"
-    : dataStateMarkup(sessionDataState(s, "forecast"));
-  const responsibility = providerState.kind !== "ready"
-    ? dataStateMarkup(providerState)
-    : finite(share)
-    ? percentage(share) + " of " + window + " limit"
-    : dataStateMarkup(sessionDataState(s, "share"));
-  return (
-    '<div class="inspector-stats subscription-stats">' +
-    '<div><span>Subscription</span><strong>' + subscription + "</strong></div>" +
-    '<div><span>Next 10 prompts</span><strong>' + next + "</strong></div>" +
-    '<div><span>Responsible for</span><strong>' + responsibility + "</strong></div>" +
-    '<div><span>Context</span><strong>' + percentage(pct) + "</strong><small>" + tokens(s.context_tokens) + " / " + tokens(s.context_window_tokens) + "</small></div>" +
-    "</div>"
-  );
+  const shareValue = providerState.kind !== "ready" ? dataStateMarkup(providerState) : finite(share) ? percentage(share) : dataStateMarkup(sessionDataState(s, "share"));
+  const nextValue = providerState.kind !== "ready" ? dataStateMarkup(providerState) : finite(ahead) ? "+" + percentage(ahead) : dataStateMarkup(sessionDataState(s, "forecast"));
+  return '<div class="inspector-stats subscription-stats">' +
+    '<div><span>Prompts</span><strong>' + count(s) + '</strong><small>in this session</small></div>' +
+    '<div><span>Session share</span><strong>' + shareValue + '</strong><small>of your ' + window + ' limit</small></div>' +
+    '<div><span>Next 10 prompts</span><strong>' + nextValue + '</strong><small>of your ' + window + ' limit</small></div>' +
+    '</div>';
 }
 const contextCategoryLabels = {
   prompts: "User prompts",
@@ -2212,56 +2294,159 @@ const contextCategoryLabels = {
 function contextCategoryLabel(category) {
   return contextCategoryLabels[category] || "Other context";
 }
-const contextCategoryColors = {
-  previous_compact: 0,
-  repository_and_files: 1,
-  assistant_output: 2,
-  skills_and_instructions: 3,
-  prompts: 4,
-  file_changes: 5,
-  documents: 3,
-  local_system_data: 2,
-  local_logs: 4,
-  tests_and_builds: 1,
-  images: 5,
-  web_and_external: 2,
-  external_service_data: 3,
-  production_systems: 5,
-  subagent_handoffs: 2,
-};
-function contextCategoryColor(category) {
-  return contextCategoryColors[category] ?? 0;
-}
-function contextMapPanel(s) {
-  const map = s.context_map;
-  if (!map || map.state !== "ready" || !map.categories || typeof map.categories !== "object") {
-    return '<div class="context-map-empty"><strong>Mapping context</strong><p>Konvu is processing this session’s transcript. The breakdown appears after the next complete model checkpoint.</p></div>';
+function analysisUsageText(session) {
+  const usage = session.analysis_usage;
+  if (!usage || !Number.isInteger(usage.run_count) || usage.run_count < 1) return '';
+  const prefix = 'AI analysis of this session: ' + usage.run_count + (usage.run_count === 1 ? ' run' : ' runs');
+  const dollars = (value) => value < 0.0001 ? '<$0.0001' : '$' + value.toFixed(value < 0.01 ? 4 : 2);
+  if (showsMoney(session)) {
+    if (nonnegative(usage.spending_usd) && usage.spending_usd > 0 && usage.unknown_mode_run_count === 0) {
+      return prefix + ' · ~' + dollars(usage.spending_usd) + ' paid';
+    }
+    if (nonnegative(usage.cost_usd) && usage.cost_usd > 0 && usage.unpriced_run_count === 0) {
+      return prefix + ' · ~' + dollars(usage.cost_usd) + ' at API rates (billing unconfirmed)';
+    }
+    if (usage.included_run_count === usage.run_count) return prefix + ' · included in plan';
+    return prefix + ' · dollar estimate pending';
   }
-  const observed = nonnegative(map.observed_context_tokens) ? map.observed_context_tokens : s.context_tokens;
-  if (!nonnegative(observed) || observed <= 0) return '<div class="context-map-empty"><strong>Mapping context</strong><p>Waiting for a provider context checkpoint.</p></div>';
-  const entries = Object.entries(map.categories)
-    .filter(([, value]) => nonnegative(value) && value > 0)
-    .sort((a, b) => b[1] - a[1]);
-  const categorized = entries.reduce((sum, entry) => sum + entry[1], 0);
-  if (categorized < observed) entries.push(["provider_internal", observed - categorized]);
-  const composition = entries
-    .map(([category, value]) =>
-      '<i class="context-map-segment segment-' + contextCategoryColor(category) + (category === "provider_internal" ? " remainder" : "") + '" style="width:' + Math.min(100, (value / observed) * 100) + '%" title="' + esc(contextCategoryLabel(category)) + ": " + tokens(value) + '"></i>',
-    )
-    .join("");
-  const categoryRows = entries
-    .map(([category, value]) =>
-      '<div class="context-map-row' + (category === "provider_internal" ? " remainder" : "") + '"><div><i class="segment-' + contextCategoryColor(category) + '"></i><span>' + esc(contextCategoryLabel(category)) + '</span><b>' + tokens(value) + " · " + percentage((value / observed) * 100) + '</b></div><span><i class="segment-' + contextCategoryColor(category) + '" style="width:' + Math.min(100, (value / observed) * 100) + '%"></i></span></div>',
-    )
-    .join("");
-  const mappedPercent = (entries.reduce((sum, entry) => sum + entry[1], 0) / observed) * 100;
-  return (
-    '<div class="context-map-summary"><div><span>Current context</span><strong>' + tokens(observed) + '</strong></div><div><span>Accounted for</span><strong>' + percentage(mappedPercent) + '</strong></div><div><span>Iterations</span><strong>' + (Number.isInteger(map.iteration) ? map.iteration : "—") + '</strong></div><div><span>Compactions</span><strong>' + (Number.isInteger(map.epoch_count) ? Math.max(0, map.epoch_count - 1) : "—") + '</strong></div></div>' +
-    '<div class="section-title"><h3>What fills this context</h3><span class="tiny">Reconciled to provider total</span></div>' +
-    '<div class="context-map-composition" role="img" aria-label="Current context composition">' + composition + '</div>' +
-    '<div class="context-map-rows">' + categoryRows + '</div>' +
-    '<p class="detail-foot">Every token is reconciled to the provider total. Provider-managed context contains hidden instructions, retained reasoning, framing, and any remaining estimation error.</p>'
-  );
+  const period = session.provider === 'claude' ? 'five_hour' : 'weekly';
+  const limitName = session.provider === 'claude' ? '5-hour' : 'weekly';
+  const limit = Array.isArray(usage.limit) ? usage.limit.find((row) => row?.period === period) : null;
+  const measured = nonnegative(limit?.measured_percent) ? limit.measured_percent : 0;
+  const pending = limit?.unreported;
+  if (measured > 0) {
+    const percent = measured < 0.01 ? measured.toFixed(3) + '%' : measured < 0.1 ? measured.toFixed(2) + '%' : percentage(measured);
+    return prefix + ' · ' + percent + ' of ' + limitName + ' limit' + (pending ? ' measured so far' : '');
+  }
+  if (nonnegative(pending?.below_percent) && nonnegative(pending?.share_of_unreported_work) && pending.share_of_unreported_work > 0) {
+    const upper = Math.max(0.01, Math.ceil(pending.below_percent * pending.share_of_unreported_work * 100) / 100);
+    return prefix + ' · <' + upper.toFixed(2) + '% of ' + limitName + ' limit, pending';
+  }
+  return prefix + ' · usage share pending';
+}
+function relevanceLegend(analysis) {
+  if (!analysis) return '<span class="relevance-occupied"><i></i>Used</span>';
+  return '<span class="relevance-good"><i></i>Relevant</span><span class="relevance-drift" title="Partly useful to the current focus"><i></i>Drifting</span><span class="relevance-stale" title="Superseded or no longer useful"><i></i>Stale</span><span class="relevance-unknown"><i></i>Unreviewed</span>';
+}
+function contextHero(s) {
+  const { analysis, used, portions, background } = contextWindowSlices(s);
+  const ringLabel = percentage(used) + ' of the full context window used' + (analysis ? '; ' + portions.map((value, index) => percentage(value) + ' ' + ['relevant', 'drifting', 'stale'][index]).join(', ') + ' of the full window' : '; relevance not rated');
+  const ring = '<div class="context-hero-ring" role="img" aria-label="' + esc(ringLabel) + '" style="background:' + background + '"><div class="context-hero-ring-center"><strong>' + percentage(used) + '</strong><span>window used</span></div></div>';
+  const parts = analysis ? [['Relevant', portions[0], 'relevant', 'Useful to the current focus'], ['Drifting', portions[1], 'drifting', 'Only partly useful now'], ['Stale', portions[2], 'stale', 'No longer useful']] : [];
+  const unreviewed = used - portions.reduce((sum, value) => sum + value, 0);
+  if (analysis && used > 0 && unreviewed / used * 100 > 0.1) parts.push(['Unreviewed', unreviewed, 'unreviewed', 'Not rated by AI']);
+  const legend = parts.map(([label, value, kind, meaning]) => '<div class="context-mix-row ' + kind + '" title="' + esc(meaning) + '"><i></i><span>' + label + '</span><strong>' + percentage(used ? value / used * 100 : 0) + '</strong></div>').join('');
+  return '<div class="context-hero"><div class="context-hero-main">' + ring + '<div class="context-hero-copy">' + (analysis ? '<div class="context-mix-scope">Of the context in use</div><div class="context-mix-list">' + legend + '</div>' : '<p class="context-rating-pending">AI relevance analysis is pending. The ring shows how much of the window is occupied.</p>') + '</div></div></div>';
+}
+function contextFocus(s) {
+  const focus = analysisFor(s)?.current_intent;
+  if (!focus) return '';
+  return '<div class="context-focus-line"><span>Current focus</span><p title="' + esc(focus) + '">' + esc(focus) + '</p></div>';
+}
+function topicTiles(rows, contextTokens, analyzed, sourceTypes) {
+  if (!rows.length) return '<p class="context-topic-empty">No context sources were recorded for this checkpoint.</p>';
+  function tile(row) {
+    const share = row.tokens / Math.max(1, contextTokens) * 100;
+    const shareLabel = share > 0 && share < 0.1 ? (share < 0.01 ? share.toFixed(3) : share.toFixed(2)) + '%' : percentage(share);
+    const label = row.label || (sourceTypes ? contextCategoryLabel(row.id) : 'Other work');
+    const relevant = nonnegative(row.relevant_tokens) ? row.relevant_tokens : 0;
+    const drifting = nonnegative(row.drifting_tokens) ? row.drifting_tokens : 0;
+    const stale = nonnegative(row.stale_tokens) ? row.stale_tokens : 0;
+    const rated = analyzed && relevant + drifting + stale > 0;
+    const stops = [relevant, drifting, stale].map((value) => row.tokens > 0 ? Math.min(100, value / row.tokens * 100) : 0);
+    const [good, drift, old] = stops;
+    const mix = rated ? 'conic-gradient(#2c9d75 0 ' + good.toFixed(2) + '%,#e5ad34 ' + good.toFixed(2) + '% ' + (good + drift).toFixed(2) + '%,#dc5b65 ' + (good + drift).toFixed(2) + '% ' + Math.min(100, good + drift + old).toFixed(2) + '%,#b9b1c9 ' + Math.min(100, good + drift + old).toFixed(2) + '% 100%)' : 'conic-gradient(#b9b1c9 0 100%)';
+    const title = label + (row.other_count ? ' (' + row.other_count + ' more)' : '') + ' · ' + shareLabel + ' of used context';
+    const other = row.id === 'others';
+    const tag = other ? 'button' : 'article';
+    const action = other ? '<span class="context-others-action">View all ' + (sourceTypes ? 'sources' : 'topics') + ' <span aria-hidden="true">→</span></span>' : '';
+    const aria = other ? 'View all ' + row.all_count + ' ' + (sourceTypes ? 'source types' : 'conversation topics') + '. ' + title : title;
+    const status = rated ? '<div class="context-topic-status"><span class="relevant">' + percentage(good) + ' relevant</span><span class="drifting">' + percentage(drift) + ' drifting</span><span class="stale">' + percentage(old) + ' stale</span></div>' : '<p class="context-topic-unrated">Relevance pending</p>';
+    return '<' + tag + (other ? ' type="button" data-context-expand="true"' : '') + ' class="context-topic-tile' + (other ? ' context-topic-others' : '') + '" title="' + esc(title) + '" aria-label="' + esc(aria) + '"><div class="context-topic-card-top"><span class="context-topic-card-share">' + shareLabel + '<small>of used context</small></span><span class="context-topic-mini-ring" role="img" aria-label="' + esc(rated ? stops.map((value, index) => percentage(value) + ' ' + ['relevant', 'drifting', 'stale'][index]).join(', ') : 'Relevance pending') + '" style="background:' + mix + '"><i></i></span></div><h4>' + esc(label) + '</h4>' + status + action + '</' + tag + '>';
+  }
+  return '<div class="context-topic-mosaic" role="group" aria-label="Share of used context by ' + (sourceTypes ? 'source type' : 'conversation topic') + '">' + rows.map(tile).join('') + '</div>';
+}
+function contextTopics(s, full = false) {
+  const map = s.context_map;
+  if (!map || map.state !== 'ready' || !map.categories || typeof map.categories !== 'object') return '<section class="context-section context-topic-section"><h3>Source types</h3><p class="context-topic-empty">Waiting for the next complete provider checkpoint.</p></section>';
+  if (!contextMapMatchesCurrent(s)) return '<section class="context-section context-topic-section"><h3>Source types</h3><p class="context-topic-empty">Waiting for an updated breakdown.</p></section>';
+  const observed = nonnegative(map.observed_context_tokens) ? map.observed_context_tokens : 0;
+  const sources = Object.entries(map.categories).filter(([, value]) => nonnegative(value) && value > 0).map(([id, value]) => ({ id, tokens: value }));
+  const known = sources.reduce((sum, row) => sum + row.tokens, 0);
+  if (observed > known) sources.push({ id: 'provider_internal', tokens: observed - known });
+  const analysis = analysisFor(s);
+  const mode = analysis?.themes?.length && state.topicMode === 'topics' ? 'topics' : 'sources';
+  const technical = Array.isArray(analysis?.technical_categories) ? analysis.technical_categories.filter((row) => row && nonnegative(row.tokens) && row.tokens > 0) : [];
+  const ratedSources = mode === 'sources' && technical.length > 0;
+  const rows = mode === 'topics' ? [...analysis.themes] : ratedSources ? [...technical] : sources;
+  const assigned = rows.reduce((sum, row) => sum + row.tokens, 0);
+  if (mode === 'sources' && observed > assigned) rows.push({ id: 'provider_internal', label: 'Other context', tokens: observed - assigned });
+  const unassigned = mode === 'topics' ? Math.max(0, observed - assigned) : 0;
+  rows.sort((a, b) => b.tokens - a.tokens);
+  const title = mode === 'topics' ? 'Conversation topics' : 'Source types';
+  function preview(limit) {
+    const hidden = rows.slice(limit);
+    if (!hidden.length) return rows;
+    return [...rows.slice(0, limit), {
+      id: 'others', label: 'Others', other_count: hidden.length, all_count: rows.length,
+      tokens: hidden.reduce((sum, row) => sum + row.tokens, 0),
+      relevant_tokens: hidden.reduce((sum, row) => sum + (nonnegative(row.relevant_tokens) ? row.relevant_tokens : 0), 0),
+      drifting_tokens: hidden.reduce((sum, row) => sum + (nonnegative(row.drifting_tokens) ? row.drifting_tokens : 0), 0),
+      stale_tokens: hidden.reduce((sum, row) => sum + (nonnegative(row.stale_tokens) ? row.stale_tokens : 0), 0),
+    }];
+  }
+  const shown = full ? rows : preview(6);
+  const caption = analysis ? 'Each card shows its share of used context. Its ring shows how much remains relevant, drifting, or stale.' : 'Source sizes come from recorded activity. Relevance appears after AI enrichment.';
+  const note = unassigned > 0 ? '<p class="context-topic-unassigned-note">' + percentage(unassigned / observed * 100) + ' of used context has no AI topic; it remains included in the context ring above.</p>' : '';
+  return '<section class="context-section context-topic-section ' + (mode === 'topics' ? 'mode-topics' : 'mode-sources') + '">' + (full ? '' : '<div class="context-topics-head"><h3>' + title + '</h3><p>' + caption + '</p></div>') + topicTiles(shown, Math.max(observed, assigned), mode === 'topics' || ratedSources, mode === 'sources') + note + '</section>';
+}
+function openContextBreakdown() {
+  const existing = document.querySelector('#context-breakdown-dialog');
+  if (existing) { existing.querySelector('[data-context-close]')?.focus(); return; }
+  const session = allRows().find((row) => keyOf(row) === state.selected || row.id === state.selected);
+  if (!session) return;
+  const mode = analysisFor(session)?.themes?.length && state.topicMode === 'topics' ? 'Conversation topics' : 'Source types';
+  const dialog = document.createElement('dialog');
+  dialog.id = 'context-breakdown-dialog';
+  dialog.setAttribute('aria-labelledby', 'context-breakdown-title');
+  dialog.innerHTML = '<div class="context-modal-content context-visual"><div class="context-modal-head"><h2 id="context-breakdown-title">All ' + mode.toLowerCase() + '</h2><button type="button" class="context-modal-close" data-context-close="true" aria-label="Close full context view">×</button></div>' + contextTopics(session, true) + '</div>';
+  document.body.append(dialog);
+  dialog.addEventListener('click', (event) => { if (event.target === dialog) dialog.close(); });
+  dialog.addEventListener('close', () => dialog.remove(), { once: true });
+  dialog.showModal();
+  dialog.querySelector('[data-context-close]')?.focus();
+}
+function contextTopicChooser(s) {
+  const analysis = analysisFor(s);
+  if (!analysis?.themes?.length) return '';
+  const mode = state.topicMode === 'topics' ? 'topics' : 'sources';
+  return '<div class="context-topic-chooser" role="group" aria-label="Context grouping"><button type="button" data-topic-mode="topics" aria-pressed="' + String(mode === 'topics') + '">Conversation topics</button><button type="button" data-topic-mode="sources" aria-pressed="' + String(mode === 'sources') + '">Source types</button></div>';
+}
+function contextTimeline(s) {
+  const analysis = analysisFor(s);
+  if (!analysis) return '';
+  const phases = Array.isArray(analysis.phases) ? analysis.phases : [];
+  const focus = analysis.current_intent ? '<div class="context-work-focus"><span>Now</span><strong>' + esc(analysis.current_intent) + '</strong></div>' : '';
+  if (!phases.length && !focus) return '';
+  const lastPrompt = Math.max(1, s.context_map?.iteration || 1, ...phases.map((phase) => Number.isInteger(phase.end_iteration) ? phase.end_iteration : 0));
+  const segments = phases.map((phase, index) => {
+    const from = Number.isInteger(phase.start_iteration) ? Math.max(1, phase.start_iteration) : 1;
+    const to = Number.isInteger(phase.end_iteration) ? Math.max(from, phase.end_iteration) : lastPrompt;
+    return { label: phase.label || 'Other work', summary: phase.summary || '', from, to, index };
+  });
+  const lastEnd = Math.max(0, ...segments.map((segment) => segment.to));
+  if (lastEnd < lastPrompt) segments.push({ label: 'Recent prompts', summary: '', from: lastEnd + 1, to: lastPrompt, index: segments.length });
+  const track = segments.map((segment) => {
+    const length = Math.max(1, segment.to - segment.from + 1);
+    return '<div class="context-journey-segment phase-' + Math.min(segment.index, 5) + (segment.to === lastPrompt ? ' current' : '') + (length / lastPrompt < 0.07 ? ' narrow' : '') + '" style="left:' + ((segment.from - 1) / lastPrompt * 100).toFixed(2) + '%;width:' + (length / lastPrompt * 100).toFixed(2) + '%" title="' + esc(segment.label + ' · prompts ' + segment.from + '–' + segment.to + (segment.summary ? ' · ' + segment.summary : '')) + '"><span>' + String(segment.index + 1).padStart(2, '0') + '</span></div>';
+  }).join('');
+  const key = segments.map((segment) => '<div class="context-journey-item"><span class="context-journey-index phase-' + Math.min(segment.index, 5) + '">' + String(segment.index + 1).padStart(2, '0') + '</span><strong>' + esc(segment.label) + '</strong></div>').join('');
+  return '<section class="context-section context-journey"><div class="context-section-head"><h3>Work so far</h3></div>' + focus + (segments.length ? '<div class="context-journey-axis"><span>First prompt</span><span>Now · prompt ' + lastPrompt + '</span></div><div class="context-journey-track" role="img" aria-label="Work topics across ' + lastPrompt + ' prompts">' + track + '</div><div class="context-journey-key">' + key + '</div>' : '') + '</section>';
+}
+function contextAnalysisState(s) {
+  if (analysisFor(s)) return '<p class="context-analysis-note">' + esc(analysisUsageText(s)) + '</p>';
+  const retrying = s.context_map?.analysis?.state === 'retrying';
+  return '<p class="context-analysis-note">' + (retrying ? 'The latest AI analysis was incomplete and will retry. ' : 'AI enrichment has not completed for this session. ') + esc(analysisUsageText(s)) + '</p>';
 }
 function renderInspector() {
   const panel = $("#inspector"),
@@ -2278,50 +2463,24 @@ function renderInspector() {
     }
     return;
   }
-  const a = assess(s),
-    pct = context(s),
-    rows = series(s),
+  const rows = series(s),
     last = rows.at(-1),
     scroll = $("#inspector-body").scrollTop;
   const included = !showsMoney(s);
   const stats = included
-    ? subscriptionStats(s, pct)
-    : '<div class="inspector-stats"><div><span>Recorded spend</span><strong>' + money(cost(s)) + "</strong><small>" + count(s) + " prompts</small></div><div><span>" + (last?.completed === false ? "Current prompt" : "Last prompt") + "</span><strong>" + money(last?.priced === false ? null : last?.cost_usd) + "</strong><small>" + (last?.completed === false ? "still accumulating" : "recorded cost") + "</small></div><div><span>Next 10 prompts</span><strong>" + additional(forecast(s)) + "</strong><small>additional estimate</small></div><div><span>Context</span><strong>" + percentage(pct) + "</strong><small>" + tokens(s.context_tokens) + " / " + tokens(s.context_window_tokens) + "</small></div></div>";
-  const overview =
-    stats +
-    (!included && a.severity ? '<div class="inspector-signal"><strong>' + esc(a.action) + "</strong><p>" + esc(a.evidence) + "</p></div>" : "") +
-    (included ? '<div class="section-title"><h3>How context fills up</h3><span class="tiny">Share of the window, prompt by prompt</span></div>' + contextGraph(s) : "") +
-    (!included ? '<div class="section-title"><h3>How this session is spending</h3><div class="mini-tabs"><button data-chart="cumulative" class="' +
-    (state.chart === "cumulative" ? "on" : "") +
-    '">Cumulative</button><button data-chart="prompt" class="' +
-    (state.chart === "prompt" ? "on" : "") +
-    '">Per prompt</button></div></div>' + sessionGraph(s) : "") +
-    '<div class="section-title"><h3>Where the tokens went</h3><span class="tiny">Recorded token traffic</span></div>' +
-    tokenBreakdown(s) +
-    subagentDetails(s);
-  $("#inspector-body").innerHTML =
-    '<span class="eyebrow">' +
-    providerName(s.provider) +
-    " · " +
-    esc(s.client || "local") +
-    '</span><h2 class="inspector-title" id="inspector-title">' +
-    esc(displayTitle(s)) +
-    '</h2><div class="inspector-meta">' +
-    esc(s.model || "Model unavailable") +
-    " · " +
-    esc(effort(s) ? effort(s) + " effort" : "Effort not recorded") +
-    "<br>" +
-    activity(s).label +
-    " · last activity " +
-    age(s.last_activity_at) +
-    " ago · " +
-    age(startTime(s)) +
-    ' old</div><div class="inspector-tabs" role="tablist" aria-label="Session details"><button type="button" role="tab" data-inspector-tab="overview" aria-selected="' +
-    String(state.inspectorTab === "overview") +
-    '" class="' + (state.inspectorTab === "overview" ? "on" : "") + '">Overview</button><button type="button" role="tab" data-inspector-tab="context" aria-selected="' +
-    String(state.inspectorTab === "context") +
-    '" class="' + (state.inspectorTab === "context" ? "on" : "") + '">Context map</button></div>' +
-    (state.inspectorTab === "context" ? contextMapPanel(s) : overview);
+    ? subscriptionStats(s)
+    : '<div class="inspector-stats"><div><span>Prompts</span><strong>' + count(s) + '</strong><small>in this session</small></div><div><span>Recorded spend</span><strong>' + money(cost(s)) + '</strong><small>' + (last?.completed === false ? 'Current prompt ' : 'Last prompt ') + money(last?.priced === false ? null : last?.cost_usd) + (last?.completed === false ? ' so far' : '') + '</small></div><div><span>Next 10 prompts</span><strong>' + additional(forecast(s)) + '</strong><small>estimated additional</small></div></div>';
+  const agents = Array.isArray(s.subagents) ? s.subagents : [];
+  const history = '<section class="context-section context-history"><div class="context-section-head"><div><h3>How context fills up</h3></div></div>' + contextGraph(s) + '</section>';
+  const analysisCost = analysisUsageText(s);
+  const content = '<section class="context-visual"><div class="context-visual-head"><h3>Current context</h3>' + contextTopicChooser(s) + '</div><div class="context-visual-body">' + contextHero(s) + contextTopics(s) + '</div>' + (analysisCost ? '<p class="context-analysis-usage">' + esc(analysisCost) + '</p>' : '') + '</section>' + contextTimeline(s) + history +
+    '<details id="subagent-section" class="inspector-extra"><summary>Subagent activity <span>' + agents.length + ' spawned · ' + agents.filter((agent) => agent.live === true).length + ' live</span></summary>' + (subagentDetails(s) || '<p>No subagents were recorded.</p>') + '</details>' +
+    '<details class="inspector-extra"><summary>Recorded token traffic</summary>' + tokenBreakdown(s) + '</details>';
+  const sessionActivity = activity(s);
+  const activityText = sessionActivity.kind === 'running' ? '<span class="inspector-live">Running</span><span>Active ' + age(s.last_activity_at) + ' ago</span>' : '<span>Last activity ' + age(s.last_activity_at) + ' ago</span>';
+  $("#inspector-body").innerHTML = (previewName === "topics" ? '<div class="topic-demo-label">Demo session · sample data <a href="/">Live dashboard</a></div>' : '') + '<h2 class="inspector-title" id="inspector-title" title="' + esc(displayTitle(s)) + '">' + esc(displayTitle(s)) + '</h2>' +
+    '<div class="inspector-meta">' + activityText + '<span>' + providerName(s.provider) + ' ' + esc(s.client || 'local') + '</span><span>' + esc(s.model || 'Model unavailable') + (effort(s) ? ' · ' + esc(effort(s)) + ' effort' : '') + '</span><span>Started ' + age(startTime(s)) + ' ago</span>' + (included ? '<span>Included plan</span>' : '') + '</div>' +
+    '<div class="inspector-top-details">' + stats + '</div>' + content;
   $("#inspector-body").scrollTop = scroll;
   if (!wasOpen) $("#close").focus();
 }
@@ -2349,6 +2508,7 @@ async function openSession(id, opener) {
   state.selected = id;
   state.chart = "cumulative";
   state.inspectorTab = "overview";
+  state.topicMode = previewName === "topics" ? "topics" : "sources";
   $("#inspector-body").scrollTop = 0;
   saveUrl();
   renderInspector();
