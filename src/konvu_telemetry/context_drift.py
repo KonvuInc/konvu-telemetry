@@ -297,7 +297,11 @@ def _claude_usage(raw: object) -> dict[str, int]:
                 ("cacheReadInputTokens", "cache_read_input_tokens"),
             ):
                 value = entry.get(source)
-                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                if (
+                    isinstance(value, int)
+                    and not isinstance(value, bool)
+                    and value >= 0
+                ):
                     usage[key] = usage.get(key, 0) + value
     # The CLI writes its prompt cache at the one-hour rate, which token counts alone miss.
     cost = _number(raw.get("total_cost_usd"))
@@ -493,7 +497,9 @@ class LocalCliAnalysisRunner:
             result, model, usage, error = None, "unknown", {}, "timeout"
         except _CliFailure as failure:
             # Keep metered usage so a failed run still counts against its session.
-            model = CLAUDE_ANALYSIS_MODEL if provider == "claude" else CODEX_ANALYSIS_MODEL
+            model = (
+                CLAUDE_ANALYSIS_MODEL if provider == "claude" else CODEX_ANALYSIS_MODEL
+            )
             result, usage, error = None, failure.usage, "cli_failed"
         except (OSError, ValueError, json.JSONDecodeError) as failure:
             result, model, usage, error = (
@@ -1060,7 +1066,9 @@ def _event_targets(
         target = _call_target(
             _call_input(
                 _read_record(
-                    source_path, _integer(call_range[0], -1), _integer(call_range[1], -1)
+                    source_path,
+                    _integer(call_range[0], -1),
+                    _integer(call_range[1], -1),
                 ),
                 parts[2] if len(parts) > 3 else None,
             )
@@ -1085,9 +1093,7 @@ def _touches(
         return {Path(key).name}, event.get("category") == "file_changes"
     if kind != "command":
         return set(), False
-    names = {
-        Path(path).name for path in _COMMAND_PATH.findall(key) if ".." not in path
-    }
+    names = {Path(path).name for path in _COMMAND_PATH.findall(key) if ".." not in path}
     return names, bool(names) and _WRITE_COMMAND.search(key) is not None
 
 
@@ -1110,7 +1116,9 @@ def _superseded_hints(
             continue
         iteration = _integer(event.get("iteration"))
         names, _ = _touches(event, target)
-        rerun = [step[0] for step in later_steps if step[0] > iteration and step[1] == target]
+        rerun = [
+            step[0] for step in later_steps if step[0] > iteration and step[1] == target
+        ]
         edits = {
             name: step[0]
             for step in later_steps
@@ -1168,13 +1176,13 @@ def _payload(
                 if score is not None and 0.4 <= score <= 0.7
             ]
             if scores:
-                uncertain_groups.append((min(abs(score - 0.5) for score in scores), group))
+                uncertain_groups.append(
+                    (min(abs(score - 0.5) for score in scores), group)
+                )
     uncertain_groups.sort(
         key=lambda candidate: (
             candidate[0],
-            -sum(
-                _integer(event.get("estimated_tokens")) for event in candidate[1][1]
-            ),
+            -sum(_integer(event.get("estimated_tokens")) for event in candidate[1][1]),
         )
     )
     if backfill:
@@ -1207,14 +1215,17 @@ def _payload(
         : min(MAX_RECENT_ANALYSIS_ITEMS, selection_limit)
     ]
     recent_keys = {group[0] for group in recent}
-    selected = recent + sorted(
-        (group for group in candidates if group[0] not in recent_keys),
-        key=lambda group: (
-            sum(_integer(event.get("estimated_tokens")) for event in group[1]),
-            group[0][0],
-        ),
-        reverse=True,
-    )[: selection_limit - len(recent)]
+    selected = (
+        recent
+        + sorted(
+            (group for group in candidates if group[0] not in recent_keys),
+            key=lambda group: (
+                sum(_integer(event.get("estimated_tokens")) for event in group[1]),
+                group[0][0],
+            ),
+            reverse=True,
+        )[: selection_limit - len(recent)]
+    )
     selected.sort(key=lambda group: group[0][0])
     items: list[dict[str, object]] = []
     group_members: dict[str, list[AnalysisMember]] = {}
@@ -1571,7 +1582,9 @@ def _public_summary(
             }
             for run in runs
             if isinstance(run, dict)
-        ] if isinstance(runs, list) else [],
+        ]
+        if isinstance(runs, list)
+        else [],
     }
     return summary
 
@@ -2146,7 +2159,9 @@ class ContextDriftScheduler:
                     cost_usd=(
                         reported / 1_000_000
                         if isinstance(
-                            reported := (run.get("usage") or {}).get("reported_cost_microusd"),
+                            reported := (run.get("usage") or {}).get(
+                                "reported_cost_microusd"
+                            ),
                             int,
                         )
                         else _analysis_cost(provider, model, token_usage)

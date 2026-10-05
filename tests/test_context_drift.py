@@ -228,7 +228,11 @@ class ContextDriftTests(unittest.TestCase):
         analysis = {
             "analyzed_iteration": 10,
             "runs": [
-                {"started_at": iso(NOW - 20), "iteration": 5, "usage": {"input_tokens": 10}},
+                {
+                    "started_at": iso(NOW - 20),
+                    "iteration": 5,
+                    "usage": {"input_tokens": 10},
+                },
                 {"started_at": iso(NOW - 10), "usage": {"input_tokens": 20}},
             ],
         }
@@ -312,8 +316,12 @@ class ContextDriftTests(unittest.TestCase):
         }
         hints = context_drift._superseded_hints
 
-        self.assertEqual(hints([read], events, targets), ["a.py was edited again by prompt 7"])
-        self.assertEqual(hints([run], events, targets), ["the same command ran again by prompt 9"])
+        self.assertEqual(
+            hints([read], events, targets), ["a.py was edited again by prompt 7"]
+        )
+        self.assertEqual(
+            hints([run], events, targets), ["the same command ran again by prompt 9"]
+        )
         self.assertEqual(hints([rerun], events, targets), [])
 
     def test_shell_edits_supersede_earlier_reads_of_the_same_file(self) -> None:
@@ -321,7 +329,10 @@ class ContextDriftTests(unittest.TestCase):
         shell_edit = {"id": "w", "iteration": 6, "category": "repository_and_files"}
         targets = {
             "r": ("command", "sed -n '1,80p' src/konvu_telemetry/context_drift.py"),
-            "w": ("command", "python3 - <<EOF p = Path('src/konvu_telemetry/context_drift.py'); p.write_text(s)"),
+            "w": (
+                "command",
+                "python3 - <<EOF p = Path('src/konvu_telemetry/context_drift.py'); p.write_text(s)",
+            ),
         }
 
         self.assertEqual(
@@ -334,10 +345,20 @@ class ContextDriftTests(unittest.TestCase):
         template = dict(self.events[0])
         state["iteration"] = 80
         events = [
-            {**template, "id": f"big-{index}", "iteration": index, "estimated_tokens": 1000}
+            {
+                **template,
+                "id": f"big-{index}",
+                "iteration": index,
+                "estimated_tokens": 1000,
+            }
             for index in range(1, 61)
         ] + [
-            {**template, "id": f"new-{index}", "iteration": index, "estimated_tokens": 1}
+            {
+                **template,
+                "id": f"new-{index}",
+                "iteration": index,
+                "estimated_tokens": 1,
+            }
             for index in range(70, 81)
         ]
         state["epochs"][0]["events"] = events
@@ -347,7 +368,9 @@ class ContextDriftTests(unittest.TestCase):
         assert prepared is not None
         iterations = {item["iteration"] for item in prepared[0]["items"]}
         self.assertTrue(set(range(70, 81)) <= iterations)
-        self.assertEqual(len(prepared[0]["items"]), context_drift.MAX_INITIAL_ANALYSIS_ITEMS)
+        self.assertEqual(
+            len(prepared[0]["items"]), context_drift.MAX_INITIAL_ANALYSIS_ITEMS
+        )
 
     def test_excerpt_skips_transcript_bookkeeping(self) -> None:
         record = {
@@ -360,8 +383,12 @@ class ContextDriftTests(unittest.TestCase):
                 "role": "assistant",
                 "content": [
                     {"type": "text", "text": "Backfill now runs in batches of 45."},
-                    {"type": "tool_use", "id": "toolu_1", "name": "Bash",
-                     "input": {"command": "pytest tests"}},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "Bash",
+                        "input": {"command": "pytest tests"},
+                    },
                 ],
                 "usage": {"service_tier": "standard"},
             },
@@ -373,7 +400,13 @@ class ContextDriftTests(unittest.TestCase):
 
         self.assertTrue(text.startswith("Backfill now runs in batches of 45."))
         self.assertIn("pytest tests", text)
-        for noise in ("msg_011C", "claude-opus-5", "feecb47a", "2026-10-02", "standard"):
+        for noise in (
+            "msg_011C",
+            "claude-opus-5",
+            "feecb47a",
+            "2026-10-02",
+            "standard",
+        ):
             self.assertNotIn(noise, text)
 
     def test_long_timeline_is_sampled_to_the_cap_keeping_both_ends(self) -> None:
@@ -391,9 +424,7 @@ class ContextDriftTests(unittest.TestCase):
             patch.object(context_drift, "_read_record", return_value=None),
             patch.object(context_drift, "_prompt_text", return_value="prompt"),
         ):
-            turns, sampled = context_drift._conversation_timeline(
-                state, Path("unused")
-            )
+            turns, sampled = context_drift._conversation_timeline(state, Path("unused"))
 
         iterations = [turn["iteration"] for turn in turns]
         self.assertTrue(sampled)
@@ -929,7 +960,9 @@ class ContextDriftTests(unittest.TestCase):
 
     def test_backfill_resumes_after_a_collector_restart(self) -> None:
         snapshot = self.write_long_session(60)
-        self.run_scheduler(ContextDriftScheduler(Mock(side_effect=self.outcome)), snapshot)
+        self.run_scheduler(
+            ContextDriftScheduler(Mock(side_effect=self.outcome)), snapshot
+        )
         runner = Mock(side_effect=self.outcome)
         restarted = ContextDriftScheduler(runner)
 
@@ -946,7 +979,9 @@ class ContextDriftTests(unittest.TestCase):
         scheduler.refresh(snapshot, self.quotas(), NOW)
         self.assertTrue(scheduler.wait_for_idle())
 
-        scheduler.refresh(snapshot, self.quotas(used=95.0, observed_at=NOW + 1), NOW + 1)
+        scheduler.refresh(
+            snapshot, self.quotas(used=95.0, observed_at=NOW + 1), NOW + 1
+        )
         self.assertTrue(scheduler.wait_for_idle())
 
         runner.assert_called_once()

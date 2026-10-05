@@ -43,10 +43,12 @@ class PreferencesTests(unittest.TestCase):
 
     def test_legacy_analysis_setting_requires_explicit_consent(self) -> None:
         preferences_path().write_text(
-            json.dumps({
-                "cadence": DEFAULT_CADENCE,
-                "context_analysis_enabled": True,
-            })
+            json.dumps(
+                {
+                    "cadence": DEFAULT_CADENCE,
+                    "context_analysis_enabled": True,
+                }
+            )
         )
 
         preferences = read_preferences()
@@ -343,7 +345,9 @@ class PreferencesTests(unittest.TestCase):
         self.assertTrue(read_preferences()["context_analysis_enabled"])
 
     def test_setup_never_asks_twice_or_without_a_terminal(self) -> None:
-        self.assertEqual(self.run_setup([], None, tty=False)["context_analysis"], "not chosen")
+        self.assertEqual(
+            self.run_setup([], None, tty=False)["context_analysis"], "not chosen"
+        )
         self.assertFalse(self.asked)
         write_preferences(DEFAULT_CADENCE, context_analysis_enabled=True)
 

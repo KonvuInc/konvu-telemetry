@@ -655,9 +655,9 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
         jump = body.get("jump_percent")
         analysis_enabled = body.get("context_analysis_enabled")
         allow_paid = body.get("context_analysis_allow_paid")
-        if (analysis_enabled is not None and not isinstance(analysis_enabled, bool)) or (
-            allow_paid is not None and not isinstance(allow_paid, bool)
-        ):
+        if (
+            analysis_enabled is not None and not isinstance(analysis_enabled, bool)
+        ) or (allow_paid is not None and not isinstance(allow_paid, bool)):
             self.send_error(400)
             return
         try:

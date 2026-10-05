@@ -95,11 +95,21 @@ class QuotaAttributionTests(unittest.TestCase):
                 "claude", "a", "run-1", RUN_STARTED_AT, RUN_COMPLETED_AT, 100
             )
             record_analysis_usage(
-                "claude", "a", "run-1", RUN_STARTED_AT, RUN_COMPLETED_AT, 100,
+                "claude",
+                "a",
+                "run-1",
+                RUN_STARTED_AT,
+                RUN_COMPLETED_AT,
+                100,
                 cost_usd=0.02,
             )
             record_analysis_usage(
-                "claude", "a", "run-1", RUN_STARTED_AT, RUN_COMPLETED_AT, 100,
+                "claude",
+                "a",
+                "run-1",
+                RUN_STARTED_AT,
+                RUN_COMPLETED_AT,
+                100,
                 cost_usd=0.09,
             )
 
@@ -133,7 +143,9 @@ class QuotaAttributionTests(unittest.TestCase):
             b_window = second["sessions"][1]["quota_attribution"]["windows"][0]
             self.assertEqual(a_window["estimated_percent"], 0.5)
             self.assertEqual(a_window["analysis_estimated_percent"], 0.25)
-            self.assertEqual(second["sessions"][0]["quota_attribution"]["analysis_run_count"], 1)
+            self.assertEqual(
+                second["sessions"][0]["quota_attribution"]["analysis_run_count"], 1
+            )
             self.assertEqual(b_window["estimated_percent"], 0.5)
 
     def test_analysis_usage_sums_runs_tokens_cost_and_measured_share(self) -> None:
@@ -154,14 +166,28 @@ class QuotaAttributionTests(unittest.TestCase):
                 "cache_read": 0,
             }
             record_analysis_usage(
-                "claude", "a", "in-plan", RUN_STARTED_AT, RUN_COMPLETED_AT, 100,
-                model="claude-haiku-4-5", usage_mode="included",
-                token_usage=breakdown, cost_usd=0.12,
+                "claude",
+                "a",
+                "in-plan",
+                RUN_STARTED_AT,
+                RUN_COMPLETED_AT,
+                100,
+                model="claude-haiku-4-5",
+                usage_mode="included",
+                token_usage=breakdown,
+                cost_usd=0.12,
             )
             record_analysis_usage(
-                "claude", "a", "paid", RUN_STARTED_AT, RUN_COMPLETED_AT, 100,
-                model="claude-haiku-4-5", usage_mode="exhausted",
-                token_usage=breakdown, cost_usd=0.05,
+                "claude",
+                "a",
+                "paid",
+                RUN_STARTED_AT,
+                RUN_COMPLETED_AT,
+                100,
+                model="claude-haiku-4-5",
+                usage_mode="exhausted",
+                token_usage=breakdown,
+                cost_usd=0.05,
             )
 
             second = snapshot(21, [session("a", 200), session("b", 300)])

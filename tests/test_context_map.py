@@ -465,13 +465,23 @@ class ContextMapTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             transcript = Path(directory) / f"{SESSION_ID}.jsonl"
             thinking = claude_assistant(
-                "2026-01-01T00:00:01Z", 100, 20, content=[{"type": "thinking", "thinking": ""}]
+                "2026-01-01T00:00:01Z",
+                100,
+                20,
+                content=[{"type": "thinking", "thinking": ""}],
             )
             reply = claude_assistant(
-                "2026-01-01T00:00:02Z", 100, 20, content=[{"type": "text", "text": "Fixed the cap."}]
+                "2026-01-01T00:00:02Z",
+                100,
+                20,
+                content=[{"type": "text", "text": "Fixed the cap."}],
             )
             following = claude_assistant("2026-01-01T00:00:03Z", 140, 5)
-            for record, message_id in ((thinking, "msg-1"), (reply, "msg-1"), (following, "msg-2")):
+            for record, message_id in (
+                (thinking, "msg-1"),
+                (reply, "msg-1"),
+                (following, "msg-2"),
+            ):
                 record["message"]["id"] = message_id  # type: ignore[index]
             append_records(transcript, [thinking, reply, following])
             with patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}):

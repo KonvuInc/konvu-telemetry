@@ -90,7 +90,9 @@ def record_analysis_usage(
         existing = events.get(run_id)
         if isinstance(existing, dict):
             # Runs recorded before pricing existed gain the fields they lack.
-            missing = {key: value for key, value in details.items() if key not in existing}
+            missing = {
+                key: value for key, value in details.items() if key not in existing
+            }
             if not missing:
                 return
             existing.update(missing)
@@ -181,7 +183,9 @@ def _add_analysis_run(totals: dict[str, object], event: dict[str, object]) -> No
             tokens[bucket] += int(_number(breakdown.get(bucket)) or 0)
     cost = _number(event.get("cost_usd"))
     if cost is None:
-        totals["unpriced_run_count"] = int(_number(totals["unpriced_run_count"]) or 0) + 1
+        totals["unpriced_run_count"] = (
+            int(_number(totals["unpriced_run_count"]) or 0) + 1
+        )
         return
     totals["cost_usd"] = round((_number(totals["cost_usd"]) or 0.0) + cost, 6)
     # In-plan runs are not billed; their API-price value is kept apart from real spend.
@@ -602,9 +606,7 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
         ):
             continue
         analysis_key = (provider, parent_id)
-        analysis_run_counts[analysis_key] = (
-            analysis_run_counts.get(analysis_key, 0) + 1
-        )
+        analysis_run_counts[analysis_key] = analysis_run_counts.get(analysis_key, 0) + 1
         _add_analysis_run(
             analysis_totals.setdefault(analysis_key, _empty_analysis_usage()), event
         )
