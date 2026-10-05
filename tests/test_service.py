@@ -2055,7 +2055,7 @@ class ServiceTests(unittest.TestCase):
             {
                 "systemMessage": "\n╭─\n"
                 "│ 🔴 Paying\n"
-                "│ ⏱️ Week [░░░░░░░] 3.0%  Context [█████░░] 65.0%\n"
+                "│ ⏱️ Context [█████░░] 65.0%\n"
                 "│ 💸 Current spend $25.4  ━━━▶  $30.3 forecasted in next 10 prompts\n"
                 "│ 🔗 run konvu-telemetry setup to start the dashboard\n"
                 "╰─"
@@ -2407,7 +2407,7 @@ class ServiceTests(unittest.TestCase):
             lines = usage_box_lines(session, "3.0% weekly limit")
         self.assertEqual(lines[0], "╭─")
         self.assertEqual(lines[-1], "╰─")
-        self.assertIn("│ ⏱️ Week [░░░░░░░] 3.0%  Context [████░░░] 50.0%", lines)
+        self.assertIn("│ ⏱️ Context [████░░░] 50.0%", lines)
 
     def test_usage_box_hides_codex_credit_limit_until_the_plan_is_exhausted(
         self,
@@ -2416,10 +2416,12 @@ class ServiceTests(unittest.TestCase):
         included = {**self.shared_row_session(), "usage_mode": "included"}
         exhausted = {**self.shared_row_session(), "usage_mode": "exhausted"}
 
-        self.assertNotIn("Credits", "\n".join(usage_box_lines(included, quota_text)))
+        self.assertNotIn(
+            "Credits", "\n".join(usage_box_lines(included, quota_text, "codex"))
+        )
         self.assertIn(
             "Credits [███████] 100.0%",
-            "\n".join(usage_box_lines(exhausted, quota_text)),
+            "\n".join(usage_box_lines(exhausted, quota_text, "codex")),
         )
 
     def test_usage_box_does_not_label_an_unavailable_plan_as_paying(self) -> None:
@@ -2450,6 +2452,8 @@ class ServiceTests(unittest.TestCase):
                 current_quotas,
             )
         self.assertIn("● Paying\n", output)
+        self.assertIn("Context", output)
+        self.assertIn("87%", output)
         self.assertIn("Current spend $25.4 ━━━▶ $30.3", output)
         self.assertIn("forecasted in next 10 prompts", output)
         self.assertNotIn("11.0% 5-hour limit", output)

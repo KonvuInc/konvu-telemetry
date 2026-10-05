@@ -8,8 +8,10 @@ from unittest.mock import patch
 
 from konvu_telemetry.display import (
     ANSI_ESCAPE,
+    claude_statusline_rows,
     compact_status_meter,
     hook_quota_meters,
+    usage_box_lines,
 )
 
 
@@ -46,3 +48,82 @@ class DisplayTests(unittest.TestCase):
             rendered,
             "5h · reset: 1.0h [█░░░░░░] 8.0%  Week · reset: 1.0d [██░░░░░] 35.0%",
         )
+
+    def test_paid_claude_hud_shows_reset_and_context_without_limit_meters(self) -> None:
+        quotas = {
+            "claude": {
+                "windows": [
+                    {
+                        "period": "five_hour",
+                        "used_percent": 100.0,
+                        "resets_at": "2030-01-01T01:00:00+00:00",
+                    },
+                    {
+                        "period": "weekly",
+                        "used_percent": 35.0,
+                        "resets_at": "2030-01-02T00:00:00+00:00",
+                    },
+                ]
+            }
+        }
+        session = {
+            "usage_mode": "exhausted",
+            "out_of_plan_spend_usd": 1.3,
+            "projected_next_10_tasks_usd": 0.8,
+        }
+        with (
+            patch.dict(os.environ, {"NO_COLOR": "1"}),
+            patch("konvu_telemetry.display.time.time", return_value=1_893_456_000),
+            patch(
+                "konvu_telemetry.display.stored_provider_quotas", return_value=quotas
+            ),
+            patch("konvu_telemetry.display.dashboard_line", return_value="dashboard"),
+        ):
+            rows = claude_statusline_rows(session, 52.4)
+
+        self.assertEqual(rows[0], "● Paying · resets in 1.0h")
+        self.assertIn("Context", rows[1])
+        self.assertIn("52%", rows[1])
+        self.assertNotIn("5h", "\n".join(rows))
+        self.assertNotIn("Week", "\n".join(rows))
+
+    def test_paid_codex_hook_keeps_credits_and_moves_reset_to_paying_line(self) -> None:
+        quotas = {
+            "codex": {
+                "windows": [
+                    {
+                        "period": "weekly",
+                        "used_percent": 100.0,
+                        "resets_at": "2030-01-02T00:00:00+00:00",
+                    },
+                    {
+                        "period": "monthly",
+                        "used_percent": 23.0,
+                        "resets_at": "2030-02-01T00:00:00+00:00",
+                    },
+                ]
+            }
+        }
+        session = {
+            "usage_mode": "exhausted",
+            "context_tokens": 681,
+            "context_window_tokens": 1000,
+        }
+        with (
+            patch("konvu_telemetry.display.time.time", return_value=1_893_456_000),
+            patch(
+                "konvu_telemetry.display.stored_provider_quotas", return_value=quotas
+            ),
+            patch("konvu_telemetry.display.dashboard_line", return_value="dashboard"),
+        ):
+            rows = usage_box_lines(
+                session,
+                "100.0% weekly limit · 23.0% monthly limit",
+                "codex",
+            )
+
+        self.assertEqual(rows[1], "│ 🔴 Paying · resets in 1.0d")
+        self.assertIn("Credits [██░░░░░] 23.0%", rows[2])
+        self.assertIn("Context [█████░░] 68.1%", rows[2])
+        self.assertNotIn("Week", "\n".join(rows))
+        self.assertNotIn("reset:", "\n".join(rows))
