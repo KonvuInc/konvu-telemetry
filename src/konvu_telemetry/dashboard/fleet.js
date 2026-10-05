@@ -386,7 +386,9 @@ function clampPercent(value) {
 }
 function contextWindowSlices(s) {
   const analysis = analysisFor(s);
-  const used = clampPercent(context(s));
+  const observed = context(s);
+  if (!nonnegative(observed)) return { analysis: null, used: null, portions: [], background: '#edeaf2' };
+  const used = clampPercent(observed);
   const weights = analysis ? [analysis.relevant_percent, analysis.drifting_percent, analysis.stale_percent].map(clampPercent) : [];
   const rated = weights.reduce((sum, value) => sum + value, 0);
   const scale = rated > 100 ? 100 / rated : 1;
@@ -404,6 +406,7 @@ function contextWindowSlices(s) {
 }
 function donut(s) {
   const slices = contextWindowSlices(s);
+  if (slices.used === null) return '<div class="context-donut" role="img" aria-label="Context use unavailable"><i class="context-donut-ring" style="background:#edeaf2"></i><span>—<small>window used</small></span></div>';
   const label = percentage(slices.used) + ' of context window used' + (slices.analysis ? '; colors show relevance as a share of the full window' : '; relevance not analyzed yet');
   return '<div class="context-donut" role="img" aria-label="' + esc(label) + '"><i class="context-donut-ring" style="background:' + slices.background + '"></i><span>' + percentage(slices.used) + '<small>window used</small></span></div>';
 }
@@ -1558,13 +1561,18 @@ function renderFreshness(stale) {
    Codex desktop and Claude desktop. A custom rule
    needs code, so the dashboard stores the wording and hands back a prompt for
    the user's own agent rather than pretending it took effect. */
-const cadenceState = { options: [], cadence: "", custom_rule: "", context_analysis_enabled: false, context_analysis_consent: "unset", context_analysis_allow_paid: false, loaded: false };
+const cadenceState = { options: [], cadence: "", custom_rule: "", context_analysis_enabled: false, context_analysis_consent: "unset", context_analysis_allow_paid: false, loaded: false, request: 0 };
 async function loadPreferences() {
   if (previewMode) return;
+  const request = ++cadenceState.request;
+  cadenceState.loaded = false;
+  renderSaveState();
+  renderAnalysisToggles();
   try {
     const response = await fetch("/api/preferences", { cache: "no-store" });
-    if (!response.ok) return;
+    if (!response.ok || request !== cadenceState.request) return;
     const value = await response.json();
+    if (request !== cadenceState.request) return;
     Object.assign(cadenceState, value, { loaded: true });
     renderCadenceOptions();
     renderAnalysisToggles();
@@ -1582,7 +1590,7 @@ function renderSaveState() {
   const save = $("#cadence-save");
   if (!save) return;
   const blocked = cadenceState.cadence === "custom" && !customRuleIsUsable();
-  save.disabled = blocked;
+  save.disabled = !cadenceState.loaded || blocked;
   const status = $("#cadence-status");
   // Flagged on the element rather than recognised by its text, so an unrelated
   // message (a failed save) is never mistaken for this one and cleared.
@@ -1627,11 +1635,13 @@ function renderCadenceOptions() {
 function renderAnalysisToggles() {
   const enabled = $("#context-analysis-enabled");
   const paid = $("#context-analysis-allow-paid");
-  if (enabled) enabled.checked = cadenceState.context_analysis_enabled === true;
+  if (enabled) {
+    enabled.checked = cadenceState.context_analysis_enabled === true;
+    enabled.disabled = !cadenceState.loaded;
+  }
   if (paid) {
     paid.checked = cadenceState.context_analysis_allow_paid === true;
-    // Paid runs only matter while analysis itself is on.
-    paid.disabled = enabled ? !enabled.checked : true;
+    paid.disabled = !cadenceState.loaded || !enabled?.checked;
   }
 }
 function toggleAnalysisInfo() {
@@ -2365,6 +2375,7 @@ function relevanceLegend(analysis) {
 }
 function contextHero(s) {
   const { analysis, used, portions, background } = contextWindowSlices(s);
+  if (used === null) return '<div class="context-hero"><div class="context-hero-main"><div class="context-hero-ring" role="img" aria-label="Context use unavailable" style="background:#edeaf2"><div class="context-hero-ring-center"><strong>—</strong><span>window used</span></div></div><div class="context-hero-copy"><p class="context-rating-pending">Waiting for a provider context checkpoint.</p></div></div></div>';
   const ringLabel = percentage(used) + ' of the full context window used' + (analysis ? '; ' + portions.map((value, index) => percentage(value) + ' ' + ['relevant', 'drifting', 'stale'][index]).join(', ') + ' of the full window' : '; relevance not rated');
   const ring = '<div class="context-hero-ring" role="img" aria-label="' + esc(ringLabel) + '" style="background:' + background + '"><div class="context-hero-ring-center"><strong>' + percentage(used) + '</strong><span>window used</span></div></div>';
   const parts = analysis ? [['Relevant', portions[0], 'relevant', 'Useful to the current focus'], ['Drifting', portions[1], 'drifting', 'Only partly useful now'], ['Stale', portions[2], 'stale', 'No longer useful']] : [];
@@ -2388,15 +2399,18 @@ function topicTiles(rows, contextTokens, analyzed, sourceTypes) {
     const drifting = nonnegative(row.drifting_tokens) ? row.drifting_tokens : 0;
     const stale = nonnegative(row.stale_tokens) ? row.stale_tokens : 0;
     const rated = analyzed && relevant + drifting + stale > 0;
-    const stops = [relevant, drifting, stale].map((value) => row.tokens > 0 ? Math.min(100, value / row.tokens * 100) : 0);
+    const rawStops = [relevant, drifting, stale].map((value) => row.tokens > 0 ? Math.min(100, value / row.tokens * 100) : 0);
+    const totalStops = rawStops.reduce((sum, value) => sum + value, 0);
+    const stops = totalStops > 100 ? rawStops.map((value) => value * 100 / totalStops) : rawStops;
     const [good, drift, old] = stops;
+    const unreviewed = Math.max(0, 100 - good - drift - old);
     const mix = rated ? 'conic-gradient(#2c9d75 0 ' + good.toFixed(2) + '%,#e5ad34 ' + good.toFixed(2) + '% ' + (good + drift).toFixed(2) + '%,#dc5b65 ' + (good + drift).toFixed(2) + '% ' + Math.min(100, good + drift + old).toFixed(2) + '%,#b9b1c9 ' + Math.min(100, good + drift + old).toFixed(2) + '% 100%)' : 'conic-gradient(#b9b1c9 0 100%)';
     const title = label + (row.other_count ? ' (' + row.other_count + ' more)' : '') + ' · ' + shareLabel + ' of used context';
     const other = row.id === 'others';
     const tag = other ? 'button' : 'article';
     const action = other ? '<span class="context-others-action">View all ' + (sourceTypes ? 'sources' : 'topics') + ' <span aria-hidden="true">→</span></span>' : '';
     const aria = other ? 'View all ' + row.all_count + ' ' + (sourceTypes ? 'source types' : 'conversation topics') + '. ' + title : title;
-    const status = rated ? '<div class="context-topic-status"><span class="relevant">' + percentage(good) + ' relevant</span><span class="drifting">' + percentage(drift) + ' drifting</span><span class="stale">' + percentage(old) + ' stale</span></div>' : '<p class="context-topic-unrated">Relevance pending</p>';
+    const status = rated ? '<div class="context-topic-status"><span class="relevant">' + percentage(good) + ' relevant</span><span class="drifting">' + percentage(drift) + ' drifting</span><span class="stale">' + percentage(old) + ' stale</span>' + (unreviewed > 0.1 ? '<span class="unreviewed">' + percentage(unreviewed) + ' unreviewed</span>' : '') + '</div>' : '<p class="context-topic-unrated">Relevance pending</p>';
     return '<' + tag + (other ? ' type="button" data-context-expand="true"' : '') + ' class="context-topic-tile' + (other ? ' context-topic-others' : '') + '" title="' + esc(title) + '" aria-label="' + esc(aria) + '"><div class="context-topic-card-top"><span class="context-topic-card-share">' + shareLabel + '<small>of used context</small></span><span class="context-topic-mini-ring" role="img" aria-label="' + esc(rated ? stops.map((value, index) => percentage(value) + ' ' + ['relevant', 'drifting', 'stale'][index]).join(', ') : 'Relevance pending') + '" style="background:' + mix + '"><i></i></span></div><h4>' + esc(label) + '</h4>' + status + action + '</' + tag + '>';
   }
   return '<div class="context-topic-mosaic" role="group" aria-label="Share of used context by ' + (sourceTypes ? 'source type' : 'conversation topic') + '">' + rows.map(tile).join('') + '</div>';
@@ -2502,13 +2516,18 @@ function renderInspector() {
     last = rows.at(-1),
     scroll = $("#inspector-body").scrollTop;
   const included = !showsMoney(s);
+  const signal = included ? null : assess(s);
+  const priorSpend = document.querySelector('#spend-details');
+  const spendOpen = priorSpend?.open === true && priorSpend.dataset.sessionKey === keyOf(s);
   const stats = included
     ? subscriptionStats(s)
     : '<div class="inspector-stats"><div><span>Prompts</span><strong>' + count(s) + '</strong><small>in this session</small></div><div><span>Recorded spend</span><strong>' + money(cost(s)) + '</strong><small>' + (last?.completed === false ? 'Current prompt ' : 'Last prompt ') + money(last?.priced === false ? null : last?.cost_usd) + (last?.completed === false ? ' so far' : '') + '</small></div><div><span>Next 10 prompts</span><strong>' + additional(forecast(s)) + '</strong><small>estimated additional</small></div></div>';
   const agents = Array.isArray(s.subagents) ? s.subagents : [];
   const history = '<section class="context-section context-history"><div class="context-section-head"><div><h3>How context fills up</h3></div></div>' + contextGraph(s) + '</section>';
   const analysisCost = analysisUsageText(s);
-  const content = '<section class="context-visual"><div class="context-visual-head"><h3>Current context</h3>' + contextTopicChooser(s) + '</div><div class="context-visual-body">' + contextHero(s) + contextTopics(s) + '</div>' + (analysisCost ? '<p class="context-analysis-usage">' + esc(analysisCost) + '</p>' : '') + '</section>' + contextTimeline(s) + history +
+  const paidDetails = included ? '' : '<details id="spend-details" class="inspector-extra" data-session-key="' + esc(keyOf(s)) + '"' + (spendOpen ? ' open' : '') + '><summary>Spending trend</summary><div class="section-title"><h3>How this session is spending</h3><div class="mini-tabs"><button data-chart="cumulative" class="' + (state.chart === 'cumulative' ? 'on' : '') + '">Cumulative</button><button data-chart="prompt" class="' + (state.chart === 'prompt' ? 'on' : '') + '">Per prompt</button></div></div>' + sessionGraph(s) + '</details>';
+  const warning = signal?.severity ? '<div class="inspector-signal"><strong>' + esc(signal.action) + '</strong><p>' + esc(signal.evidence) + '</p></div>' : '';
+  const content = warning + '<section class="context-visual"><div class="context-visual-head"><h3>Current context</h3>' + contextTopicChooser(s) + '</div><div class="context-visual-body">' + contextHero(s) + contextTopics(s) + '</div>' + (analysisCost ? '<p class="context-analysis-usage">' + esc(analysisCost) + '</p>' : '') + '</section>' + contextTimeline(s) + history + paidDetails +
     '<details id="subagent-section" class="inspector-extra"><summary>Subagent activity <span>' + agents.length + ' spawned · ' + agents.filter((agent) => agent.live === true).length + ' live</span></summary>' + (subagentDetails(s) || '<p>No subagents were recorded.</p>') + '</details>' +
     '<details class="inspector-extra"><summary>Recorded token traffic</summary>' + tokenBreakdown(s) + '</details>';
   const sessionActivity = activity(s);
