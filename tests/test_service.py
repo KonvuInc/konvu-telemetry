@@ -2034,9 +2034,7 @@ class ServiceTests(unittest.TestCase):
             hook()
         return stdout.getvalue()
 
-    def test_codex_stop_hook_keeps_cli_output_and_suppresses_the_desktop_app(
-        self,
-    ) -> None:
+    def test_codex_stop_hook_keeps_output_when_metadata_says_desktop(self) -> None:
         session = {
             "id": "00000000-0000-0000-0000-000000000001",
             "total_cost_usd": 25.4,
@@ -2066,8 +2064,8 @@ class ServiceTests(unittest.TestCase):
             {"systemMessage"},
         )
         self.assertEqual(
-            json.loads(self.run_codex_hook(codex_hook, "desktop", session)),
-            {"suppressOutput": True},
+            json.loads(self.run_codex_hook(codex_hook, "desktop", session)).keys(),
+            {"systemMessage"},
         )
 
     def test_codex_prompt_hook_injects_context_only_for_the_desktop_originator(
@@ -2149,10 +2147,14 @@ class ServiceTests(unittest.TestCase):
                 )
                 desktop = self.run_codex_hook(codex_prompt_hook, "desktop", session)
                 cli = self.run_codex_hook(codex_hook, "cli", session, turn_tool_calls=0)
+                inherited_desktop = self.run_codex_hook(
+                    codex_hook, "desktop", session, turn_tool_calls=0
+                )
             for label, output in (
                 ("claude-desktop", claude),
                 ("codex-desktop", desktop),
                 ("codex-cli", cli),
+                ("codex-cli with inherited desktop metadata", inherited_desktop),
             ):
                 self.assertEqual(
                     "Current spend" in output, expected, f"{cadence} {label}"
