@@ -1985,12 +1985,13 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.run_claude_hook(claude_prompt_hook, "cli", session), "")
         self.assertEqual(self.run_claude_hook(claude_prompt_hook, None, session), "")
 
-    def test_claude_prompt_hook_stays_silent_when_the_session_file_is_missing(
+    def test_claude_prompt_hook_suppresses_stale_box_when_the_session_file_is_missing(
         self,
     ) -> None:
-        self.assertEqual(
-            self.run_claude_hook(claude_prompt_hook, "claude-desktop", None), ""
+        context = self.injected_context(
+            self.run_claude_hook(claude_prompt_hook, "claude-desktop", None)
         )
+        self.assertIn("Do not display, repeat, or mention", context)
 
     def run_codex_hook(
         self,
@@ -2091,9 +2092,11 @@ class ServiceTests(unittest.TestCase):
                 json.loads(self.run_codex_hook(codex_prompt_hook, client, session)),
                 {"suppressOutput": True},
             )
-        self.assertEqual(
-            json.loads(self.run_codex_hook(codex_prompt_hook, "desktop", None)),
-            {"suppressOutput": True},
+        self.assertIn(
+            "Do not display, repeat, or mention",
+            self.injected_context(
+                self.run_codex_hook(codex_prompt_hook, "desktop", None)
+            ),
         )
 
     def test_session_tool_calls_accepts_only_a_positive_count(self) -> None:
@@ -2182,19 +2185,19 @@ class ServiceTests(unittest.TestCase):
                 self.run_codex_hook(codex_prompt_hook, "desktop", self.usage_session(1))
             ),
         )
-        # Zero, absent, and non-integer counts all fail closed on both desktop surfaces.
+        # A false cadence must override any prior instruction to append a box.
         for tool_calls in (0, None, "1", 1.5):
             session = self.usage_session(tool_calls)
-            self.assertEqual(
-                self.run_claude_hook(claude_prompt_hook, "claude-desktop", session),
-                "",
-                repr(tool_calls),
-            )
-            self.assertEqual(
-                json.loads(self.run_codex_hook(codex_prompt_hook, "desktop", session)),
-                {"suppressOutput": True},
-                repr(tool_calls),
-            )
+            for surface, output in (
+                (
+                    "claude",
+                    self.run_claude_hook(claude_prompt_hook, "claude-desktop", session),
+                ),
+                ("codex", self.run_codex_hook(codex_prompt_hook, "desktop", session)),
+            ):
+                context = self.injected_context(output)
+                self.assertIn("Do not display, repeat, or mention", context, surface)
+                self.assertNotIn("Current spend", context, surface)
 
     def test_codex_stop_box_shows_only_when_the_turn_used_a_tool(self) -> None:
         # This hook counts the exact turn it fires on rather than the snapshot field.
