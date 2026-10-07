@@ -157,12 +157,38 @@ class DisplayTests(unittest.TestCase):
 
         self.assertEqual(rows[1], "│ 🔴 Paying · resets in 1d")
         self.assertIn("Credits [██░░░░░] 23.0%", rows[2])
-        self.assertIn("Context [█████░░] 68.1%", rows[2])
+        self.assertEqual(rows[3], "│ 🧠 Context ⬜⬜⬜⬜⬜⬜⬜▫️▫️▫️ 68.1%")
         self.assertNotIn("Week", "\n".join(rows))
         self.assertNotIn("reset:", "\n".join(rows))
 
 
 class ContextRelevanceDisplayTests(unittest.TestCase):
+    def test_usage_box_colors_context_and_links_compact_on_the_same_line(self) -> None:
+        session = {
+            "id": "abc",
+            "provider": "codex",
+            "usage_mode": "included",
+            "context_tokens": 710,
+            "context_window_tokens": 1000,
+            "context_map": {
+                "analysis": {
+                    "coverage_percent": 100,
+                    "relevant_percent": 15,
+                    "stale_percent": 85,
+                    "droppable_percent": 84,
+                    "compact_command": "/compact Preserve: auth work.",
+                }
+            },
+        }
+        with patch("konvu_telemetry.display.dashboard_line", return_value="dashboard"):
+            rows = usage_box_lines(session, "", "codex")
+
+        self.assertIn(
+            "│ 🧠 Context 🟩🟥🟥🟥🟥🟥🟥▫️▫️▫️ 71.0%  ·  ✂️ /compact "
+            "http://127.0.0.1:7824/?session=codex%3Aabc&tab=context",
+            rows,
+        )
+
     """The Claude CLI context meter and /compact hint follow the AI ratings."""
 
     analysis = {
