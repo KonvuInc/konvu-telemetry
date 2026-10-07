@@ -62,13 +62,53 @@ konvu-telemetry uninstall
 - Runs only on your Mac and serves the dashboard only at `127.0.0.1`.
 - Uses browser notifications only when you enable them in the local dashboard. An active paid session alerts once its next ten prompts are forecast at $10 or more; repeat suppression stays in that browser.
 
+## Context drift analysis (optional)
+
+Long sessions fill up with context the agent no longer needs: old file reads, finished
+investigations, replaced plans. When you turn this on, Konvu asks a small model (Claude
+Haiku for Claude sessions, gpt-6-luna for Codex) to rate each part of an active session's
+context as needed or not needed for the current goal. The session inspector shows the
+split, and the Claude status line suggests a `/compact` once enough of the context is
+finished or replaced.
+
+It is off until you say yes. `konvu-telemetry setup` asks once, on install and after an
+update, and you can change it at any time:
+
+```sh
+konvu-telemetry context-analysis on      # Turn it on
+konvu-telemetry context-analysis off     # Turn it off
+konvu-telemetry context-analysis status  # Show the current choice
+konvu-telemetry context-analysis on --allow-paid  # Also run for sessions beyond your plan
+konvu-telemetry context-analysis on --plan-only   # Back to plan-only (the default)
+konvu-telemetry setup --context-analysis on|off   # Answer the setup question up front
+```
+
+The same switches live in the dashboard's settings panel.
+
+It costs very little. A review is usually a few cents at API prices ($0.01 to $0.10; the
+first review of a very long session can reach about $0.50), and on a Claude or ChatGPT
+plan it comes out of the allowance you already have, as a sliver of a 5-hour window. Hard
+limits keep it that way:
+
+- It reviews a session after every 10 new prompts, or once its context grows by about 60k
+  tokens, and only while the session is active. A long session's first review may need a
+  few short catch-up passes, and a `/compact` starts a fresh review of what is left.
+- No more than 30 model calls per session and 60 overall per hour, passes on one session
+  at least 30 seconds apart, each call capped at 90 seconds (and $0.10 for Claude).
+- By default it runs only for sessions within your plan, and only while fresh provider
+  limits show under 90% used, so it never eats the end of your allowance. `--allow-paid`
+  also lets it run for sessions billed beyond the plan, which may spend credits.
+- Failed runs back off exponentially instead of retrying in a loop.
+
+Every run's tokens and estimated price are shown on its session in the dashboard.
+
 Costs are estimates, not provider invoices. See [ACCURACY.md](ACCURACY.md) for the exact accounting, forecast, context, and subagent methodology. Linux and Windows are not supported in this first release.
 
 ## Privacy
 
 Konvu Telemetry stores derived usage data in `~/.konvu/telemetry`; provider transcript files are never changed. The background collector is the only component that fetches account limits: every two minutes it calls Anthropic's usage endpoint for Claude and asks Codex's installed local app-server to contact OpenAI using Codex's own login. Konvu Telemetry holds the Claude credential only for that request and never receives the Codex credential. Credentials, raw provider response bodies, and account IDs are never copied to Konvu files or logs. For each limit window the collector keeps only its normalized form: the provider's limit bucket identifier, the window period and length, the percentage used, the reset time, and the provider's limit-reached and spend-control flags.
 
-Context drift analysis is off until you explicitly enable it: `konvu-telemetry setup` asks once (default no, or pass `--context-analysis on|off`), and you can switch it later in the dashboard settings or with `konvu-telemetry context-analysis on`. After every ten new prompts, the collector may send bounded excerpts from that session back to the same provider through its authenticated local CLI. Later runs send only new turns plus a small set of uncertain ratings for review. Claude content goes only to Anthropic and Codex content only to OpenAI; Konvu does not receive it. Claude tools are disabled; Codex runs ephemerally from an empty directory in its read-only sandbox. Each run is limited to 90 seconds and starts only while fresh provider limits show less than 95% usage, unless `--allow-paid` is set, in which case sessions beyond the plan are analyzed too and may spend credits. Short topic summaries, relevance scores, timestamps, provider-reported token use, and its API-price estimate are stored locally for eight days; that usage enters the same quota-attribution ledger as normal sessions under its parent session.
+Context drift analysis is off until you explicitly enable it: `konvu-telemetry setup` asks once (default no, or pass `--context-analysis on|off`), and you can switch it later in the dashboard settings or with `konvu-telemetry context-analysis on`. After every ten new prompts, or once the context grows by about 60k tokens, the collector may send bounded excerpts from that session back to the same provider through its authenticated local CLI, in batches of up to 90 context groups per call and at most 30 calls per session (60 overall) per hour. Claude content goes only to Anthropic and Codex content only to OpenAI; Konvu does not receive it. Claude tools are disabled; Codex runs ephemerally from an empty directory in its read-only sandbox. Each call is limited to 90 seconds. Sessions within the plan are analyzed only while fresh provider limits show less than 90% usage; `--allow-paid` also analyzes sessions billed beyond the plan, which may spend credits. Short topic summaries, relevance scores, timestamps, provider-reported token use, and its API-price estimate are stored locally for eight days; that usage enters the same quota-attribution ledger as normal sessions under its parent session.
 
 Separately, setup enables a small amount of anonymous product telemetry to PostHog by default: successful setup, when the first dashboard-visible snapshot is ready, dashboard opens, one active-day event per day when data is visible, and collector failures, at most once per day. An existing telemetry choice remains unchanged.
 

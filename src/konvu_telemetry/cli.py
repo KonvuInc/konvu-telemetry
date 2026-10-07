@@ -31,13 +31,12 @@ from .tracking import set_tracking_enabled, tracking_status
 
 
 CONTEXT_ANALYSIS_QUESTION = """Context drift analysis (optional)
-After every 10 prompts, Konvu can ask the Claude or Codex account you already use to
-rate which parts of a session's context are still relevant, drifting, or stale, so
-you know when to compact or start fresh. It runs a small model (Claude Haiku or
-gpt-6-luna) through your local CLI login. Session text goes only to that provider,
-never to Konvu. A run usually costs a few cents at API prices, about 0.01% of a
-Claude 5-hour limit. Change it later in the dashboard or with
-`konvu-telemetry context-analysis on|off`.
+About every 10 prompts, Konvu can ask a small model (Claude Haiku or gpt-6-luna)
+through your own Claude or Codex login which parts of an active session's context are
+still needed, so you know when to compact. Session text goes only to that provider,
+never to Konvu. A review costs a few cents at API prices, and on a plan it comes out
+of your allowance, never past 90% of a limit. Hourly caps stop it from running away.
+Change it later in the dashboard or with `konvu-telemetry context-analysis on|off`.
 Turn it on? [y/N] """
 
 
@@ -309,7 +308,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="allow_paid",
         action="store_const",
         const=True,
-        help="Also analyze sessions beyond the plan or past the 95%% limit reserve.",
+        help="Also analyze sessions billed beyond the plan (may spend credits).",
     )
     paid.add_argument(
         "--plan-only",
