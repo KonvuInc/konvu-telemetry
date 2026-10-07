@@ -734,42 +734,6 @@ class ContextDriftTests(unittest.TestCase):
         self.assertEqual(stored["analysis"]["runs"][0]["status"], "partial")
         self.assertEqual(stored["analysis"]["summary"]["coverage_percent"], 10.0)
 
-    def test_analysis_waits_until_the_context_map_is_stable(self) -> None:
-        state = json.loads(context_map_path("codex", SESSION_ID).read_text())
-        state["cursor"] = self.transcript.stat().st_size
-        write_private_json(context_map_path("codex", SESSION_ID), state)
-        runner = Mock(side_effect=self.outcome)
-        scheduler = ContextDriftScheduler(runner)
-        snapshot = self.snapshot()
-
-        scheduler.refresh(snapshot, self.quotas(), NOW)
-        runner.assert_not_called()
-        snapshot["sessions"][0]["last_activity_at"] = iso(NOW + 31)
-        scheduler.refresh(snapshot, self.quotas(observed_at=NOW + 31), NOW + 31)
-        self.assertTrue(scheduler.wait_for_idle())
-
-        runner.assert_called_once()
-
-    def test_analysis_never_runs_during_an_open_codex_turn(self) -> None:
-        state = json.loads(context_map_path("codex", SESSION_ID).read_text())
-        state["cursor"] = self.transcript.stat().st_size
-        state["turn_complete"] = False
-        write_private_json(context_map_path("codex", SESSION_ID), state)
-        runner = Mock(side_effect=self.outcome)
-        scheduler = ContextDriftScheduler(runner)
-        snapshot = self.snapshot()
-
-        scheduler.refresh(snapshot, self.quotas(), NOW)
-        scheduler.refresh(snapshot, self.quotas(observed_at=NOW + 60), NOW + 60)
-        runner.assert_not_called()
-
-        state["turn_complete"] = True
-        write_private_json(context_map_path("codex", SESSION_ID), state)
-        scheduler.refresh(snapshot, self.quotas(observed_at=NOW + 61), NOW + 61)
-        scheduler.refresh(snapshot, self.quotas(observed_at=NOW + 92), NOW + 92)
-        self.assertTrue(scheduler.wait_for_idle())
-        runner.assert_called_once()
-
     def test_old_analysis_version_is_rebuilt(self) -> None:
         state = json.loads(context_map_path("codex", SESSION_ID).read_text())
         state["analysis"] = {
@@ -993,11 +957,41 @@ class ContextDriftTests(unittest.TestCase):
 
         runner.assert_not_called()
 
+    def test_every_due_live_session_is_reviewed_in_the_same_tick(self) -> None:
+        other = "01a041b4-30c4-7e70-a9f6-19df219a6644"
+        state = json.loads(context_map_path("codex", SESSION_ID).read_text())
+        write_private_json(
+            context_map_path("codex", other), {**state, "session_id": other}
+        )
+        snapshot = self.snapshot()
+        snapshot["sessions"].append({**snapshot["sessions"][0], "id": other})
+        runner = Mock(side_effect=self.outcome)
+        scheduler = ContextDriftScheduler(runner)
+
+        scheduler.refresh(snapshot, self.quotas(), NOW)
+        self.assertTrue(scheduler.wait_for_idle())
+
+        self.assertEqual(
+            {call.args[1]["session_id"] for call in runner.call_args_list},
+            {SESSION_ID, other},
+        )
+
+    def test_a_session_idle_for_a_few_minutes_is_still_reviewed(self) -> None:
+        runner = Mock(side_effect=self.outcome)
+        scheduler = ContextDriftScheduler(runner)
+        snapshot = self.snapshot()
+        snapshot["sessions"][0]["last_activity_at"] = iso(NOW - 10 * 60)
+
+        scheduler.refresh(snapshot, self.quotas(), NOW)
+        self.assertTrue(scheduler.wait_for_idle())
+
+        runner.assert_called_once()
+
     def test_analysis_does_not_run_for_an_inactive_session(self) -> None:
         runner = Mock(side_effect=self.outcome)
         scheduler = ContextDriftScheduler(runner)
         snapshot = self.snapshot()
-        snapshot["sessions"][0]["last_activity_at"] = iso(NOW - 301)
+        snapshot["sessions"][0]["last_activity_at"] = iso(NOW - 20 * 60 - 1)
 
         scheduler.refresh(snapshot, self.quotas(), NOW)
 
@@ -1094,7 +1088,7 @@ class ContextDriftTests(unittest.TestCase):
 
     def test_turning_analysis_off_cancels_the_running_pass(self) -> None:
         scheduler = ContextDriftScheduler(Mock(side_effect=self.outcome))
-        scheduler._pending = cast(PendingJob, {})
+        scheduler._pending = {("codex", SESSION_ID): cast(PendingJob, {})}
         preference = read_preferences()
         write_preferences(
             preference["cadence"],
