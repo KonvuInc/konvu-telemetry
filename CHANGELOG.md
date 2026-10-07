@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.1 - 2026-10-07
+
+- Review each live session after 10 new prompts, with up to four sessions
+  analyzed in parallel. This keeps context analysis current during busy sessions.
+
 ## 1.0.0 - 2026-10-07
 
 - Add opt-in context drift analysis: a small model, run through your own Claude or
