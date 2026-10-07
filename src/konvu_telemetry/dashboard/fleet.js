@@ -419,14 +419,25 @@ function contextWindowSlices(s) {
   }).join(',') + ')';
   return { analysis, used, portions, background };
 }
+const AI_REVIEW_EVERY_PROMPTS = 10;
+/* Says when the AI will next look at this session, or why it will not. */
+function aiReviewNote(s, lastRun) {
+  if (cadenceState.loaded && cadenceState.context_analysis_enabled !== true) return 'AI review is off';
+  const plan = s.usage_mode === 'included' || (cadenceState.context_analysis_allow_paid === true && s.usage_mode === 'exhausted');
+  if (cadenceState.loaded && !plan) return s.usage_mode === 'unknown' ? 'AI review waits for plan limits' : 'AI review is off outside your plan';
+  const reviewed = finite(lastRun?.iteration) ? lastRun.iteration : 0;
+  const current = finite(s.context_map?.iteration) ? s.context_map.iteration : null;
+  if (current === null) return '';
+  const left = reviewed + AI_REVIEW_EVERY_PROMPTS - current;
+  return left <= 0 ? 'AI review due now' : 'Next AI review in ' + left + (left === 1 ? ' prompt' : ' prompts');
+}
 function donut(s) {
   const slices = contextWindowSlices(s);
   if (slices.used === null) return '<div class="context-donut" role="img" aria-label="Context use unavailable"><i class="context-donut-ring" style="background:#edeaf2"></i><span>—<small>window used</small></span></div>';
   const runs = slices.analysis?.run_events;
   const lastRun = (Array.isArray(runs) && runs.length ? runs[runs.length - 1] : null) || slices.analysis?.last_run;
-  const iteration = lastRun?.iteration;
-  const review = slices.analysis ? 'AI reviewed' + (finite(iteration) && iteration > 0 ? ' after prompt ' + iteration : '') : 'No AI review';
-  const label = percentage(slices.used) + ' of context window used; ' + review + (slices.analysis ? '; colors show relevance as a share of the full window' : '');
+  const review = aiReviewNote(s, lastRun);
+  const label = percentage(slices.used) + ' of context window used' + (review ? '; ' + review : '') + (slices.analysis ? '; colors show relevance as a share of the full window' : '');
   return '<div class="context-donut" role="img" aria-label="' + esc(label) + '"><i class="context-donut-ring" style="background:' + slices.background + '"></i><span>' + percentage(slices.used) + '<small>window used</small><small class="context-review-note">' + esc(review) + '</small></span></div>';
 }
 function roundedDollarCeiling(value) {
@@ -1595,6 +1606,8 @@ async function loadPreferences() {
     Object.assign(cadenceState, value, { loaded: true });
     renderCadenceOptions();
     renderAnalysisToggles();
+    // Context captions say whether AI review is on, so they follow the loaded settings.
+    render();
   } catch {
     return;
   }
