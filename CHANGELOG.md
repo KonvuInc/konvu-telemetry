@@ -2,7 +2,10 @@
 
 ## 1.0.3 - 2026-10-07
 
-- Refresh the README media link; application behavior is unchanged.
+- Turn context drift analysis on by default for sessions within your plan, including
+  existing installs that never answered. An earlier explicit no is kept, and
+  analysis beyond the plan stays off until you allow it.
+- Refresh the README media link.
 
 ## 1.0.2 - 2026-10-07
 

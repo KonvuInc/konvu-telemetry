@@ -60,7 +60,7 @@ konvu-telemetry uninstall   # Remove everything
 
 ## AI context review
 
-Off until you say yes. Turn it on or off any time, in the dashboard settings or with:
+On by default for sessions within your plan; reviewing sessions billed beyond it stays off until you allow it. `konvu-telemetry setup` asks once (Enter keeps it on). Turn it on or off any time, in the dashboard settings or with:
 
 ```sh
 konvu-telemetry context-analysis on        # Turn it on

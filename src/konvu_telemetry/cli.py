@@ -30,25 +30,25 @@ from .preferences import (
 from .tracking import set_tracking_enabled, tracking_status
 
 
-CONTEXT_ANALYSIS_QUESTION = """Context drift analysis (optional)
-About every 10 prompts, Konvu can ask a small model (Claude Haiku or gpt-6-luna)
+CONTEXT_ANALYSIS_QUESTION = """Context drift analysis (on by default, within your plan)
+About every 10 prompts, Konvu asks a small model (Claude Haiku or gpt-6-luna)
 through your own Claude or Codex login which parts of an active session's context are
 still needed, so you know when to compact. Session text goes only to that provider,
 never to Konvu. A review costs a few cents at API prices, and on a plan it comes out
 of your allowance, never past 90% of a limit. Hourly caps stop it from running away.
 Change it later in the dashboard or with `konvu-telemetry context-analysis on|off`.
-Turn it on? [y/N] """
+Keep it on? [Y/n] """
 
 
 def _ask_context_analysis() -> bool | None:
-    """Ask once at setup; without a terminal the choice stays unset."""
+    """Ask once at setup; without a terminal the choice stays unset, which means on."""
     if not sys.stdin.isatty():
         return None
     try:
         answer = input(CONTEXT_ANALYSIS_QUESTION).strip().lower()
     except EOFError:
         return None
-    return answer in {"y", "yes"}
+    return answer not in {"n", "no"}
 
 
 def run_setup(arguments: argparse.Namespace) -> None:
@@ -71,13 +71,7 @@ def run_setup(arguments: argparse.Namespace) -> None:
             current["jump_percent"],
             context_analysis_enabled=enabled,
         )
-    result["context_analysis"] = (
-        "on"
-        if current["context_analysis_enabled"]
-        else "off"
-        if current["context_analysis_consent"] == "disabled"
-        else "not chosen"
-    )
+    result["context_analysis"] = "on" if current["context_analysis_enabled"] else "off"
     print(json.dumps(result, indent=2))
 
 
