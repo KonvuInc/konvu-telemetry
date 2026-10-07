@@ -38,22 +38,30 @@ class PreferencesTests(unittest.TestCase):
     def test_defaults_apply_when_nothing_is_stored(self) -> None:
         preferences = read_preferences()
         self.assertEqual(preferences["cadence"], DEFAULT_CADENCE)
-        self.assertFalse(preferences["context_analysis_enabled"])
+        self.assertTrue(preferences["context_analysis_enabled"])
+        self.assertFalse(preferences["context_analysis_allow_paid"])
         self.assertEqual(preferences["context_analysis_consent"], "unset")
 
-    def test_legacy_analysis_setting_requires_explicit_consent(self) -> None:
+    def test_an_explicit_no_survives_the_new_default(self) -> None:
         preferences_path().write_text(
             json.dumps(
                 {
                     "cadence": DEFAULT_CADENCE,
                     "context_analysis_enabled": True,
+                    "context_analysis_consent": "disabled",
                 }
             )
         )
 
+        self.assertFalse(read_preferences()["context_analysis_enabled"])
+
+    def test_an_update_without_a_stored_choice_turns_analysis_on(self) -> None:
+        preferences_path().write_text(json.dumps({"cadence": DEFAULT_CADENCE}))
+
         preferences = read_preferences()
 
-        self.assertFalse(preferences["context_analysis_enabled"])
+        self.assertTrue(preferences["context_analysis_enabled"])
+        self.assertFalse(preferences["context_analysis_allow_paid"])
         self.assertEqual(preferences["context_analysis_consent"], "unset")
 
     def test_analysis_consent_is_explicit_and_survives_cadence_changes(self) -> None:
@@ -339,27 +347,25 @@ class PreferencesTests(unittest.TestCase):
         self.asked = asked.called
         return json.loads(output.getvalue()[output.getvalue().index("{") :])
 
-    def test_setup_asks_and_defaults_context_analysis_to_off(self) -> None:
+    def test_setup_asks_and_defaults_context_analysis_to_on(self) -> None:
         result = self.run_setup([], "", tty=True)
 
         self.assertTrue(self.asked)
-        self.assertEqual(result["context_analysis"], "off")
-        self.assertEqual(read_preferences()["context_analysis_consent"], "disabled")
-
-    def test_setup_enables_context_analysis_only_on_an_explicit_yes(self) -> None:
-        result = self.run_setup([], "y", tty=True)
-
         self.assertEqual(result["context_analysis"], "on")
-        self.assertTrue(read_preferences()["context_analysis_enabled"])
+        self.assertEqual(read_preferences()["context_analysis_consent"], "enabled")
+
+    def test_setup_disables_context_analysis_on_an_explicit_no(self) -> None:
+        result = self.run_setup([], "n", tty=True)
+
+        self.assertEqual(result["context_analysis"], "off")
+        self.assertFalse(read_preferences()["context_analysis_enabled"])
 
     def test_setup_never_asks_twice_or_without_a_terminal(self) -> None:
-        self.assertEqual(
-            self.run_setup([], None, tty=False)["context_analysis"], "not chosen"
-        )
+        self.assertEqual(self.run_setup([], None, tty=False)["context_analysis"], "on")
         self.assertFalse(self.asked)
-        write_preferences(DEFAULT_CADENCE, context_analysis_enabled=True)
+        write_preferences(DEFAULT_CADENCE, context_analysis_enabled=False)
 
-        self.assertEqual(self.run_setup([], "n", tty=True)["context_analysis"], "on")
+        self.assertEqual(self.run_setup([], "y", tty=True)["context_analysis"], "off")
         self.assertFalse(self.asked)
 
     def test_setup_flag_answers_without_asking(self) -> None:

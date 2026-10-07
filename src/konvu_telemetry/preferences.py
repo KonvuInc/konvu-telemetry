@@ -48,7 +48,8 @@ def _default() -> Preferences:
         "cadence": DEFAULT_CADENCE,
         "custom_rule": "",
         "jump_percent": DEFAULT_JUMP_PERCENT,
-        "context_analysis_enabled": False,
+        # On by default within the plan; beyond-plan use stays opt-in.
+        "context_analysis_enabled": True,
         "context_analysis_consent": "unset",
         "context_analysis_allow_paid": False,
     }
