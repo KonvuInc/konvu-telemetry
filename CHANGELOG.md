@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.9 - 2026-10-05
+
+- Keep Codex CLI usage boxes visible when spawned sessions inherit Claude Desktop
+  metadata.
+- Make Claude Desktop and Codex Desktop usage boxes obey the selected cadence,
+  including explicit suppression when a box should not appear.
+- Stabilize usage-jump windows against small provider reset timestamp changes.
+
 ## 0.3.8 - 2026-10-02
 
 - Add a local context map for active Claude and Codex sessions, including model

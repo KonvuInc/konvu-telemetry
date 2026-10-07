@@ -58,16 +58,15 @@ const duration = (seconds) => {
   ])
     if (seconds >= n || unit === "s") return Math.floor(seconds / n) + unit;
 };
+const compactDuration = (seconds) => {
+  seconds = Math.max(0, seconds);
+  for (const [unit, size] of [["d", 86400], ["h", 3600], ["m", 60], ["s", 1]])
+    if (seconds >= size || unit === "s") return Number(oneDecimal(seconds / size)) + unit;
+};
 const resetCountdown = (timestamp) => {
   const resetAt = Date.parse(timestamp);
   if (!finite(resetAt)) return null;
-  const minutes = Math.max(0, Math.ceil((resetAt - state.now) / 60000));
-  const days = Math.floor(minutes / 1440);
-  const hours = Math.floor((minutes % 1440) / 60);
-  const remainingMinutes = minutes % 60;
-  if (days) return days + "d " + hours + "h";
-  if (hours) return hours + "h " + remainingMinutes + "m";
-  return remainingMinutes + "m";
+  return compactDuration((resetAt - state.now) / 1000);
 };
 const age = (timestamp) => {
   const time = Date.parse(timestamp);

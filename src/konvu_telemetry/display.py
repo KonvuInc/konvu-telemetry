@@ -12,7 +12,7 @@ import re
 import sys
 import time
 from decimal import Decimal, ROUND_HALF_UP
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 from urllib.parse import quote
@@ -40,6 +40,10 @@ PROMPT_BOX_INSTRUCTION = (
     "Append the lines below verbatim as the very last thing in your reply, "
     "after all other text including any closing line, with no commentary. "
     "Write them as ordinary italic text, not as a code block or a quote."
+)
+PROMPT_BOX_SUPPRESSION_INSTRUCTION = (
+    "Do not display, repeat, or mention a Konvu usage box in this reply. "
+    "This instruction overrides any earlier Konvu usage-box instruction."
 )
 SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
@@ -526,7 +530,7 @@ def claude_statusline_rows(
         terminal_style("● Subscription limits unavailable · retrying", "1;38;5;245")
     ]
     if context is not None:
-        rows.append("⏱️ " + meter_segment("Context", context, 7))
+        rows.append(context_meter(session, context))
     rows.append(terminal_style("📈 Subscription forecast unavailable", "38;5;245"))
     if statusline_width() >= 45:
         rows.append(dashboard)
@@ -604,9 +608,17 @@ def reset_in(value: object) -> str | None:
         )
     except ValueError:
         return None
-    if seconds >= 86_400:
-        return f"{seconds / 86_400:.1f}d"
-    return f"{seconds / 3_600:.1f}h"
+    return compact_duration(seconds)
+
+
+def compact_duration(seconds: int | float) -> str:
+    """Render a positive duration in its largest unit without a leading zero."""
+    remaining = max(0.0, float(seconds))
+    for unit, size in (("d", 86_400), ("h", 3_600), ("m", 60), ("s", 1)):
+        if remaining >= size or unit == "s":
+            amount = one_decimal(remaining / size).removesuffix(".0")
+            return f"{amount}{unit}"
+    return "0s"
 
 
 def quota_reset_times(provider: str) -> dict[str, str]:
@@ -784,6 +796,18 @@ def prompt_box_context(provider: str, session_id: str) -> str | None:
     )
 
 
+def prompt_box_suppression_context() -> str:
+    """Override an earlier desktop box instruction for this one reply."""
+    return json.dumps(
+        {
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": PROMPT_BOX_SUPPRESSION_INSTRUCTION,
+            }
+        }
+    )
+
+
 def codex_hook_request() -> tuple[dict[str, object], str] | None:
     """Read a Codex hook's stdin payload and the valid session identity it names."""
     try:
@@ -844,6 +868,20 @@ def _binding_quota_window(provider: str) -> tuple[str, float] | None:
             continue
         limit_id = window.get("limit_id")
         resets_at = window.get("resets_at")
+        reset_identity = resets_at if isinstance(resets_at, str) else ""
+        if isinstance(resets_at, str):
+            try:
+                # Provider timestamps drift by fractions of a second around minute boundaries.
+                reset_identity = (
+                    (
+                        datetime.fromisoformat(resets_at.replace("Z", "+00:00"))
+                        + timedelta(seconds=30)
+                    )
+                    .replace(second=0, microsecond=0)
+                    .isoformat()
+                )
+            except ValueError:
+                pass
         key = json.dumps(
             [
                 provider,
@@ -851,7 +889,7 @@ def _binding_quota_window(provider: str) -> tuple[str, float] | None:
                 limit_id if isinstance(limit_id, str) else "default",
                 # A new window instance restarts near zero, so its reset time is
                 # part of its identity; without it a rollover reads as a drop.
-                resets_at if isinstance(resets_at, str) else "",
+                reset_identity,
             ]
         )
         candidates.append((float(used), key))
@@ -993,7 +1031,7 @@ def silent_hook(hook: Callable[[], None]) -> Callable[[], None]:
 
 @silent_hook
 def codex_hook() -> None:
-    """Return the boxed Codex CLI usage message from its local session file."""
+    """Return the boxed Codex usage message at the end of a completed turn."""
     request = codex_hook_request()
     if request is None:
         print(SUPPRESS_OUTPUT)
@@ -1001,13 +1039,9 @@ def codex_hook() -> None:
     payload, session_id = request
     turn_id = payload.get("turn_id")
     transcript = codex_hook_transcript(payload, session_id)
-    # Whether a tool-free turn earns a box is the cadence's call, so the count is
-    # handed to the gate rather than used to suppress the box ahead of it.
-    if (
-        not isinstance(turn_id, str)
-        or transcript is None
-        or codex_is_desktop(transcript)
-    ):
+    # The hook invocation is authoritative: spawned CLI sessions can inherit
+    # desktop transcript metadata from their parent.
+    if not isinstance(turn_id, str) or transcript is None:
         print(SUPPRESS_OUTPUT)
         return
     if not should_show_usage(
@@ -1045,12 +1079,13 @@ def claude_prompt_hook() -> None:
     session_id = payload.get("session_id")
     if not isinstance(session_id, str) or not valid_session_id(session_id):
         return
-    if not should_show_usage("claude", session_id):
-        return
-    context = prompt_box_context("claude", session_id)
-    if context is not None:
-        print(context)
-        record_usage_shown("claude", session_id)
+    if should_show_usage("claude", session_id):
+        context = prompt_box_context("claude", session_id)
+        if context is not None:
+            print(context)
+            record_usage_shown("claude", session_id)
+            return
+    print(prompt_box_suppression_context())
 
 
 @silent_hook
@@ -1064,13 +1099,13 @@ def codex_prompt_hook() -> None:
     if not codex_is_desktop(codex_hook_transcript(payload, session_id)):
         print(SUPPRESS_OUTPUT)
         return
-    if not should_show_usage("codex", session_id):
-        print(SUPPRESS_OUTPUT)
-        return
-    context = prompt_box_context("codex", session_id)
-    print(SUPPRESS_OUTPUT if context is None else context)
-    if context is not None:
-        record_usage_shown("codex", session_id)
+    if should_show_usage("codex", session_id):
+        context = prompt_box_context("codex", session_id)
+        if context is not None:
+            print(context)
+            record_usage_shown("codex", session_id)
+            return
+    print(prompt_box_suppression_context())
 
 
 def refreshed_session(provider: str, session_id: str) -> dict[str, object] | None:

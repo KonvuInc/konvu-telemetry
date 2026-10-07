@@ -244,6 +244,14 @@ class PreferencesTests(unittest.TestCase):
         with self.binding_window("w2", 20.0):
             self.assertTrue(should_show_usage("claude", "s"))
 
+    def test_reset_timestamp_jitter_does_not_rearm_a_usage_jump(self) -> None:
+        write_preferences("usage-jump", jump_percent=2.0)
+        with self.binding_window("2026-09-28T18:29:59.758Z", 40.0):
+            self.assertTrue(should_show_usage("claude", "s"))
+            record_usage_shown("claude", "s")
+        with self.binding_window("2026-09-28T18:30:00.758Z", 40.0):
+            self.assertFalse(should_show_usage("claude", "s"))
+
     def test_a_figure_that_went_backwards_re_arms_within_one_window(self) -> None:
         """Guards the drop check on its own, with the window identity held fixed."""
         write_preferences("usage-jump", jump_percent=50.0)
