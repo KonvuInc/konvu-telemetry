@@ -2064,7 +2064,7 @@ class ServiceTests(unittest.TestCase):
             {
                 "systemMessage": "\n╭─\n"
                 "│ 🔴 Paying\n"
-                "│ ⏱️ Context [█████░░] 65.0%\n"
+                "│ 🧠 Context ⬜⬜⬜⬜⬜⬜▫️▫️▫️▫️ 65.0%\n"
                 "│ 💸 Current spend $25.4  ━━━▶  $30.3 forecasted in next 10 prompts\n"
                 "│ 🔗 run konvu-telemetry setup to start the dashboard\n"
                 "╰─"
@@ -2096,7 +2096,9 @@ class ServiceTests(unittest.TestCase):
         self.assertNotIn("systemMessage", payload)
         context = payload["hookSpecificOutput"]["additionalContext"]
         self.assertIn("verbatim as the very last thing in your reply", context)
-        self.assertIn("│ ⏱️ Week [░░░░░░░] 3.0%  Context [█████░░] 65.0%", context)
+        self.assertIn(
+            "│ ⏱️ Week [░░░░░░░] 3.0%\n│ 🧠 Context ⬜⬜⬜⬜⬜⬜▫️▫️▫️▫️ 65.0%", context
+        )
         for client in ("cli", "unknown"):
             self.assertEqual(
                 json.loads(self.run_codex_hook(codex_prompt_hook, client, session)),
@@ -2422,7 +2424,7 @@ class ServiceTests(unittest.TestCase):
             lines = usage_box_lines(session, "3.0% weekly limit")
         self.assertEqual(lines[0], "╭─")
         self.assertEqual(lines[-1], "╰─")
-        self.assertIn("│ ⏱️ Context [████░░░] 50.0%", lines)
+        self.assertIn("│ 🧠 Context ⬜⬜⬜⬜⬜▫️▫️▫️▫️▫️ 50.0%", lines)
 
     def test_usage_box_hides_codex_credit_limit_until_the_plan_is_exhausted(
         self,
@@ -2485,7 +2487,9 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("Context", output)
         self.assertIn("87%", output)
         with health_patch({"status": "stale"}):
-            self.assertIn("│ ⏱️ Context [████░░░] 50.0%", usage_box_lines(session, ""))
+            self.assertIn(
+                "│ 🧠 Context ⬜⬜⬜⬜⬜▫️▫️▫️▫️▫️ 50.0%", usage_box_lines(session, "")
+            )
 
     def test_an_unusable_payload_context_falls_back_to_the_snapshot(self) -> None:
         for context_window in (None, {}, {"used_percentage": True}, "50%"):
