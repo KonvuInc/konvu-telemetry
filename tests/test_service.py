@@ -2388,7 +2388,7 @@ class ServiceTests(unittest.TestCase):
                 {"context_window": {"used_percentage": 50.0}},
             )
         self.assertIn("Subscription limits unavailable · retrying", output)
-        self.assertIn("⏱️ Context", output)
+        self.assertIn("Context ━━━━━━━━────────", output)
         self.assertIn("📈 Subscription forecast unavailable", output)
         self.assertNotIn("API-equivalent", output)
 

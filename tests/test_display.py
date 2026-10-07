@@ -96,6 +96,26 @@ class DisplayTests(unittest.TestCase):
         self.assertNotIn("5h", "\n".join(rows))
         self.assertNotIn("Week", "\n".join(rows))
 
+    def test_every_claude_hud_state_uses_the_thin_context_bar(self) -> None:
+        for usage_mode in ("included", "api_billed", "exhausted", None):
+            with self.subTest(usage_mode=usage_mode):
+                session = {"provider": "claude", "usage_mode": usage_mode}
+                with (
+                    patch(
+                        "konvu_telemetry.display.stored_provider_quotas",
+                        return_value={},
+                    ),
+                    patch(
+                        "konvu_telemetry.display.dashboard_line",
+                        return_value="dashboard",
+                    ),
+                ):
+                    rows = claude_statusline_rows(session, 7.0)
+
+                plain = [ANSI_ESCAPE.sub("", row) for row in rows]
+                self.assertIn("Context ━─────────────── 7%", plain)
+                self.assertNotIn("■", "".join(plain))
+
     def test_paid_codex_hook_keeps_credits_and_moves_reset_to_paying_line(self) -> None:
         quotas = {
             "codex": {
