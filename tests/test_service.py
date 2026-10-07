@@ -2613,11 +2613,22 @@ class ServiceTests(unittest.TestCase):
                 )
                 + "\n"
             )
+            # A TUI session started from an editor still records source "vscode".
+            editor_tui = root / "editor-tui.jsonl"
+            editor_tui.write_text(
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {"source": "vscode", "originator": "codex-tui"},
+                    }
+                )
+                + "\n"
+            )
             broken = root / "broken.jsonl"
             broken.write_text("not json\n")
             for path in (vscode, desktop, late):
                 self.assertTrue(codex_is_desktop(path), path.name)
-            for path in (tui, exec_run, broken, root / "missing.jsonl"):
+            for path in (tui, editor_tui, exec_run, broken, root / "missing.jsonl"):
                 self.assertFalse(codex_is_desktop(path), path.name)
             self.assertFalse(codex_is_desktop(None))
 

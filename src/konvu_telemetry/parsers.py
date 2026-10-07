@@ -598,9 +598,15 @@ def codex_client_in_file(file_path: Path) -> str:
                     continue
                 source = payload.get("source")
                 originator = payload.get("originator")
-                if source == "vscode" or originator == "Codex Desktop":
+                # The originator names the client that runs the session; a TUI session can
+                # still carry source "vscode" when it was started from an editor.
+                if originator == "codex-tui":
+                    return "cli"
+                if originator == "Codex Desktop":
                     return "desktop"
-                if source == "cli" or originator == "codex-tui":
+                if source == "vscode":
+                    return "desktop"
+                if source == "cli":
                     return "cli"
     except OSError:
         return "unknown"
