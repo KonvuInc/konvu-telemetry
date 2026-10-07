@@ -629,6 +629,11 @@ def build_snapshot(
         task_count = len(starts)
         all_events = [*events, *child_events]
         last_event = max(all_events, key=lambda event: event.timestamp)
+        # Subagents are separate threads: their latest call must not stand in for the
+        # session's own context size or model.
+        context_event = (
+            max(events, key=lambda event: event.timestamp) if events else last_event
+        )
         total_cost_status, _ = cost_status(all_events, prices)
         last_task_start = starts[-1] if starts else None
         sessions.append(
@@ -639,9 +644,9 @@ def build_snapshot(
                 "title": codex_titles.get(
                     session_id, f"Codex session {session_id[:8]}"
                 ),
-                "model": last_event.model,
-                "effort": last_event.effort,
-                "speed": last_event.usage.speed,
+                "model": context_event.model,
+                "effort": context_event.effort,
+                "speed": context_event.usage.speed,
                 "last_activity_at": datetime.fromtimestamp(
                     last_event.timestamp, timezone.utc
                 ).isoformat(),
@@ -695,8 +700,8 @@ def build_snapshot(
                     }
                     for agent_id, label, context, is_live, agent_events in child_entries
                 ],
-                "context_tokens": last_event.usage.context_tokens,
-                "context_window_tokens": last_event.context_window_tokens,
+                "context_tokens": context_event.usage.context_tokens,
+                "context_window_tokens": context_event.context_window_tokens,
                 "token_usage": {
                     "input": sum(event.usage.input_tokens for event in all_events),
                     "output": sum(event.usage.output_tokens for event in all_events),
