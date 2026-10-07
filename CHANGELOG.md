@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.2 - 2026-10-07
+
+- Keep Codex session context and AI ratings stable while subagents run by reading
+  the main thread's context instead of a subagent's.
+
 ## 1.0.1 - 2026-10-07
 
 - Review each live session after 10 new prompts, with up to four sessions
