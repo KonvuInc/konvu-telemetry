@@ -1099,6 +1099,8 @@ class ServiceTests(unittest.TestCase):
                 snapshot = build_snapshot(1767225630.0)
         session = snapshot["sessions"][0]
         self.assertEqual(session["last_activity_at"], "2026-01-01T00:00:21+00:00")
+        # The child's later call is its own thread, not the parent's context.
+        self.assertEqual(session["context_tokens"], 1)
         self.assertEqual(session["subagents"][0]["label"], "Hubble")
         self.assertEqual(session["subagents"][0]["context_tokens"], 5)
         self.assertEqual(session["subagents"][0]["cost_usd"], 6.0)
