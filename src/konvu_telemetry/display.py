@@ -215,6 +215,20 @@ def battery_meter(value: float, width: int = 7) -> str:
     )
 
 
+def context_meter(value: float, width: int = 16) -> str:
+    """Render the thin context bar every Claude HUD state uses."""
+    bounded = min(100.0, max(0.0, value))
+    filled = min(width, max(1 if bounded > 0 else 0, round(bounded / 100 * width)))
+    return (
+        terminal_style("Context", "38;5;245")
+        + " "
+        + terminal_style("━" * filled, f"1;{percentage_color(value)}")
+        + terminal_style("─" * (width - filled), "38;5;238")
+        + " "
+        + terminal_style(f"{value:.0f}%", f"1;{percentage_color(value)}")
+    )
+
+
 def statusline_width() -> int:
     """Read Claude's width hint with a conservative fallback."""
     try:
@@ -357,9 +371,9 @@ def claude_statusline_rows(
                 segments.append(
                     compact_status_meter(label, value, cells, resets.get(period))
                 )
-        if context is not None:
-            segments.append(compact_status_meter("Context", context, 8))
         rows = wrap_statusline_segments(segments, width)
+        if context is not None:
+            rows.append(context_meter(context))
         attribution = quota_window_value(session, "five_hour", "estimated_percent")
         forecast = quota_window_value(session, "five_hour", "projected_next_10_percent")
         if attribution is not None and forecast is not None:
@@ -401,7 +415,7 @@ def claude_statusline_rows(
             ):
                 context = raw_context / raw_window * 100
         if context is not None:
-            rows.append(compact_status_meter("Context", context, 8))
+            rows.append(context_meter(context))
         if isinstance(paid, (int, float)) and isinstance(paid_forecast, (int, float)):
             rows.append(
                 terminal_style("Current spend", "38;5;245")
@@ -430,7 +444,7 @@ def claude_statusline_rows(
         terminal_style("● Subscription limits unavailable · retrying", "1;38;5;245")
     ]
     if context is not None:
-        rows.append("⏱️ " + meter_segment("Context", context, 7))
+        rows.append(context_meter(context))
     rows.append(terminal_style("📈 Subscription forecast unavailable", "38;5;245"))
     if statusline_width() >= 45:
         rows.append(dashboard)
