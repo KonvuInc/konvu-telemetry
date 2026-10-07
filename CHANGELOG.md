@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.0 - 2026-10-07
 
 - Add opt-in context drift analysis: a small model, run through your own Claude or
   Codex login, rates which parts of an active session's context are still needed. The
