@@ -55,8 +55,6 @@ MIN_SECONDS_BETWEEN_PASSES = 30
 MAX_CALLS_PER_HOUR = 30
 # Across all sessions, so a version bump that re-rates everything is spread out.
 MAX_GLOBAL_CALLS_PER_HOUR = 60
-# A long autonomous turn adds context without new prompts; this much growth re-rates it.
-GROWTH_TRIGGER_TOKENS = 60_000
 SETUP_TOPIC = "Session setup"
 NOISE_TOPIC = "Tool noise"
 UNREVIEWED_TOPIC = "Not reviewed yet"
@@ -77,7 +75,10 @@ MIN_NEW_ITERATIONS = 10
 QUOTA_MAX_AGE_SECONDS = 20 * 60
 # The first retry after a failure waits this long; each further failure doubles it.
 FAILURE_BACKOFF_SECONDS = 20 * 60
-ACTIVE_SESSION_SECONDS = 5 * 60
+# A session counts as live, and can be reviewed, for as long as the dashboard lists it.
+ACTIVE_SESSION_SECONDS = 20 * 60
+# Live sessions reviewed at the same time; each pass runs up to MAX_PARALLEL_BATCHES calls.
+MAX_PARALLEL_SESSIONS = 4
 # Analysis stops while the plan window is this full, leaving headroom for the real work.
 MAX_QUOTA_USED_PERCENT = 90.0
 MAX_INITIAL_ANALYSIS_ITEMS = 90
@@ -95,7 +96,6 @@ MAX_TIMELINE_TURNS = 150
 MAX_TIMELINE_TEXT_CHARS = 120
 MAX_CURRENT_TURN_CHARS = 600
 MAX_RECORD_BYTES = 8 * 1024 * 1024
-TURN_STABILITY_SECONDS = 30
 # The provider's own starting context is session setup, like instructions and internals.
 FIXED_RELEVANT_CATEGORIES = {
     "skills_and_instructions",
@@ -2605,21 +2605,18 @@ def _session_is_active(session: dict[str, object], now: float) -> bool:
 
 
 class ContextDriftScheduler:
-    """Run at most one bounded provider analysis without blocking collection."""
+    """Review live sessions in parallel, each bounded, without blocking collection."""
 
     def __init__(self, runner: AnalysisRunner | None = None) -> None:
         self._runner = runner or LocalCliAnalysisRunner()
         self._lock = Lock()
-        self._thread: Thread | None = None
-        self._pending: PendingJob | None = None
-        self._completed: CompletedJob | None = None
+        self._threads: dict[tuple[str, str], Thread] = {}
+        self._pending: dict[tuple[str, str], PendingJob] = {}
+        self._completed: list[CompletedJob] = []
         self._failure_counts: dict[tuple[str, str], int] = {}
         self._retry_after: dict[tuple[str, str], float] = {}
         # Seeded from the usage ledger so a restart does not reset the overall hourly cap.
         self._call_starts: list[float] = _recent_call_starts(time.time())
-        self._stable_sources: dict[
-            tuple[str, str], tuple[tuple[int, int, int], float]
-        ] = {}
 
     def _run(self, job: PendingJob, payload: dict[str, object]) -> None:
         try:
@@ -2663,18 +2660,16 @@ class ContextDriftScheduler:
             except OSError:
                 LOGGER.exception("Could not persist context analysis usage")
         with self._lock:
-            self._completed = {
-                **job,
-                "outcome": outcome,
-                "completed_at": completed_at,
-            }
-            self._pending = None
+            self._completed.append(
+                {**job, "outcome": outcome, "completed_at": completed_at}
+            )
+            self._pending.pop((job["provider"], job["session_id"]), None)
 
     def wait_for_idle(self, timeout: float = ANALYSIS_TIMEOUT_SECONDS + 5) -> bool:
-        thread = self._thread
-        if thread is not None:
-            thread.join(timeout)
-        return thread is None or not thread.is_alive()
+        deadline = time.monotonic() + timeout
+        for thread in list(self._threads.values()):
+            thread.join(max(0.0, deadline - time.monotonic()))
+        return not any(thread.is_alive() for thread in self._threads.values())
 
     def close(self) -> None:
         cancel_active_analysis()
@@ -2692,12 +2687,12 @@ class ContextDriftScheduler:
             return
         self._refresh_summaries(snapshot)
         with self._lock:
-            completed = self._completed
-            self._completed = None
-        if completed is not None and _CANCELLED.is_set():
-            # A pass the user cancelled is dropped, not counted as a provider failure.
-            completed = None
-        if completed is not None:
+            finished = self._completed
+            self._completed = []
+        for completed in finished:
+            if _CANCELLED.is_set():
+                # A pass the user cancelled is dropped, not counted as a provider failure.
+                continue
             key = (completed["provider"], completed["session_id"])
             try:
                 merged = self._merge(snapshot, completed, current)
@@ -2727,27 +2722,21 @@ class ContextDriftScheduler:
                 )
         preferences = read_preferences()
         if not preferences["context_analysis_enabled"]:
-            # Turning analysis off also stops a pass that is already running.
-            if self._pending is not None:
+            # Turning analysis off also stops passes that are already running.
+            if self._pending:
                 cancel_active_analysis()
             return
         allow_paid = preferences["context_analysis_allow_paid"]
-        with self._lock:
-            # A result that finished after the merge above is merged on the next tick;
-            # scheduling now would pay twice for the same ratings.
-            if self._pending is not None or self._completed is not None:
-                return
-        active_keys = {
-            (str(session.get("provider")), str(session.get("id")))
-            for session in sessions
-            if isinstance(session, dict)
-        }
-        self._stable_sources = {
-            key: value
-            for key, value in self._stable_sources.items()
-            if key in active_keys
+        self._threads = {
+            key: thread for key, thread in self._threads.items() if thread.is_alive()
         }
         for session in sessions:
+            with self._lock:
+                busy = set(self._pending) | {
+                    (job["provider"], job["session_id"]) for job in self._completed
+                }
+            if len(self._pending) >= MAX_PARALLEL_SESSIONS:
+                return
             if not isinstance(session, dict) or not _session_is_active(
                 session, current
             ):
@@ -2774,6 +2763,9 @@ class ContextDriftScheduler:
                 )
             ):
                 continue
+            # A session with a pass in flight, or a result not merged yet, is not paid for twice.
+            if (provider, session_id) in busy:
+                continue
             if current < self._retry_after.get((provider, session_id), 0):
                 continue
             path = context_map_path(provider, session_id)
@@ -2781,9 +2773,7 @@ class ContextDriftScheduler:
                 state = json.loads(path.read_text())
             except (OSError, json.JSONDecodeError):
                 continue
-            if not isinstance(state, dict) or not self._source_is_stable(
-                provider, session_id, state, current
-            ):
+            if not isinstance(state, dict):
                 continue
             # The stored backoff outlives a collector restart, which clears _retry_after.
             if current < _stored_retry_at(state):
@@ -2841,42 +2831,12 @@ class ContextDriftScheduler:
                 return
             self._call_starts.extend([current] * calls)
             with self._lock:
-                self._pending = job
-            _CANCELLED.clear()
-            self._thread = Thread(target=self._run, args=(job, payload), daemon=True)
-            self._thread.start()
-            return
-
-    def _source_is_stable(
-        self,
-        provider: str,
-        session_id: str,
-        state: dict[str, object],
-        now: float,
-    ) -> bool:
-        cursor = _integer(state.get("cursor"), -1)
-        source = state.get("source_path")
-        if provider == "codex" and state.get("turn_complete") is False:
-            return False
-        if cursor < 0 or not isinstance(source, str):
-            return True
-        try:
-            size = Path(source).stat().st_size
-        except OSError:
-            return False
-        if cursor != size:
-            return False
-        fingerprint = (
-            _integer(state.get("current_epoch")),
-            _integer(state.get("iteration")),
-            cursor,
-        )
-        key = (provider, session_id)
-        previous = self._stable_sources.get(key)
-        if previous is None or previous[0] != fingerprint:
-            self._stable_sources[key] = (fingerprint, now)
-            return False
-        return now - previous[1] >= TURN_STABILITY_SECONDS
+                if not self._pending:
+                    _CANCELLED.clear()
+                self._pending[(provider, session_id)] = job
+            thread = Thread(target=self._run, args=(job, payload), daemon=True)
+            self._threads[(provider, session_id)] = thread
+            thread.start()
 
     @staticmethod
     def _record_failure(
@@ -3141,16 +3101,6 @@ class ContextDriftScheduler:
             and _integer(state.get("iteration"))
             > _integer(analysis.get("analyzed_iteration"))
         ):
-            return "delta"
-        # Context that grew a lot since the last pass (a long turn, or a short session with a
-        # big first prompt) is rated without waiting for ten prompts.
-        observed = _observed_tokens(state)
-        rated_tokens = (
-            _integer(analysis.get("analyzed_tokens"))
-            if _analysis_is_current(analysis) and isinstance(analysis, dict)
-            else 0
-        )
-        if observed - rated_tokens >= GROWTH_TRIGGER_TOKENS:
             return "delta"
         # Ratings from an older method are rebuilt at once rather than after ten prompts.
         if (
