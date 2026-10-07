@@ -4,7 +4,10 @@
 
 Konvu Telemetry tracks every Claude Code and Codex session on your Mac: what it costs, how much of your plan it uses, how full its context is, and how much of that context is stale. A small AI check runs in the background to spot finished or replaced work, so you know when to `/compact` and keep the agent focused.
 
-https://github.com/KonvuInc/konvu-telemetry/raw/main/docs/media/demo.mp4
+
+
+https://github.com/user-attachments/assets/9cea340d-6055-4f81-acf2-24f4aeb2610f
+
 
 ## What you get
 
