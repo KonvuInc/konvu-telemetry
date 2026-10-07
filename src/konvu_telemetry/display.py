@@ -180,15 +180,6 @@ def dashboard_line() -> str:
     )
 
 
-def context_usage_text(session: dict[str, object]) -> str:
-    """Render context as a percentage when the provider exposes its window size."""
-    context = session.get("context_tokens")
-    window = session.get("context_window_tokens")
-    if isinstance(context, int) and isinstance(window, int) and window > 0:
-        return f"{percentage(context / window * 100)} context"
-    return f"{tokens(context)} context"
-
-
 def terminal_style(text: str, code: str) -> str:
     """Apply ANSI color unless the terminal explicitly disables it."""
     if os.environ.get("NO_COLOR") or os.environ.get("TERM") == "dumb":
@@ -311,10 +302,8 @@ def context_analysis(session: dict[str, object]) -> dict[str, object] | None:
     return analysis
 
 
-def relevance_context_meter(
-    label: str, value: float, width: int, analysis: dict[str, object]
-) -> str:
-    """Render used context split into needed, compactable and unreviewed cells."""
+def relevance_cells(value: float, width: int, analysis: dict[str, object]) -> list[int]:
+    """Split the used cells into needed, drifting, not needed and unreviewed counts."""
     bounded = min(100.0, max(0.0, value))
     filled = min(width, max(1 if bounded > 0 else 0, round(bounded / 100 * width)))
     shares = [
@@ -330,6 +319,15 @@ def relevance_context_meter(
         range(len(exact)), key=lambda i: exact[i] - counts[i], reverse=True
     )[: filled - sum(counts)]:
         counts[index] += 1
+    return counts
+
+
+def relevance_context_meter(
+    label: str, value: float, width: int, analysis: dict[str, object]
+) -> str:
+    """Render used context split into needed, compactable and unreviewed cells."""
+    counts = relevance_cells(value, width, analysis)
+    filled = sum(counts)
     colors = [code for _, code in RELEVANCE_COLORS] + ["38;5;245"]
     # A thin continuous bar reads as one stacked gauge instead of separate battery cells.
     cells = "".join(
@@ -365,21 +363,57 @@ def compact_worthwhile(analysis: dict[str, object], used_percent: float) -> bool
     )
 
 
+def compact_panel_url(session: dict[str, object]) -> str:
+    """The dashboard panel that holds the session's full /compact command."""
+    return (
+        f"http://127.0.0.1:{DASHBOARD_PORT}/?session="
+        + quote(f"{session.get('provider') or 'claude'}:{session.get('id')}", safe="")
+        + "&tab=context"
+    )
+
+
 def compact_advice(session: dict[str, object], used_percent: float) -> str | None:
     """A clickable /compact call to action that opens the panel holding the full command."""
     analysis = context_analysis(session)
     command = analysis.get("compact_command") if analysis else None
     if not analysis or not command or not compact_worthwhile(analysis, used_percent):
         return None
-    url = (
-        f"http://127.0.0.1:{DASHBOARD_PORT}/?session="
-        + quote(f"{session.get('provider') or 'claude'}:{session.get('id')}", safe="")
-        + "&tab=context"
-    )
+    url = compact_panel_url(session)
     # Only the command word is colored; the terminal's own link styling marks it clickable.
     return terminal_link(terminal_style("/compact", "38;5;141"), url) + terminal_style(
         " suggested", "38;5;245"
     )
+
+
+# Hook output has no terminal colors, so the context bands use colored squares.
+TEXT_FREE_CELL = "▫️"
+
+
+# Context bands: needed, drifting (unused), not needed, unreviewed.
+TEXT_RELEVANCE_CELLS = ("🟩", "🟨", "🟥", "⬜")
+
+
+def text_context_meter(
+    session: dict[str, object], value: float, width: int = 10
+) -> str:
+    """Render the relevance bar for Codex and desktop usage boxes; free space is small."""
+    # Unrated context (new session or just compacted) shows as grey until it is reviewed.
+    counts = relevance_cells(value, width, context_analysis(session) or {})
+    return "".join(
+        cell * count for cell, count in zip(TEXT_RELEVANCE_CELLS, counts)
+    ) + TEXT_FREE_CELL * (width - sum(counts))
+
+
+def text_compact_advice(session: dict[str, object], used_percent: float) -> str | None:
+    """The /compact suggestion for usage boxes, linking the panel with the full command."""
+    analysis = context_analysis(session)
+    if (
+        not analysis
+        or not analysis.get("compact_command")
+        or not compact_worthwhile(analysis, used_percent)
+    ):
+        return None
+    return f"✂️ /compact {compact_panel_url(session)}"
 
 
 def context_meter(session: dict[str, object], value: float) -> str:
@@ -750,14 +784,13 @@ def usage_box_lines(
         if paying
         else ["⚪ Subscription limit unavailable"]
     )
-    context = context_usage_text(session)
-    context_percent = session.get("context_tokens")
+    context_tokens = session.get("context_tokens")
     window = session.get("context_window_tokens")
-    if isinstance(context_percent, int) and isinstance(window, int) and window > 0:
-        used = context_percent / window * 100
-        context_row = f"Context [{meter(used, 7)}] {percentage(used)}"
-    else:
-        context_row = f"Context {context}"
+    used = (
+        context_tokens / window * 100
+        if isinstance(context_tokens, int) and isinstance(window, int) and window > 0
+        else None
+    )
     quota_meters = hook_quota_meters(
         quota_text,
         provider,
@@ -767,8 +800,15 @@ def usage_box_lines(
     )
     if session.get("quota_status") == "stale" and quota_meters:
         quota_meters = f"Last known {quota_meters}"
-    meter_row = f"{quota_meters}  {context_row}" if quota_meters else context_row
-    rows.append(f"⏱️ {meter_row}")
+    if quota_meters:
+        rows.append(f"⏱️ {quota_meters}")
+    # Context gets its own line, with the /compact suggestion beside it.
+    if used is not None:
+        advice = text_compact_advice(session, used)
+        rows.append(
+            f"🧠 Context {text_context_meter(session, used)} {percentage(used)}"
+            + (f"  ·  {advice}" if advice else "")
+        )
     rows.append(hook_forecast_row(session))
     rows.append(dashboard_line().replace("dashboard:", "Open live dashboard"))
     return ["╭─", *(f"│ {row}" for row in rows), "╰─"]
