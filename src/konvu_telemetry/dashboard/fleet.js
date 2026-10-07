@@ -988,7 +988,7 @@ function ledgerTable(group, scale) {
 }
 function ledger(rows) {
   const scale = ledgerDollarScale(rows);
-  const key = '<div class="context-ring-key"><span>Context rings</span><span><i class="context-key-needed"></i>Needed now</span><span title="AI rated this context as drifting from the current goal or stale"><i class="context-key-old"></i>Less useful now</span><span><i class="context-key-unreviewed"></i>Not reviewed</span><span><i class="context-key-free"></i>Free space</span><small>When enabled, AI reviews after 10 prompts or a major context change.</small></div>';
+  const key = '<div class="context-ring-key"><span>Context rings</span><span><i class="context-key-needed"></i>Needed</span><span title="AI estimate: not needed for the current work. Review before compacting."><i class="context-key-old"></i>Not needed now</span><span><i class="context-key-unreviewed"></i>Unreviewed</span><span><i class="context-key-free"></i>Free space</span><small>When enabled, AI reviews after 10 prompts or a major context change.</small></div>';
   return key + planGroups(rows).map((group) => ledgerTable(group, scale)).join("");
 }
 
@@ -2399,10 +2399,6 @@ function analysisUsageText(session) {
   }
   return prefix + ' · usage share pending';
 }
-function relevanceLegend(analysis) {
-  if (!analysis) return '<span class="relevance-occupied"><i></i>Used</span>';
-  return '<span class="relevance-good" title="Still needed for the current work"><i></i>Needed</span><span class="relevance-stale" title="AI estimate: not needed for the current work. Review before compacting."><i></i>Not needed now</span><span class="relevance-unknown"><i></i>Unreviewed</span>';
-}
 function contextHero(s) {
   const { analysis, used, portions, background } = contextWindowSlices(s);
   if (used === null) return '<div class="context-hero"><div class="context-hero-main"><div class="context-hero-ring" role="img" aria-label="Context use unavailable" style="background:#edeaf2"><div class="context-hero-ring-center"><strong>—</strong><span>window used</span></div></div><div class="context-hero-copy"><p class="context-rating-pending">Waiting for a provider context checkpoint.</p></div></div></div>';
@@ -2413,11 +2409,6 @@ function contextHero(s) {
   if (analysis && used > 0 && unreviewed / used * 100 > 0.1) parts.push(['Unreviewed', unreviewed, 'unreviewed', 'Not rated by AI']);
   const legend = parts.map(([label, value, kind, meaning]) => '<div class="context-mix-row ' + kind + '" title="' + esc(meaning) + '"><i></i><span>' + label + '</span><strong>' + percentage(used ? value / used * 100 : 0) + '</strong></div>').join('');
   return '<div class="context-hero"><div class="context-hero-main">' + ring + '<div class="context-hero-copy">' + (analysis ? '<div class="context-mix-scope">Of the context in use</div><div class="context-mix-list">' + legend + '</div>' : '<p class="context-rating-pending">AI relevance analysis is pending. The ring shows how much of the window is occupied.</p>') + '</div></div></div>';
-}
-function contextFocus(s) {
-  const focus = analysisFor(s)?.current_intent;
-  if (!focus) return '';
-  return '<div class="context-focus-line"><span>Current focus</span><p title="' + esc(focus) + '">' + esc(focus) + '</p></div>';
 }
 function topicTiles(rows, contextTokens, analyzed, sourceTypes) {
   if (!rows.length) return '<p class="context-topic-empty">No context sources were recorded for this checkpoint.</p>';
@@ -2534,11 +2525,6 @@ function contextTimeline(s) {
   }).join('');
   const key = segments.map((segment) => '<div class="context-journey-item"><span class="context-journey-index phase-' + Math.min(segment.index, 5) + '">' + String(segment.index + 1).padStart(2, '0') + '</span><strong>' + esc(segment.label) + '</strong></div>').join('');
   return '<section class="context-section context-journey"><div class="context-section-head"><h3>Work so far</h3></div>' + (segments.length ? '<div class="context-journey-axis"><span>First prompt</span><span>Now · prompt ' + lastPrompt + '</span></div><div class="context-journey-track" role="img" aria-label="Work topics across ' + lastPrompt + ' prompts">' + track + '</div><div class="context-journey-key">' + key + '</div>' : '') + '</section>';
-}
-function contextAnalysisState(s) {
-  if (analysisFor(s)) return '<p class="context-analysis-note">' + esc(analysisUsageText(s)) + '</p>';
-  const retrying = s.context_map?.analysis?.state === 'retrying';
-  return '<p class="context-analysis-note">' + (retrying ? 'The latest AI analysis was incomplete and will retry. ' : 'AI enrichment has not completed for this session. ') + esc(analysisUsageText(s)) + '</p>';
 }
 function renderInspector() {
   const panel = $("#inspector"),

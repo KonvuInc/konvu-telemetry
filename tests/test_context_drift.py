@@ -924,7 +924,7 @@ class ContextDriftTests(unittest.TestCase):
         runner = Mock(side_effect=self.outcome)
         scheduler = ContextDriftScheduler(runner)
 
-        scheduler.refresh(self.snapshot("beyond_plan"), self.quotas(used=100.0), NOW)
+        scheduler.refresh(self.snapshot("exhausted"), self.quotas(used=100.0), NOW)
         self.assertTrue(scheduler.wait_for_idle())
 
         runner.assert_called_once()
@@ -941,6 +941,25 @@ class ContextDriftTests(unittest.TestCase):
         scheduler = ContextDriftScheduler(runner)
 
         scheduler.refresh(self.snapshot(), self.quotas(95), NOW)
+
+        runner.assert_not_called()
+
+    def test_allow_paid_never_runs_a_session_whose_plan_is_unknown(self) -> None:
+        preference = read_preferences()
+        write_preferences(
+            preference["cadence"],
+            preference["custom_rule"],
+            preference["jump_percent"],
+            context_analysis_allow_paid=True,
+        )
+        runner = Mock(side_effect=self.outcome)
+        scheduler = ContextDriftScheduler(runner)
+
+        scheduler.refresh(
+            self.snapshot("unknown"),
+            {"claude": {"status": "unavailable", "windows": []}},
+            NOW,
+        )
 
         runner.assert_not_called()
 
@@ -1233,7 +1252,7 @@ class ContextDriftTests(unittest.TestCase):
         new_items = [i for i in runner.call_args.args[1]["items"] if "card" not in i]
         self.assertEqual(len(new_items), 15)
 
-    def test_backfill_rechecks_the_quota_reserve_before_each_batch(self) -> None:
+    def test_backfill_rechecks_the_quota_reserve_before_each_pass(self) -> None:
         snapshot = self.write_long_session(60)
         runner = Mock(side_effect=self.outcome)
         scheduler = ContextDriftScheduler(runner)
@@ -1685,6 +1704,25 @@ class ContextDriftTests(unittest.TestCase):
         self.assertEqual(redact("password = hunter2 ok"), "[redacted] ok")
         path = "cd /Users/ag/Desktop/code/konvu-telemetry-context-drift && ls"
         self.assertEqual(redact(path), path)
+        for leaked in (
+            "export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            '{"password": "hunter2"}',
+            "DATABASE_URL=postgres://admin:S3cretPass@db:5432/x",
+            "Authorization: Bearer abcDEF123456789xyz",
+        ):
+            self.assertNotIn("hunter2", redact(leaked))
+            self.assertNotIn("S3cretPass", redact(leaked))
+            self.assertNotIn("wJalrXUtnFEMI", redact(leaked))
+            self.assertNotIn("abcDEF123456789xyz", redact(leaked))
+
+    def test_a_deeply_nested_record_is_read_without_recursing_forever(self) -> None:
+        nested: object = "deep text"
+        for _ in range(5_000):
+            nested = {"content": nested}
+
+        self.assertEqual(
+            context_drift._strings({"top": "visible", "rest": nested}), "visible"
+        )
 
     def test_scores_glued_without_newlines_still_parse(self) -> None:
         matches = context_drift._SCORE_ENTRY.findall("g1:9:0g2:5:1")
@@ -1736,6 +1774,36 @@ class ContextDriftTests(unittest.TestCase):
         self.assertEqual(runner.call_count, 2)
         stored = json.loads(context_map_path("codex", SESSION_ID).read_text())
         self.assertEqual(stored["analysis"]["summary"]["backfill_state"], "complete")
+
+    def test_a_cancelled_pass_leaves_no_failure_or_backoff(self) -> None:
+        def cancelled(provider: str, payload: dict[str, object]) -> dict[str, object]:
+            context_drift.cancel_active_analysis()
+            return {
+                "result": None,
+                "model": "unknown",
+                "usage": {},
+                "duration_seconds": 0.1,
+                "error": "cli_failed",
+            }
+
+        scheduler = ContextDriftScheduler(Mock(side_effect=cancelled))
+        scheduler.refresh(self.snapshot(), self.quotas(), NOW)
+        self.assertTrue(scheduler.wait_for_idle())
+
+        scheduler.refresh(self.snapshot(), self.quotas(observed_at=NOW + 1), NOW + 1)
+
+        stored = json.loads(context_map_path("codex", SESSION_ID).read_text())
+        self.assertNotIn("retry_at", stored.get("analysis") or {})
+        self.assertEqual(scheduler._failure_counts, {})
+
+    def test_the_overall_hourly_call_cap_holds_across_sessions(self) -> None:
+        runner = Mock(side_effect=self.outcome)
+        scheduler = ContextDriftScheduler(runner)
+        scheduler._call_starts = [NOW - 60] * context_drift.MAX_GLOBAL_CALLS_PER_HOUR
+
+        scheduler.refresh(self.snapshot(), self.quotas(), NOW)
+
+        runner.assert_not_called()
 
     def test_failed_analysis_uses_exponential_backoff(self) -> None:
         failed = {
@@ -1846,6 +1914,10 @@ class ContextDriftTests(unittest.TestCase):
             outcome = LocalCliAnalysisRunner()("claude", {"items": []})
 
         command = run.call_args.args[0]
+        self.assertEqual(
+            command[command.index("--model") + 1],
+            context_drift.CLAUDE_ANALYSIS_MODEL,
+        )
         self.assertEqual(command[command.index("--tools") + 1], "")
         self.assertIn("--no-session-persistence", command)
         self.assertIn("--strict-mcp-config", command)

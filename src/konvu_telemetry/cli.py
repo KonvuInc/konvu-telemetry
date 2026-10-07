@@ -41,7 +41,7 @@ Turn it on? [y/N] """
 
 
 def _ask_context_analysis() -> bool | None:
-    """Ask once at setup; no answer from a terminal leaves the choice unset."""
+    """Ask once at setup; without a terminal the choice stays unset."""
     if not sys.stdin.isatty():
         return None
     try:
@@ -298,9 +298,7 @@ def build_parser() -> argparse.ArgumentParser:
     tracking.add_argument("state", choices=["on", "off", "status"])
     tracking.set_defaults(run=run_tracking)
 
-    context_analysis = register(
-        "context-analysis", "Control local conversation-drift analysis."
-    )
+    context_analysis = register("context-analysis", "Control context drift analysis.")
     context_analysis.add_argument("state", choices=["on", "off", "status"])
     paid = context_analysis.add_mutually_exclusive_group()
     paid.add_argument(

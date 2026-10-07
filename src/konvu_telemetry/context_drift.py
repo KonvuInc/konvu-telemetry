@@ -635,7 +635,13 @@ _SECRET = re.compile(
     r"\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[abpr]-[A-Za-z0-9-]{10,}"
     r"|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+"
     r"|[A-Za-z0-9+_-]{40,})"
-    r"|(?i:(?:password|passwd|secret|token|api[_-]?key)\s*[=:]\s*)\S+"
+    # NAME=value and "name": "value" forms, with any prefix or suffix on the name.
+    r"|(?i:[\w-]*(?:password|passwd|secret|token|api[_-]?key|access[_-]?key|credential)"
+    r"[\w-]*[\"']?\s*[=:]\s*[\"']?)[^\s\"',]+"
+    r"|(?i:bearer\s+)[A-Za-z0-9._~+/=-]{8,}"
+    # user:password@ inside a URL.
+    r"|(?<=://)[^\s/:@]+:[^\s/@]+@"
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)"
 )
 
 
@@ -825,7 +831,7 @@ class LocalCliAnalysisRunner:
             executable,
             "-p",
             "--model",
-            "haiku",
+            CLAUDE_ANALYSIS_MODEL,
             "--effort",
             "low",
             "--system-prompt",
@@ -983,8 +989,9 @@ _BARE_ID = re.compile(
 def _strings(value: object, remaining: int = MAX_ITEM_TEXT_CHARS) -> str:
     parts: list[str] = []
 
-    def visit(item: object) -> None:
-        if sum(len(part) for part in parts) >= remaining:
+    def visit(item: object, depth: int = 0) -> None:
+        # Real content sits a few levels deep; a pathological nesting must not recurse forever.
+        if depth > 64 or sum(len(part) for part in parts) >= remaining:
             return
         if isinstance(item, str):
             if len(item) <= 100_000 and not _BARE_ID.fullmatch(item.strip()):
@@ -992,7 +999,7 @@ def _strings(value: object, remaining: int = MAX_ITEM_TEXT_CHARS) -> str:
             return
         if isinstance(item, list):
             for child in item:
-                visit(child)
+                visit(child, depth + 1)
             return
         if isinstance(item, dict):
             for key, child in item.items():
@@ -1004,7 +1011,7 @@ def _strings(value: object, remaining: int = MAX_ITEM_TEXT_CHARS) -> str:
                     or isinstance(item.get("media_type"), str)
                 ):
                     continue
-                visit(child)
+                visit(child, depth + 1)
 
     visit(value)
     return "\n".join(parts)[:remaining]
@@ -1824,7 +1831,8 @@ def _payload(
             labels.append(
                 (label if isinstance(label, str) else category)[:MAX_LABEL_CHARS]
             )
-            fragments.append(text[:text_limit])
+            # Masked before the cut, so a truncated secret can never slip past the patterns.
+            fragments.append(_redact(text[: text_limit + 200])[:text_limit])
         if len(set(labels)) == 1 and fragments:
             content = f"{labels[0]}:\n" + "\n".join(fragments)
         else:
@@ -1850,7 +1858,7 @@ def _payload(
         )
         group_targets = list(
             dict.fromkeys(
-                f"{target[0]}: {target[1][:MAX_TARGET_CHARS]}"
+                f"{target[0]}: {_redact(target[1][: MAX_TARGET_CHARS + 200])[:MAX_TARGET_CHARS]}"
                 for event in group_events
                 for target in [targets.get(str(event.get("id")))]
                 if target is not None
@@ -2498,10 +2506,11 @@ def _merge_success(
     analysis["backfill_pending"] = job.get("backlog_left") is True or bool(retry)
     # Groups a reply skipped are re-rated on the next tick (after the pass spacing), once:
     # skipped again, they wait for the normal cadence instead of looping.
+    # A catch-up pass never re-rates old groups, so it keeps a retry that is still owed.
     analysis["retry_missed"] = (
-        missed
-        and job.get("backfill") is not True
-        and analysis.get("retry_missed") is not True
+        analysis.get("retry_missed") is True
+        if job.get("backfill") is True
+        else missed and analysis.get("retry_missed") is not True
     )
     analysis["ai_topics"] = {
         str(item.get("ai_topic")): _topic_id(str(item.get("ai_topic")))
@@ -2683,6 +2692,9 @@ class ContextDriftScheduler:
         with self._lock:
             completed = self._completed
             self._completed = None
+        if completed is not None and _CANCELLED.is_set():
+            # A pass the user cancelled is dropped, not counted as a provider failure.
+            completed = None
         if completed is not None:
             key = (completed["provider"], completed["session_id"])
             try:
@@ -2734,10 +2746,15 @@ class ContextDriftScheduler:
             if key in active_keys
         }
         for session in sessions:
-            if (
-                not isinstance(session, dict)
-                or (not allow_paid and session.get("usage_mode") != "included")
-                or not _session_is_active(session, current)
+            if not isinstance(session, dict) or not _session_is_active(
+                session, current
+            ):
+                continue
+            # Plan sessions keep the quota reserve; "allow paid" only adds sessions known to
+            # be billed beyond the plan. An unknown mode (no quota reading yet) never runs.
+            usage_mode = session.get("usage_mode")
+            if not (
+                usage_mode == "included" or (allow_paid and usage_mode == "exhausted")
             ):
                 continue
             provider = session.get("provider")
@@ -2749,10 +2766,8 @@ class ContextDriftScheduler:
                 or not isinstance(session_id, str)
                 or not isinstance(context_map, dict)
                 or context_map.get("state") != "ready"
-                # Plan sessions always keep the quota reserve; "allow paid" only lets
-                # sessions billed beyond the plan through.
                 or (
-                    session.get("usage_mode") == "included"
+                    usage_mode == "included"
                     and not _quota_allows(provider, provider_quotas, current)
                 )
             ):
@@ -2774,7 +2789,17 @@ class ContextDriftScheduler:
             mode = self._due(state)
             if mode is None:
                 continue
-            prepared = _payload(state, backfill=mode == "backfill")
+            try:
+                prepared = _payload(state, backfill=mode == "backfill")
+            except (RecursionError, ValueError) as error:
+                # One unreadable transcript backs off alone instead of stalling every session.
+                LOGGER.warning(
+                    "Context analysis skipped a session: %s", type(error).__name__
+                )
+                self._retry_after[(provider, session_id)] = (
+                    current + FAILURE_BACKOFF_SECONDS
+                )
+                continue
             if prepared is None:
                 if mode == "backfill":
                     self._finish_backfill(snapshot, provider, session_id, state)

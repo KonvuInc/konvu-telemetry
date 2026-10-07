@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Add opt-in context drift analysis: a small model, run through your own Claude or
+  Codex login, rates which parts of an active session's context are still needed. The
+  session inspector shows the split and the Claude status line suggests a `/compact`
+  once enough context is finished or replaced.
+- Add `konvu-telemetry context-analysis on|off|status` with `--allow-paid` and
+  `--plan-only`, a setup question and `setup --context-analysis on|off`, and matching
+  dashboard settings. Analysis is capped per session and overall per hour, keeps a 90%
+  plan reserve, and backs off after failures.
+
 ## 0.3.9 - 2026-10-05
 
 - Keep Codex CLI usage boxes visible when spawned sessions inherit Claude Desktop
