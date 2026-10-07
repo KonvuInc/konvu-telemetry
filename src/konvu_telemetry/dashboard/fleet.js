@@ -391,7 +391,7 @@ function compactAdvice(s) {
   if (!nonnegative(used) || (waste / 100) * clampPercent(used) < COMPACT_RECOMMEND_WINDOW_POINTS) return "";
   const terminal = (label, command) => '<div class="compact-terminal"><div class="compact-terminal-bar"><span>' + label + '</span><button type="button" class="compact-advice-copy" data-copy-compact="' + esc(command) + '">Copy</button></div><pre class="compact-advice-command"><code>' + esc(command) + '</code></pre></div>';
   const steps = s.provider === 'codex'
-    ? '<div class="compact-steps"><div><h4>1 · Send this message to Codex</h4>' + terminal('Message', 'Keep these priorities when my next message says /compact:\n' + analysis.compact_prompt + '\nI will send /compact next.') + '</div><div><h4>2 · Then send this command</h4>' + terminal('Command', '/compact') + '</div></div>'
+    ? '<div class="compact-steps"><div><h4>1 · Send this message to Codex</h4>' + terminal('Message', 'My next message will be /compact. Please follow these priorities:\n' + analysis.compact_prompt) + '</div><div><h4>2 · Then send this command</h4>' + terminal('Command', '/compact') + '</div></div>'
     : terminal('Claude Code', analysis.compact_command);
   return '<section class="compact-advice" aria-label="Compact suggestion"><div class="compact-advice-head"><h3>Compact this session</h3><span>' + percentage(waste) + ' finished or replaced</span></div>' + steps + '</section>';
 }
