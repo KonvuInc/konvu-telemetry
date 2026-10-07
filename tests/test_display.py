@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import os
+import re
 import unittest
 from unittest.mock import patch
 
 from konvu_telemetry.display import (
     ANSI_ESCAPE,
     claude_statusline_rows,
+    compact_advice,
     compact_duration,
+    context_meter,
     compact_status_meter,
     hook_quota_meters,
+    relevance_context_meter,
     usage_box_lines,
 )
 
@@ -156,3 +160,73 @@ class DisplayTests(unittest.TestCase):
         self.assertIn("Context [█████░░] 68.1%", rows[2])
         self.assertNotIn("Week", "\n".join(rows))
         self.assertNotIn("reset:", "\n".join(rows))
+
+
+class ContextRelevanceDisplayTests(unittest.TestCase):
+    """The Claude CLI context meter and /compact hint follow the AI ratings."""
+
+    analysis = {
+        "coverage_percent": 90,
+        "relevant_percent": 50.0,
+        "drifting_percent": 0.0,
+        "stale_percent": 50.0,
+        "droppable_percent": 50.0,
+        "compact_command": "/compact Keep the PR 91 review.",
+    }
+
+    def test_used_part_of_the_bar_splits_by_relevance(self) -> None:
+        with patch.dict(os.environ, {"TERM": "xterm-256color", "NO_COLOR": ""}):
+            meter = relevance_context_meter("Context", 50, 16, self.analysis)
+
+        self.assertIn("\x1b[1;38;5;78m━━━━\x1b[0m", meter)
+        self.assertIn("\x1b[1;38;5;203m━━━━\x1b[0m", meter)
+        self.assertEqual(ANSI_ESCAPE.sub("", meter), "Context ━━━━━━━━──────── 50%")
+
+    def test_compact_link_sits_on_the_context_line_and_opens_the_panel(self) -> None:
+        session = {
+            "id": "abc",
+            "provider": "claude",
+            "context_map": {"analysis": self.analysis},
+        }
+        with patch.dict(os.environ, {"TERM": "xterm-256color", "NO_COLOR": ""}):
+            line = context_meter(session, 50)
+
+        self.assertIn("?session=claude%3Aabc&tab=context", line)
+        plain = re.sub(r"\x1b\]8;;[^\x1b]*\x1b\\", "", ANSI_ESCAPE.sub("", line))
+        self.assertTrue(plain.endswith("·  /compact suggested"))
+        self.assertNotIn("drifting or stale", line)
+
+    def test_no_compact_hint_when_little_of_the_context_was_reviewed(self) -> None:
+        thin = {**self.analysis, "coverage_percent": 40}
+
+        self.assertIsNone(
+            compact_advice({"id": "abc", "context_map": {"analysis": thin}}, 90)
+        )
+
+    def test_compact_hint_needs_twenty_window_points_of_waste(self) -> None:
+        session = {"id": "abc", "context_map": {"analysis": self.analysis}}
+
+        # Half of 39% used is 19.5 points of the window; half of 40% is 20.
+        self.assertIsNone(compact_advice(session, 39))
+        self.assertIsNotNone(compact_advice(session, 40))
+
+    def test_context_is_always_the_second_line(self) -> None:
+        session = {
+            "id": "abc",
+            "provider": "claude",
+            "usage_mode": "included",
+            "context_map": {"analysis": self.analysis},
+        }
+        with (
+            patch.dict(
+                os.environ, {"TERM": "xterm-256color", "NO_COLOR": "", "COLUMNS": "200"}
+            ),
+            patch("konvu_telemetry.display.stored_provider_quotas", return_value={}),
+            patch("konvu_telemetry.display.quota_reset_times", return_value={}),
+            patch(
+                "konvu_telemetry.display.cli_dashboard_line", return_value="dashboard"
+            ),
+        ):
+            rows = claude_statusline_rows(session, 50)
+
+        self.assertTrue(ANSI_ESCAPE.sub("", rows[1]).startswith("Context "))

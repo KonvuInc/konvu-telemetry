@@ -334,6 +334,16 @@ class ServiceTests(unittest.TestCase):
 
         self.assertEqual(snapshot, {"sessions": []})
 
+    def test_context_analysis_failure_does_not_fail_usage_collection(self) -> None:
+        snapshot: dict[str, object] = {"sessions": []}
+        scheduler = Mock()
+        scheduler.refresh.side_effect = RecursionError("deeply nested record")
+
+        with self.assertLogs("konvu_telemetry.service", level="WARNING"):
+            service.refresh_context_drift(scheduler, snapshot, {}, 0.0)
+
+        self.assertEqual(snapshot, {"sessions": []})
+
     def test_usage_completeness_rejects_boolean_token_counters(self) -> None:
         self.assertTrue(
             has_usage_fields(

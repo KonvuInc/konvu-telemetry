@@ -15,6 +15,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
+from urllib.parse import quote
 from .config import ALLOWED_PROVIDERS, CLAUDE_DESKTOP_ENTRYPOINT, DASHBOARD_PORT
 from .parsers import (
     claude_hook_transcript,
@@ -215,20 +216,6 @@ def battery_meter(value: float, width: int = 7) -> str:
     )
 
 
-def context_meter(value: float, width: int = 16) -> str:
-    """Render the thin context bar every Claude HUD state uses."""
-    bounded = min(100.0, max(0.0, value))
-    filled = min(width, max(1 if bounded > 0 else 0, round(bounded / 100 * width)))
-    return (
-        terminal_style("Context", "38;5;245")
-        + " "
-        + terminal_style("━" * filled, f"1;{percentage_color(value)}")
-        + terminal_style("─" * (width - filled), "38;5;238")
-        + " "
-        + terminal_style(f"{value:.0f}%", f"1;{percentage_color(value)}")
-    )
-
-
 def statusline_width() -> int:
     """Read Claude's width hint with a conservative fallback."""
     try:
@@ -305,6 +292,104 @@ def compact_status_meter(
     )
 
 
+RELEVANCE_COLORS = (
+    ("relevant_percent", "38;5;78"),
+    ("drifting_percent", "38;5;221"),
+    ("stale_percent", "38;5;203"),
+)
+# Suggest /compact once compactable context fills this many points of the window.
+COMPACT_RECOMMEND_WINDOW_POINTS = 20.0
+COMPACT_MIN_COVERAGE_PERCENT = 70.0
+
+
+def context_analysis(session: dict[str, object]) -> dict[str, object] | None:
+    """The session's AI relevance summary, once at least one pass has rated it."""
+    context_map = session.get("context_map")
+    analysis = context_map.get("analysis") if isinstance(context_map, dict) else None
+    if not isinstance(analysis, dict) or not analysis.get("coverage_percent"):
+        return None
+    return analysis
+
+
+def relevance_context_meter(
+    label: str, value: float, width: int, analysis: dict[str, object]
+) -> str:
+    """Render used context split into needed, compactable and unreviewed cells."""
+    bounded = min(100.0, max(0.0, value))
+    filled = min(width, max(1 if bounded > 0 else 0, round(bounded / 100 * width)))
+    shares = [
+        max(0.0, float(raw)) if isinstance(raw, (int, float)) else 0.0
+        for key, _ in RELEVANCE_COLORS
+        for raw in [analysis.get(key)]
+    ]
+    shares.append(max(0.0, 100.0 - sum(shares)))
+    exact = [share / 100 * filled for share in shares]
+    counts = [math.floor(part) for part in exact]
+    # Largest remainders get the leftover cells so the used cells always add up.
+    for index in sorted(
+        range(len(exact)), key=lambda i: exact[i] - counts[i], reverse=True
+    )[: filled - sum(counts)]:
+        counts[index] += 1
+    colors = [code for _, code in RELEVANCE_COLORS] + ["38;5;245"]
+    # A thin continuous bar reads as one stacked gauge instead of separate battery cells.
+    cells = "".join(
+        terminal_style("━" * count, f"1;{color}")
+        for count, color in zip(counts, colors)
+    ) + terminal_style("─" * (width - filled), "38;5;238")
+    return (
+        terminal_style(label, "38;5;245")
+        + " "
+        + cells
+        + " "
+        + terminal_style(f"{value:.0f}%", f"1;{percentage_color(value)}")
+    )
+
+
+def compact_worthwhile(analysis: dict[str, object], used_percent: float) -> bool:
+    """Whether clearly dead context fills enough of the window to be worth compacting.
+
+    Only scores 0-3 count: "not needed now" context may still be looked up again.
+    """
+    raw = analysis.get("droppable_percent")
+    waste = float(raw) if isinstance(raw, (int, float)) else 0.0
+    coverage = analysis.get("coverage_percent")
+    # Advice built on a small reviewed slice of the window is not shown.
+    if (
+        not isinstance(coverage, (int, float))
+        or coverage < COMPACT_MIN_COVERAGE_PERCENT
+    ):
+        return False
+    return (
+        waste / 100 * min(100.0, max(0.0, used_percent))
+        >= COMPACT_RECOMMEND_WINDOW_POINTS
+    )
+
+
+def compact_advice(session: dict[str, object], used_percent: float) -> str | None:
+    """A clickable /compact call to action that opens the panel holding the full command."""
+    analysis = context_analysis(session)
+    command = analysis.get("compact_command") if analysis else None
+    if not analysis or not command or not compact_worthwhile(analysis, used_percent):
+        return None
+    url = (
+        f"http://127.0.0.1:{DASHBOARD_PORT}/?session="
+        + quote(f"{session.get('provider') or 'claude'}:{session.get('id')}", safe="")
+        + "&tab=context"
+    )
+    # Only the command word is colored; the terminal's own link styling marks it clickable.
+    return terminal_link(terminal_style("/compact", "38;5;141"), url) + terminal_style(
+        " suggested", "38;5;245"
+    )
+
+
+def context_meter(session: dict[str, object], value: float) -> str:
+    """Always draw the thin relevance bar; unrated context renders grey until ratings exist."""
+    analysis = context_analysis(session)
+    meter = relevance_context_meter("Context", value, 16, analysis or {})
+    advice = compact_advice(session, value)
+    return meter + (terminal_style("  ·  ", "38;5;245") + advice if advice else "")
+
+
 def wrap_statusline_segments(segments: list[str], width: int) -> list[str]:
     """Wrap complete HUD cells without dropping context on narrow terminals."""
     separator = terminal_style("  ·  ", "38;5;245")
@@ -372,8 +457,9 @@ def claude_statusline_rows(
                     compact_status_meter(label, value, cells, resets.get(period))
                 )
         rows = wrap_statusline_segments(segments, width)
+        # Context always gets its own second line so the /compact hint sits beside it.
         if context is not None:
-            rows.append(context_meter(context))
+            rows.append(context_meter(session, context))
         attribution = quota_window_value(session, "five_hour", "estimated_percent")
         forecast = quota_window_value(session, "five_hour", "projected_next_10_percent")
         if attribution is not None and forecast is not None:
@@ -415,7 +501,7 @@ def claude_statusline_rows(
             ):
                 context = raw_context / raw_window * 100
         if context is not None:
-            rows.append(context_meter(context))
+            rows.append(context_meter(session, context))
         if isinstance(paid, (int, float)) and isinstance(paid_forecast, (int, float)):
             rows.append(
                 terminal_style("Current spend", "38;5;245")
@@ -444,7 +530,7 @@ def claude_statusline_rows(
         terminal_style("● Subscription limits unavailable · retrying", "1;38;5;245")
     ]
     if context is not None:
-        rows.append(context_meter(context))
+        rows.append(context_meter(session, context))
     rows.append(terminal_style("📈 Subscription forecast unavailable", "38;5;245"))
     if statusline_width() >= 45:
         rows.append(dashboard)

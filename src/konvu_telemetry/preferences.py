@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 from .storage import (
     preferences_path,
@@ -38,6 +38,9 @@ class Preferences(TypedDict):
     cadence: str
     custom_rule: str
     jump_percent: float
+    context_analysis_enabled: bool
+    context_analysis_consent: Literal["unset", "enabled", "disabled"]
+    context_analysis_allow_paid: bool
 
 
 def _default() -> Preferences:
@@ -45,6 +48,9 @@ def _default() -> Preferences:
         "cadence": DEFAULT_CADENCE,
         "custom_rule": "",
         "jump_percent": DEFAULT_JUMP_PERCENT,
+        "context_analysis_enabled": False,
+        "context_analysis_consent": "unset",
+        "context_analysis_allow_paid": False,
     }
 
 
@@ -79,6 +85,12 @@ def read_preferences() -> Preferences:
     jump = raw.get("jump_percent")
     if isinstance(jump, (int, float)) and not isinstance(jump, bool) and jump > 0:
         value["jump_percent"] = float(jump)
+    consent = raw.get("context_analysis_consent")
+    if consent in {"enabled", "disabled"}:
+        value["context_analysis_consent"] = consent
+        value["context_analysis_enabled"] = consent == "enabled"
+    if raw.get("context_analysis_allow_paid") is True:
+        value["context_analysis_allow_paid"] = True
     return value
 
 
@@ -109,7 +121,11 @@ def ensure_preferences_file() -> Preferences:
 
 
 def write_preferences(
-    cadence: str, custom_rule: str = "", jump_percent: float | None = None
+    cadence: str,
+    custom_rule: str = "",
+    jump_percent: float | None = None,
+    context_analysis_enabled: bool | None = None,
+    context_analysis_allow_paid: bool | None = None,
 ) -> Preferences:
     """Store a cadence choice. An unknown cadence is rejected, not coerced."""
     if cadence not in CADENCES:
@@ -134,6 +150,21 @@ def write_preferences(
             "jump_percent": float(jump_percent)
             if isinstance(jump_percent, (int, float)) and jump_percent > 0
             else current["jump_percent"],
+            "context_analysis_enabled": (
+                context_analysis_enabled
+                if isinstance(context_analysis_enabled, bool)
+                else current["context_analysis_enabled"]
+            ),
+            "context_analysis_consent": (
+                "enabled" if context_analysis_enabled else "disabled"
+            )
+            if isinstance(context_analysis_enabled, bool)
+            else current["context_analysis_consent"],
+            "context_analysis_allow_paid": (
+                context_analysis_allow_paid
+                if isinstance(context_analysis_allow_paid, bool)
+                else current["context_analysis_allow_paid"]
+            ),
         }
         write_private_json(preferences_path(), value)
     return value

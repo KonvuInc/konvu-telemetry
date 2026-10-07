@@ -29,6 +29,7 @@ from .config import (
     package_version,
 )
 from .context_map import ContextMapScheduler
+from .context_drift import ContextDriftScheduler
 from .live import IncrementalLiveState
 from .provider_limits import (
     ProviderLimitPoller,
@@ -373,6 +374,7 @@ def collect_forever(
     provider_limit_poller: ProviderLimitPoller | None = None,
     on_stale_install: Callable[[], None] | None = None,
     context_map_collector: ContextMapScheduler | None = None,
+    context_drift_collector: ContextDriftScheduler | None = None,
 ) -> None:
     """Refresh local session files until the operating system stops the service."""
     global _DASHBOARD_DATA_AVAILABLE
@@ -381,6 +383,7 @@ def collect_forever(
         initial_snapshots=stored_provider_quotas()
     )
     context_mapper = context_map_collector or ContextMapScheduler()
+    context_drift = context_drift_collector or ContextDriftScheduler()
     while True:
         if package_was_replaced():
             # Exiting hands the service back to launchd, which starts it again
@@ -409,6 +412,9 @@ def collect_forever(
                     provider_quotas=provider_quotas,
                 )
                 enrich_context_maps(snapshot, live_state, context_mapper)
+                refresh_context_drift(
+                    context_drift, snapshot, provider_quotas, started_at
+                )
                 write_snapshot(snapshot)
             _DASHBOARD_DATA_AVAILABLE = snapshot_has_dashboard_data(
                 snapshot, time.time()
@@ -444,6 +450,19 @@ def enrich_context_maps(
         (collector or ContextMapScheduler()).refresh(snapshot, live_state)
     except Exception as error:
         LOGGER.warning("Context mapping failed: %s", type(error).__name__)
+
+
+def refresh_context_drift(
+    scheduler: ContextDriftScheduler,
+    snapshot: dict[str, object],
+    provider_quotas: dict[str, object],
+    started_at: float,
+) -> None:
+    """Add optional context analysis without failing core usage collection."""
+    try:
+        scheduler.refresh(snapshot, provider_quotas, started_at)
+    except Exception as error:
+        LOGGER.warning("Context analysis failed: %s", type(error).__name__)
 
 
 class DashboardRequestHandler(SimpleHTTPRequestHandler):
@@ -649,6 +668,13 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
             return
         rule = body.get("custom_rule")
         jump = body.get("jump_percent")
+        analysis_enabled = body.get("context_analysis_enabled")
+        allow_paid = body.get("context_analysis_allow_paid")
+        if (
+            analysis_enabled is not None and not isinstance(analysis_enabled, bool)
+        ) or (allow_paid is not None and not isinstance(allow_paid, bool)):
+            self.send_error(400)
+            return
         try:
             preference = write_preferences(
                 cadence,
@@ -656,6 +682,8 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
                 jump
                 if isinstance(jump, (int, float)) and not isinstance(jump, bool)
                 else None,
+                context_analysis_enabled=analysis_enabled,
+                context_analysis_allow_paid=allow_paid,
             )
         except (ValueError, OSError):
             self.send_error(400)
@@ -696,6 +724,7 @@ def _run_local_service(interval_seconds: int, port: int) -> None:
     live_state = IncrementalLiveState()
     snapshot_lock = Lock()
     refresh_coordinator = RefreshCoordinator()
+    context_drift = ContextDriftScheduler()
     handler = partial(
         DashboardRequestHandler,
         directory=str(directory),
@@ -713,13 +742,21 @@ def _run_local_service(interval_seconds: int, port: int) -> None:
     def stop_for_upgrade() -> None:
         nonlocal stale_install
         stale_install = True
+        context_drift.close()
         server.shutdown()
+
+    def stop_for_signal(_signum: int, _frame: object) -> None:
+        context_drift.close()
+        Thread(target=server.shutdown, daemon=True).start()
 
     collector = Thread(
         target=collect_forever,
         args=(interval_seconds, live_state, snapshot_lock, refresh_coordinator),
         # shutdown() must be called from another thread than serve_forever.
-        kwargs={"on_stale_install": stop_for_upgrade},
+        kwargs={
+            "on_stale_install": stop_for_upgrade,
+            "context_drift_collector": context_drift,
+        },
         daemon=True,
     )
     initialize_dashboard_data_available()
@@ -729,9 +766,12 @@ def _run_local_service(interval_seconds: int, port: int) -> None:
         f"Konvu dashboard running at http://127.0.0.1:{port}/; "
         "use `konvu-telemetry dashboard` to open it"
     )
+    previous_sigterm = signal.signal(signal.SIGTERM, stop_for_signal)
     try:
         server.serve_forever()
     finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
+        context_drift.close()
         server.server_close()
     if stale_install:
         # Existing launch agents restart only after an unsuccessful exit.

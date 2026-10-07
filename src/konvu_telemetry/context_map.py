@@ -22,7 +22,21 @@ from .parsers import is_human_claude_prompt
 from .storage import context_map_path, parse_timestamp, write_private_json_if_changed
 
 
-STATE_VERSION = 16
+STATE_VERSION = 23
+# Tool calls whose own text is the work: code being written and briefs handed to subagents.
+ARGUMENT_CATEGORIES = {"file_changes", "subagent_handoffs"}
+MAX_OUTPUT_EXCERPT_RANGES = 8
+# Claude attachments that restate session settings on every turn; they never go stale.
+SESSION_SETTING_ATTACHMENTS = {
+    "prompt_snapshot",
+    "date",
+    "model",
+    "auto_mode",
+    "session_context",
+    "agent_listing_delta",
+    "command_permissions",
+    "remote_session_change",
+}
 MAX_CONTEXT_RECORD_BYTES = 8 * 1024 * 1024
 CLAUDE_RESULT_FRAME_TOKENS = {"3.0": 40, "5.0": 23}
 CODEX_RESULT_FRAME_TOKENS = 10
@@ -156,11 +170,60 @@ def _argument_hints(arguments: object) -> str:
     )
 
 
-def _shell_category(hints: str) -> str:
-    if re.search(
-        r"\bapply_patch\b|\b(?:cat|tee)\b[^\n]*(?:>>|>)|\b(?:sed|perl)\s+-i\b|\bgit\s+(?:mv|rm)\b",
-        hints,
-    ):
+_SHELL_WRITE_COMMAND = re.compile(
+    r"\bapply_patch\b|\b(?:sed|perl)\s+-[a-zA-Z]*i|\bgit\s+(?:mv|rm|apply)\b"
+    r"|\btee\s+(?:-a\s+)?(?!/dev/null\b)[^\s-]",
+)
+_SCRIPT_WRITE = re.compile(r"\.write_(?:text|bytes)\(|\bopen\([^)\n]*,\s*['\"][wax]")
+_SCRIPT_RUNNER = re.compile(r"\b(?:python3?|node|ruby|perl)\b")
+_QUOTED = re.compile(r"'[^'\n]*'|\"(?:[^\"\\\n]|\\.)*\"")
+_SHELL_STAGE = re.compile(r"\|\||&&|[|;\n]")
+# A real file target: not a 2>/&> redirect and not /dev/null.
+_REDIRECT = re.compile(r"(?<![2&>])>>?\s*(?!/dev/null\b)\S")
+# Commands that only search or print: their quoted arguments are text, not code.
+_SEARCH_STAGE = re.compile(
+    r"^\s*(?:rg|grep|egrep|fgrep|git\s+grep|echo|printf|ag|ack)\b"
+)
+
+
+def _writes_file(command: str) -> bool:
+    """Whether a shell command or script writes a file.
+
+    Quoted text is masked first, so a search for "apply_patch" or a ">" inside awk never
+    counts; any pipeline stage that redirects into a file does. Script writes (write_text,
+    open(..., "w")) only count when the command runs an interpreter.
+    """
+    masked = _QUOTED.sub("Q", command)
+    if _SHELL_WRITE_COMMAND.search(masked):
+        return True
+    if _SCRIPT_RUNNER.search(masked):
+        # A searched "write_text(" in an rg or echo stage is not a script writing a file.
+        code = "\n".join(
+            _QUOTED.sub("Q", stage) if _SEARCH_STAGE.match(stage) else stage
+            for stage in _SHELL_STAGE.split(command)
+        )
+        if _SCRIPT_WRITE.search(code):
+            return True
+    return any(_REDIRECT.search(stage) for stage in _SHELL_STAGE.split(masked))
+
+
+def _full_command(arguments: object) -> str:
+    """The whole shell command or script, not just the hint prefix."""
+    if isinstance(arguments, str):
+        return arguments
+    if not isinstance(arguments, dict):
+        return ""
+    return " ".join(
+        value
+        for key in ("command", "cmd", "code")
+        for value in [arguments.get(key)]
+        if isinstance(value, str)
+    )
+
+
+def _shell_category(hints: str, command: str = "") -> str:
+    # Scripts often write their file at the very end, past the truncated hints.
+    if _writes_file(command or hints):
         return "file_changes"
     if "tool-results/mcp-" in hints or "tools.mcp__" in hints:
         return "external_service_data"
@@ -291,7 +354,7 @@ def _category(tool_name: str, label: str, arguments: object = None) -> str:
     }:
         return "file_changes"
     if normalized_name in {"bash", "exec", "exec_command", "shell"}:
-        return _shell_category(hints)
+        return _shell_category(hints, _full_command(arguments))
     if name_parts & {
         "read",
         "grep",
@@ -330,6 +393,7 @@ def _new_state(provider: str, session_id: str, path: Path) -> dict[str, object]:
         "source_inode": stat.st_ino,
         "cursor": 0,
         "iteration": 0,
+        "turn_complete": True,
         "current_epoch": 0,
         "active_model": "unknown",
         "pending_calls": {},
@@ -346,21 +410,29 @@ def _load_state(provider: str, session_id: str, path: Path) -> dict[str, object]
         parsed = json.loads(destination.read_text())
     except (OSError, json.JSONDecodeError):
         return _new_state(provider, session_id, path)
-    if (
-        not isinstance(parsed, dict)
-        or parsed.get("version") != STATE_VERSION
-        or not isinstance(parsed.get("epochs"), list)
-        or not parsed["epochs"]
-    ):
+    if not isinstance(parsed, dict):
         return _new_state(provider, session_id, path)
     try:
         stat = path.stat()
     except OSError:
         return parsed
+    same_source = (
+        parsed.get("source_path") == str(path)
+        and parsed.get("source_device") == stat.st_dev
+        and parsed.get("source_inode") == stat.st_ino
+    )
     if (
-        parsed.get("source_path") != str(path)
-        or parsed.get("source_device") != stat.st_dev
-        or parsed.get("source_inode") != stat.st_ino
+        parsed.get("version") != STATE_VERSION
+        or not isinstance(parsed.get("epochs"), list)
+        or not parsed["epochs"]
+    ):
+        rebuilt = _new_state(provider, session_id, path)
+        analysis = parsed.get("analysis")
+        if same_source and isinstance(analysis, dict):
+            rebuilt["analysis"] = analysis
+        return rebuilt
+    if (
+        not same_source
         or not isinstance(parsed.get("cursor"), int)
         or int(parsed["cursor"]) > stat.st_size
     ):
@@ -582,17 +654,34 @@ def _assistant_output_source(previous: dict[str, object]) -> dict[str, object] |
         tokenizer="provider_output_count",
         source_start=_integer(previous.get("source_start")),
         source_end=_integer(previous.get("source_end")),
-    )
+    ) | _output_ranges(previous)
 
 
-def _file_write_argument_source(
+def _output_ranges(previous: dict[str, object]) -> dict[str, object]:
+    """Byte ranges of the reply records, so analysis reads the reply, not the usage record."""
+    ranges = previous.get("output_ranges")
+    if not isinstance(ranges, list) or not ranges:
+        return {}
+    return {"excerpt_ranges": ranges[-MAX_OUTPUT_EXCERPT_RANGES:]}
+
+
+def _add_output_range(checkpoint: object, record: Record) -> None:
+    if not isinstance(checkpoint, dict):
+        return
+    ranges = checkpoint.setdefault("output_ranges", [])
+    if isinstance(ranges, list):
+        ranges.append([record["start"], record["end"]])
+        del ranges[:-MAX_OUTPUT_EXCERPT_RANGES]
+
+
+def _call_argument_source(
     metadata: dict[str, object],
     record: Record,
     timestamp: float | None,
     call_id: str,
 ) -> dict[str, object] | None:
-    """Keep a derived file-write weight without persisting the patch text."""
-    if metadata.get("category") != "file_changes":
+    """Count code written and subagent briefs under their own category, not as conversation."""
+    if metadata.get("category") not in ARGUMENT_CATEGORIES:
         return None
     tokens = _integer(metadata.get("argument_tokens"))
     if tokens <= 0:
@@ -600,14 +689,15 @@ def _file_write_argument_source(
     return _source(
         source_id=f"{record['digest']}:{record['start']}:{call_id}:arguments",
         timestamp=timestamp,
-        category="file_changes",
-        tool=str(metadata.get("name") or "file write"),
-        label=str(metadata.get("label") or "File write"),
+        category=str(metadata.get("category") or "other_tool_output"),
+        tool=str(metadata.get("name") or "tool call"),
+        label=str(metadata.get("label") or "Tool call"),
         weight_tokens=tokens,
         tokenizer=str(metadata.get("argument_tokenizer") or "unknown"),
         source_start=record["start"],
         source_end=record["end"],
-    )
+        # The call's own record, so its file target is known for supersession hints.
+    ) | {"call_range": [record["start"], record["end"]]}
 
 
 def _record_output_source(
@@ -970,6 +1060,11 @@ def _result_sources(
     category = str(metadata.get("category") or "other_tool_output")
     blocks = content if isinstance(content, list) else [content]
     result: list[dict[str, object]] = []
+    # Offsets of the call itself, so analysis can see which file or command produced this.
+    call_range = metadata.get("call_range")
+    extra: dict[str, object] = (
+        {"call_range": call_range} if isinstance(call_range, list) else {}
+    )
     text_blocks: list[object] = []
     for index, block in enumerate(blocks):
         kind = block.get("type") if isinstance(block, dict) else None
@@ -1000,6 +1095,7 @@ def _result_sources(
                     source_start=record["start"],
                     source_end=record["end"],
                 )
+                | extra
             )
         elif kind in {"document", "input_document"}:
             result.append(
@@ -1016,6 +1112,7 @@ def _result_sources(
                     source_start=record["start"],
                     source_end=record["end"],
                 )
+                | extra
             )
         else:
             text_blocks.append(block)
@@ -1039,6 +1136,7 @@ def _result_sources(
                 source_start=record["start"],
                 source_end=record["end"],
             )
+            | extra
         )
     return result
 
@@ -1212,16 +1310,19 @@ def _process_claude(
             _argument_label(attachment) or attachment_type,
             attachment,
         )
-        if category == "other_tool_output" and any(
-            marker in normalized
-            for marker in (
-                "environment",
-                "hook",
-                "instruction",
-                "mcp",
-                "reminder",
-                "skill",
-                "tool",
+        if category == "other_tool_output" and (
+            normalized in SESSION_SETTING_ATTACHMENTS
+            or any(
+                marker in normalized
+                for marker in (
+                    "environment",
+                    "hook",
+                    "instruction",
+                    "mcp",
+                    "reminder",
+                    "skill",
+                    "tool",
+                )
             )
         ):
             category = "skills_and_instructions"
@@ -1322,6 +1423,18 @@ def _process_claude(
             state["last_claude_checkpoint_id"] = checkpoint_id
         pending = _pending_calls(state)
         content = message.get("content")
+        checkpoint = state.get("previous_checkpoint")
+        if (
+            isinstance(content, list)
+            and isinstance(checkpoint, dict)
+            and checkpoint.get("id") == checkpoint_id
+            and any(
+                isinstance(block, dict) and block.get("type") in {"text", "tool_use"}
+                for block in content
+            )
+        ):
+            # Claude splits one reply across records; the first is often thinking only.
+            _add_output_range(checkpoint, record)
         if isinstance(content, list):
             for block in content:
                 if not isinstance(block, dict) or block.get("type") != "tool_use":
@@ -1335,12 +1448,11 @@ def _process_claude(
                         str(block.get("name") or "unknown"),
                         block.get("input"),
                     )
+                    metadata["call_range"] = [record["start"], record["end"]]
                     pending[call_id] = metadata
                     _record_output_source(
                         state,
-                        _file_write_argument_source(
-                            metadata, record, timestamp, call_id
-                        ),
+                        _call_argument_source(metadata, record, timestamp, call_id),
                     )
         return
     if role == "user" and value.get("isMeta") is True:
@@ -1482,6 +1594,13 @@ def _process_codex(
         return
     if value.get("type") == "event_msg" and payload.get("type") == "task_started":
         state["iteration"] = _integer(state.get("iteration")) + 1
+        state["turn_complete"] = False
+        return
+    if value.get("type") == "event_msg" and payload.get("type") in {
+        "task_complete",
+        "turn_aborted",
+    }:
+        state["turn_complete"] = True
         return
     if value.get("type") == "event_msg" and payload.get("type") == "user_message":
         content = payload.get("message") or payload.get("text")
@@ -1533,6 +1652,7 @@ def _process_codex(
                 confidence="estimated_initial",
             )
             state["pending_sources"] = []
+        replies = state.pop("codex_reply_ranges", None)
         state["previous_checkpoint"] = {
             "id": record["digest"][:16],
             "input_tokens": input_tokens,
@@ -1541,6 +1661,8 @@ def _process_codex(
             "timestamp": timestamp,
             "source_start": record["start"],
             "source_end": record["end"],
+            # Codex logs a call's replies before the token count that reports them.
+            "output_ranges": replies if isinstance(replies, list) else [],
         }
         state["pending_sources"] = _deferred_sources(state)
         state["deferred_sources"] = []
@@ -1557,6 +1679,12 @@ def _process_codex(
     if value.get("type") != "response_item":
         return
     item_type = payload.get("type")
+    if item_type == "message" and payload.get("role") == "assistant":
+        replies = state.setdefault("codex_reply_ranges", [])
+        if isinstance(replies, list):
+            replies.append([record["start"], record["end"]])
+            del replies[:-MAX_OUTPUT_EXCERPT_RANGES]
+        return
     if item_type == "message" and payload.get("role") == "user":
         for source in _codex_user_sources(
             tokenizer,
@@ -1599,10 +1727,11 @@ def _process_codex(
                     or payload.get("action")
                 ),
             )
+            metadata["call_range"] = [record["start"], record["end"]]
             pending[call_id] = metadata
             _record_output_source(
                 state,
-                _file_write_argument_source(metadata, record, timestamp, call_id),
+                _call_argument_source(metadata, record, timestamp, call_id),
             )
     elif item_type in {
         "custom_tool_call_output",
@@ -1654,14 +1783,19 @@ def _summary(state: dict[str, object]) -> dict[str, object]:
         ) + (observed - mapped)
         mapped = observed
     epochs = state.get("epochs")
-    return {
+    summary = {
         "state": "ready" if mapped > 0 else "measuring",
         "epoch": state.get("current_epoch", 0),
         "iteration": state.get("iteration", 0),
+        "turn_complete": state.get("turn_complete"),
         "observed_context_tokens": observed,
         "categories": typed_categories,
         "epoch_count": len(epochs) if isinstance(epochs, list) else 0,
     }
+    analysis = state.get("analysis")
+    if isinstance(analysis, dict) and isinstance(analysis.get("summary"), dict):
+        summary["analysis"] = analysis["summary"]
+    return summary
 
 
 class ContextMapCollector:
