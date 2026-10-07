@@ -1714,6 +1714,15 @@ class ContextDriftTests(unittest.TestCase):
             self.assertNotIn("S3cretPass", redact(leaked))
             self.assertNotIn("wJalrXUtnFEMI", redact(leaked))
             self.assertNotIn("abcDEF123456789xyz", redact(leaked))
+        for ordinary in (
+            "input_tokens: 812, output_tokens: 90",
+            "max_tokens=4096",
+            "the tokenizer: splits words",
+            "fn(token: str) -> None",
+            "secret_scanning: enabled",
+            "credentials: see docs",
+        ):
+            self.assertEqual(redact(ordinary), ordinary)
 
     def test_a_deeply_nested_record_is_read_without_recursing_forever(self) -> None:
         nested: object = "deep text"

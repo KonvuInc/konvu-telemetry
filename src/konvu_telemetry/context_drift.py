@@ -636,8 +636,10 @@ _SECRET = re.compile(
     r"|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+"
     r"|[A-Za-z0-9+_-]{40,})"
     # NAME=value and "name": "value" forms, with any prefix or suffix on the name.
-    r"|(?i:[\w-]*(?:password|passwd|secret|token|api[_-]?key|access[_-]?key|credential)"
-    r"[\w-]*[\"']?\s*[=:]\s*[\"']?)[^\s\"',]+"
+    # Bounded name affixes keep this linear; the value must look generated (has a digit or
+    # symbol), so "input_tokens: 812" or "token: str" stay readable.
+    r"|(?i:[\w-]{0,32}(?:password|passwd|secret|token|api[_-]?key|access[_-]?key|credentials?)"
+    r"[\w-]{0,32}[\"']?\s*[=:]\s*[\"']?)(?=[^\s\"',]*[\d/+_])[^\s\"',]{6,}"
     r"|(?i:bearer\s+)[A-Za-z0-9._~+/=-]{8,}"
     # user:password@ inside a URL.
     r"|(?<=://)[^\s/:@]+:[^\s/@]+@"
@@ -1979,7 +1981,7 @@ def _valid_result(
     # Positions are kept (an empty name stays empty) so score lines' indexes still line up.
     # Merged batches can name a few more topics than one model reply may.
     topic_names = [
-        _redact(name.strip())[:60] if isinstance(name, str) else ""
+        _redact(name.strip()[:260])[:60] if isinstance(name, str) else ""
         for name in (raw_topics if isinstance(raw_topics, list) else [])
     ]
     by_id: dict[str, dict[str, object]] = {}
@@ -2022,21 +2024,21 @@ def _valid_result(
             continue
         validated_phases.append(
             {
-                "label": _redact(label.strip())[:60],
-                "summary": _redact(summary.strip())[:240],
+                "label": _redact(label.strip()[:260])[:60],
+                "summary": _redact(summary.strip()[:440])[:240],
                 "start_iteration": start,
                 "end_iteration": end,
             }
         )
         previous_end = end if isinstance(end, int) else start
     return {
-        "current_intent": _redact(intent)[:240],
+        "current_intent": _redact(intent[:440])[:240],
         "compact_prompt": _compact_prompt(
             _compact_entries(result.get("compact_keep"), MAX_COMPACT_KEEP),
             _compact_entries(result.get("compact_drop"), MAX_COMPACT_DROP),
         ),
         "compact_label": " ".join(
-            _redact(str(result.get("compact_label") or "")).split()
+            _redact(str(result.get("compact_label") or "")[:1000]).split()
         )[:MAX_COMPACT_LABEL_CHARS],
         "phases": validated_phases,
         "topics": [name for name in topic_names if name],
@@ -2244,7 +2246,7 @@ def _compact_entries(value: object, limit: int) -> list[str]:
     if not isinstance(value, list):
         return []
     entries = [
-        " ".join(_COMPACT_UNSAFE.sub("", _redact(str(entry))).split())[
+        " ".join(_COMPACT_UNSAFE.sub("", _redact(str(entry)[:1000])).split())[
             :MAX_COMPACT_ENTRY_CHARS
         ]
         for entry in value
