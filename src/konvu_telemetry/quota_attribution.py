@@ -6,6 +6,7 @@ import json
 import math
 from datetime import datetime
 from threading import Lock
+import time
 from typing import TypedDict
 
 from .config import FORECAST_WINDOW
@@ -50,6 +51,7 @@ def record_analysis_usage(
     usage_mode: str | None = None,
     token_usage: dict[str, int] | None = None,
     cost_usd: float | None = None,
+    calls: int | None = None,
 ) -> None:
     """Queue one ephemeral analysis pass for normal quota attribution."""
     if (
@@ -70,7 +72,9 @@ def record_analysis_usage(
         events = raw.get("events")
         if not isinstance(events, dict):
             raw["events"] = events = {}
-        cutoff = completed_at - ANALYSIS_USAGE_RETENTION_SECONDS
+        # Retention follows the wall clock, never the incoming event, so one event with a
+        # future timestamp cannot wipe the whole ledger.
+        cutoff = min(completed_at, time.time()) - ANALYSIS_USAGE_RETENTION_SECONDS
         events = {
             event_id: event
             for event_id, event in events.items()
@@ -87,6 +91,9 @@ def record_analysis_usage(
             details["token_usage"] = dict(token_usage)
         if cost_usd is not None and math.isfinite(cost_usd) and cost_usd >= 0:
             details["cost_usd"] = round(cost_usd, 6)
+        # A pass makes one model call per batch; the hourly call cap reads this back.
+        if calls is not None and calls > 0:
+            details["calls"] = calls
         existing = events.get(run_id)
         if isinstance(existing, dict):
             # Runs recorded before pricing existed gain the fields they lack.
@@ -251,11 +258,13 @@ def _session_usage(session: dict[str, object]) -> SessionUsage | None:
     session_id = session.get("id")
     if provider not in {"claude", "codex"} or not isinstance(session_id, str):
         return None
-    if session.get("cost_status") == "unavailable":
+    tokens = _session_tokens(session)
+    # Shares follow tokens; a missing price only matters when there are no tokens either.
+    if session.get("cost_status") == "unavailable" and tokens <= 0:
         return None
     cost = _number(session.get("total_cost_usd")) or 0.0
     credits = _number(session.get("total_credit_equivalent"))
-    return {"cost": cost, "credits": credits, "tokens": _session_tokens(session)}
+    return {"cost": cost, "credits": credits, "tokens": tokens}
 
 
 def _weight(provider: str, usage: SessionUsage) -> float:
@@ -665,13 +674,20 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
                     if usage["credits"] is not None and old_credits is not None
                     else None
                 )
-                weight = _weight(
-                    provider,
-                    {
-                        "cost": cost_delta,
-                        "credits": credit_delta,
-                        "tokens": max(0.0, usage["tokens"] - old_tokens),
-                    },
+                token_delta = max(0.0, usage["tokens"] - old_tokens)
+                # Once a session reports tokens, only new tokens earn a share: a price that
+                # arrives late must not pin a quota rise on a session that did no new work.
+                weight = (
+                    token_delta
+                    if usage["tokens"] > 0 and old_tokens > 0
+                    else _weight(
+                        provider,
+                        {
+                            "cost": cost_delta,
+                            "credits": credit_delta,
+                            "tokens": token_delta,
+                        },
+                    )
                 )
                 if weight > 0:
                     interval_weights[key] = weight
@@ -922,6 +938,11 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
                     new_window_keys,
                     reset_window_keys,
                 )
+    # Analysis spend is recorded even when no quota windows could be read for its provider.
+    for session in session_rows:
+        session_key = (str(session.get("provider")), str(session.get("id")))
+        if "analysis_usage" not in session and session_key in analysis_totals:
+            session["analysis_usage"] = {**analysis_totals[session_key], "limit": []}
     write_private_json(quota_attribution_path(), state)
 
 

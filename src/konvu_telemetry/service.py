@@ -412,7 +412,9 @@ def collect_forever(
                     provider_quotas=provider_quotas,
                 )
                 enrich_context_maps(snapshot, live_state, context_mapper)
-                context_drift.refresh(snapshot, provider_quotas, started_at)
+                refresh_context_drift(
+                    context_drift, snapshot, provider_quotas, started_at
+                )
                 write_snapshot(snapshot)
             _DASHBOARD_DATA_AVAILABLE = snapshot_has_dashboard_data(
                 snapshot, time.time()
@@ -448,6 +450,19 @@ def enrich_context_maps(
         (collector or ContextMapScheduler()).refresh(snapshot, live_state)
     except Exception as error:
         LOGGER.warning("Context mapping failed: %s", type(error).__name__)
+
+
+def refresh_context_drift(
+    scheduler: ContextDriftScheduler,
+    snapshot: dict[str, object],
+    provider_quotas: dict[str, object],
+    started_at: float,
+) -> None:
+    """Add optional context analysis without failing core usage collection."""
+    try:
+        scheduler.refresh(snapshot, provider_quotas, started_at)
+    except Exception as error:
+        LOGGER.warning("Context analysis failed: %s", type(error).__name__)
 
 
 class DashboardRequestHandler(SimpleHTTPRequestHandler):

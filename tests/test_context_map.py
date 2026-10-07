@@ -13,6 +13,7 @@ from konvu_telemetry.context_map import (
     ContextMapCollector,
     ContextMapScheduler,
     STATE_VERSION,
+    _writes_file,
     _category,
 )
 from konvu_telemetry.context_tokenizer import ContextTokenizer
@@ -1323,6 +1324,77 @@ class ContextMapTests(unittest.TestCase):
             self.assertEqual(categories["file_changes"], 10)
             self.assertEqual(categories["assistant_output"], 30)
             self.assertEqual(sum(categories.values()), 140)
+
+    def test_subagent_briefs_and_shell_file_writes_are_not_conversation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / f"{SESSION_ID}.jsonl"
+            append_records(
+                transcript,
+                [
+                    claude_assistant(
+                        "2026-01-01T00:00:00Z",
+                        100,
+                        40,
+                        content=[
+                            {
+                                "type": "tool_use",
+                                "id": "call-1",
+                                "name": "Agent",
+                                "input": {"prompt": "Write the routes"},
+                            },
+                            {
+                                "type": "tool_use",
+                                "id": "call-2",
+                                "name": "Bash",
+                                # The write sits past the hint prefix, as in long scripts.
+                                "input": {
+                                    "command": "python3 - <<'EOF'\n"
+                                    + "x = 1\n" * 100
+                                    + "Path('a.py').write_text(code)\nEOF"
+                                },
+                            },
+                        ],
+                    ),
+                    claude_assistant("2026-01-01T00:00:01Z", 140, 0),
+                ],
+            )
+            with patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}):
+                ContextMapCollector(FixedTokenizer()).refresh(
+                    snapshot("claude", 140), live_state("claude", transcript)
+                )
+                stored = json.loads(context_map_path("claude", SESSION_ID).read_text())
+
+            categories = stored["epochs"][-1]["categories"]
+            self.assertEqual(categories["subagent_handoffs"], 10)
+            self.assertEqual(categories["file_changes"], 10)
+            self.assertEqual(categories["assistant_output"], 20)
+
+    def test_only_real_file_writes_count_as_code_changes(self) -> None:
+        writes = [
+            "cat > a.py <<'EOF'\nx > 1\nEOF",
+            "cat <<'EOF' > ~/plan.md",
+            'cat > "my file.py"',
+            "echo x | tee out.txt",
+            "cat f >> log.txt",
+            "grep x f; cat a > b",
+            "echo hello > file.txt",
+            "echo hello 1>file.txt",
+            "apply_patch <<'EOF'\n*** Begin Patch",
+        ]
+        reads = [
+            "cat f | grep x 2>/dev/null",
+            "cat f | awk '$1 > 5'",
+            "cat f && awk '$1 > 5' data",
+            "cat f > /dev/null",
+            "cat f 2> err.txt",
+            "echo 'cat > x'",
+            "rg 'apply_patch' src",
+            "rg 'write_text(' src",
+            "rg 'write_text(' src && python3 check.py",
+        ]
+
+        self.assertEqual([c for c in writes if not _writes_file(c)], [])
+        self.assertEqual([c for c in reads if _writes_file(c)], [])
 
     def test_partial_record_waits_and_replaced_file_rebuilds(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -22,7 +22,9 @@ from .parsers import is_human_claude_prompt
 from .storage import context_map_path, parse_timestamp, write_private_json_if_changed
 
 
-STATE_VERSION = 18
+STATE_VERSION = 23
+# Tool calls whose own text is the work: code being written and briefs handed to subagents.
+ARGUMENT_CATEGORIES = {"file_changes", "subagent_handoffs"}
 MAX_OUTPUT_EXCERPT_RANGES = 8
 # Claude attachments that restate session settings on every turn; they never go stale.
 SESSION_SETTING_ATTACHMENTS = {
@@ -168,11 +170,60 @@ def _argument_hints(arguments: object) -> str:
     )
 
 
-def _shell_category(hints: str) -> str:
-    if re.search(
-        r"\bapply_patch\b|\b(?:cat|tee)\b[^\n]*(?:>>|>)|\b(?:sed|perl)\s+-i\b|\bgit\s+(?:mv|rm)\b",
-        hints,
-    ):
+_SHELL_WRITE_COMMAND = re.compile(
+    r"\bapply_patch\b|\b(?:sed|perl)\s+-[a-zA-Z]*i|\bgit\s+(?:mv|rm|apply)\b"
+    r"|\btee\s+(?:-a\s+)?(?!/dev/null\b)[^\s-]",
+)
+_SCRIPT_WRITE = re.compile(r"\.write_(?:text|bytes)\(|\bopen\([^)\n]*,\s*['\"][wax]")
+_SCRIPT_RUNNER = re.compile(r"\b(?:python3?|node|ruby|perl)\b")
+_QUOTED = re.compile(r"'[^'\n]*'|\"(?:[^\"\\\n]|\\.)*\"")
+_SHELL_STAGE = re.compile(r"\|\||&&|[|;\n]")
+# A real file target: not a 2>/&> redirect and not /dev/null.
+_REDIRECT = re.compile(r"(?<![2&>])>>?\s*(?!/dev/null\b)\S")
+# Commands that only search or print: their quoted arguments are text, not code.
+_SEARCH_STAGE = re.compile(
+    r"^\s*(?:rg|grep|egrep|fgrep|git\s+grep|echo|printf|ag|ack)\b"
+)
+
+
+def _writes_file(command: str) -> bool:
+    """Whether a shell command or script writes a file.
+
+    Quoted text is masked first, so a search for "apply_patch" or a ">" inside awk never
+    counts; any pipeline stage that redirects into a file does. Script writes (write_text,
+    open(..., "w")) only count when the command runs an interpreter.
+    """
+    masked = _QUOTED.sub("Q", command)
+    if _SHELL_WRITE_COMMAND.search(masked):
+        return True
+    if _SCRIPT_RUNNER.search(masked):
+        # A searched "write_text(" in an rg or echo stage is not a script writing a file.
+        code = "\n".join(
+            _QUOTED.sub("Q", stage) if _SEARCH_STAGE.match(stage) else stage
+            for stage in _SHELL_STAGE.split(command)
+        )
+        if _SCRIPT_WRITE.search(code):
+            return True
+    return any(_REDIRECT.search(stage) for stage in _SHELL_STAGE.split(masked))
+
+
+def _full_command(arguments: object) -> str:
+    """The whole shell command or script, not just the hint prefix."""
+    if isinstance(arguments, str):
+        return arguments
+    if not isinstance(arguments, dict):
+        return ""
+    return " ".join(
+        value
+        for key in ("command", "cmd", "code")
+        for value in [arguments.get(key)]
+        if isinstance(value, str)
+    )
+
+
+def _shell_category(hints: str, command: str = "") -> str:
+    # Scripts often write their file at the very end, past the truncated hints.
+    if _writes_file(command or hints):
         return "file_changes"
     if "tool-results/mcp-" in hints or "tools.mcp__" in hints:
         return "external_service_data"
@@ -303,7 +354,7 @@ def _category(tool_name: str, label: str, arguments: object = None) -> str:
     }:
         return "file_changes"
     if normalized_name in {"bash", "exec", "exec_command", "shell"}:
-        return _shell_category(hints)
+        return _shell_category(hints, _full_command(arguments))
     if name_parts & {
         "read",
         "grep",
@@ -623,14 +674,14 @@ def _add_output_range(checkpoint: object, record: Record) -> None:
         del ranges[:-MAX_OUTPUT_EXCERPT_RANGES]
 
 
-def _file_write_argument_source(
+def _call_argument_source(
     metadata: dict[str, object],
     record: Record,
     timestamp: float | None,
     call_id: str,
 ) -> dict[str, object] | None:
-    """Keep a derived file-write weight without persisting the patch text."""
-    if metadata.get("category") != "file_changes":
+    """Count code written and subagent briefs under their own category, not as conversation."""
+    if metadata.get("category") not in ARGUMENT_CATEGORIES:
         return None
     tokens = _integer(metadata.get("argument_tokens"))
     if tokens <= 0:
@@ -638,14 +689,15 @@ def _file_write_argument_source(
     return _source(
         source_id=f"{record['digest']}:{record['start']}:{call_id}:arguments",
         timestamp=timestamp,
-        category="file_changes",
-        tool=str(metadata.get("name") or "file write"),
-        label=str(metadata.get("label") or "File write"),
+        category=str(metadata.get("category") or "other_tool_output"),
+        tool=str(metadata.get("name") or "tool call"),
+        label=str(metadata.get("label") or "Tool call"),
         weight_tokens=tokens,
         tokenizer=str(metadata.get("argument_tokenizer") or "unknown"),
         source_start=record["start"],
         source_end=record["end"],
-    )
+        # The call's own record, so its file target is known for supersession hints.
+    ) | {"call_range": [record["start"], record["end"]]}
 
 
 def _record_output_source(
@@ -1400,9 +1452,7 @@ def _process_claude(
                     pending[call_id] = metadata
                     _record_output_source(
                         state,
-                        _file_write_argument_source(
-                            metadata, record, timestamp, call_id
-                        ),
+                        _call_argument_source(metadata, record, timestamp, call_id),
                     )
         return
     if role == "user" and value.get("isMeta") is True:
@@ -1681,7 +1731,7 @@ def _process_codex(
             pending[call_id] = metadata
             _record_output_source(
                 state,
-                _file_write_argument_source(metadata, record, timestamp, call_id),
+                _call_argument_source(metadata, record, timestamp, call_id),
             )
     elif item_type in {
         "custom_tool_call_output",

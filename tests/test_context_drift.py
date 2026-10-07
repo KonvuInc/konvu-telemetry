@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+from typing import cast
 import subprocess
 import tempfile
 from threading import Thread
@@ -12,7 +13,11 @@ import unittest
 from unittest.mock import Mock, patch
 
 from konvu_telemetry import context_drift
-from konvu_telemetry.context_drift import ContextDriftScheduler, LocalCliAnalysisRunner
+from konvu_telemetry.context_drift import (
+    ContextDriftScheduler,
+    LocalCliAnalysisRunner,
+    PendingJob,
+)
 from konvu_telemetry.preferences import read_preferences, write_preferences
 from konvu_telemetry.storage import (
     analysis_usage_path,
@@ -33,9 +38,31 @@ class ContextDriftTests(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        patcher = patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": self.directory.name})
+        # A scheduler closed by an earlier test leaves the cancel flag set.
+        context_drift._CANCELLED.clear()
+        # HOME too: anything that slips past KONVU_LIVE_USAGE_HOME lands in the temp dir.
+        patcher = patch.dict(
+            os.environ,
+            {"KONVU_LIVE_USAGE_HOME": self.directory.name, "HOME": self.directory.name},
+        )
         patcher.start()
         self.addCleanup(patcher.stop)
+        # One runner call per pass keeps call counts meaning passes; batching has its own test.
+        batching = patch.object(context_drift, "MAX_BATCH_ITEMS", 10_000)
+        batching.start()
+        self.addCleanup(batching.stop)
+        # Test clocks are not wall clocks; the spending guard has its own test.
+        for name, value in (
+            ("MIN_SECONDS_BETWEEN_PASSES", 0),
+            ("MAX_CALLS_PER_HOUR", 10_000),
+        ):
+            guard = patch.object(context_drift, name, value)
+            guard.start()
+            self.addCleanup(guard.stop)
+        # The backfill tests below were written around 45 new groups per pass.
+        per_pass = patch.object(context_drift, "MAX_INITIAL_ANALYSIS_ITEMS", 45)
+        per_pass.start()
+        self.addCleanup(per_pass.stop)
         write_preferences("every-tool-call", context_analysis_enabled=True)
         self.transcript = Path(self.directory.name) / "session.jsonl"
         self.events = self.write_transcript()
@@ -143,6 +170,7 @@ class ContextDriftTests(unittest.TestCase):
         return {
             "result": {
                 "current_intent": "Build conversation drift analysis",
+                "topics": ["Context analysis implementation"],
                 "phases": [
                     {
                         "label": "Context drift",
@@ -151,16 +179,12 @@ class ContextDriftTests(unittest.TestCase):
                         "end_iteration": None,
                     }
                 ],
-                "items": [
-                    {
-                        "id": item["id"],
-                        "summary": "Context drift implementation",
-                        "ai_topic": "Context analysis implementation",
-                        "relevance": 0.9,
-                    }
+                "scores": "\n".join(
+                    f"{item['id']}:9:0"
+                    + ("" if "card" in item else " | Context drift implementation")
                     for item in items
                     if isinstance(item, dict)
-                ],
+                ),
             },
             "model": "gpt-6-luna",
             "usage": {"input_tokens": 100, "output_tokens": 20},
@@ -174,6 +198,8 @@ class ContextDriftTests(unittest.TestCase):
         scheduler.refresh(snapshot, self.quotas(), NOW)
         self.assertTrue(scheduler.wait_for_idle())
         scheduler.refresh(snapshot, self.quotas(observed_at=NOW + 1), NOW + 1)
+        # A pass the second refresh started must finish inside the test's temp home.
+        self.assertTrue(scheduler.wait_for_idle())
 
     def test_analysis_enriches_the_existing_context_map(self) -> None:
         runner = Mock(side_effect=self.outcome)
@@ -190,7 +216,7 @@ class ContextDriftTests(unittest.TestCase):
         self.assertEqual(len(analysis["items"]), 10)
         self.assertEqual(analysis["summary"]["relevant_percent"], 100.0)
         self.assertEqual(analysis["summary"]["version"], 3)
-        self.assertEqual(analysis["summary"]["method_version"], 3)
+        self.assertEqual(analysis["summary"]["method_version"], 19)
         self.assertEqual(analysis["summary"]["session_drift"], analysis["phases"])
         self.assertEqual(
             analysis["summary"]["ai_topics"][0]["label"],
@@ -248,7 +274,7 @@ class ContextDriftTests(unittest.TestCase):
         prepared = context_drift._payload(state)
 
         assert prepared is not None
-        payload, group_members = prepared
+        payload, group_members, _ = prepared
         timeline = payload["conversation_delta"]
         self.assertEqual(len(timeline), 10)
         self.assertEqual(timeline[0]["iteration"], 1)
@@ -257,18 +283,19 @@ class ContextDriftTests(unittest.TestCase):
         self.assertEqual(payload["analysis_mode"], "initial")
         self.assertEqual(payload["phase_guidance"]["target_count"], 1)
 
-    def test_incremental_payload_rechecks_only_uncertain_existing_groups(self) -> None:
+    def test_every_pass_rerates_all_carded_groups_including_stale_ones(self) -> None:
         state = json.loads(context_map_path("codex", SESSION_ID).read_text())
+        state["iteration"] = 30
         state["analysis"] = {
             "version": 3,
-            "method_version": 3,
-            "analyzed_iteration": 10,
+            "method_version": context_drift.ANALYSIS_METHOD_VERSION,
+            "analyzed_iteration": 30,
             "phases": [{"label": "Earlier work"}],
             "items": {
                 event["id"]: {
-                    "summary": "Earlier context",
                     "ai_topic": "Earlier work",
-                    "relevance": 0.5 if index < 4 else 0.9,
+                    "relevance": 0.1 if index < 4 else 0.9,
+                    "card": f"Prompt {index + 1}",
                 }
                 for index, event in enumerate(self.events)
             },
@@ -277,11 +304,152 @@ class ContextDriftTests(unittest.TestCase):
         prepared = context_drift._payload(state)
 
         assert prepared is not None
-        payload, _ = prepared
+        payload, _, _ = prepared
         self.assertEqual(payload["analysis_mode"], "incremental")
-        self.assertEqual(payload["conversation_delta"], [])
         self.assertEqual(payload["prior_session_drift"], [{"label": "Earlier work"}])
-        self.assertEqual(len(payload["items"]), 4)
+        self.assertEqual(len(payload["items"]), 10)
+        self.assertTrue(all(item.get("card") for item in payload["items"]))
+        self.assertNotIn("settled", payload)
+
+    def test_item_topics_must_come_from_the_session_topic_list(self) -> None:
+        result = {
+            "current_intent": "Ship it",
+            "topics": ["Quota attribution fixes"],
+            "phases": [
+                {
+                    "label": "Ship",
+                    "summary": "s",
+                    "start_iteration": 1,
+                    "end_iteration": None,
+                }
+            ],
+            "scores": "a1:9:0\nb2:1:-\nc3:5:7",
+        }
+
+        self.assertIsNone(context_drift._valid_result(result, {"a1", "b2", "c3"}))
+
+    def test_compact_prompt_is_built_from_keep_and_drop_entries(self) -> None:
+        result = {
+            "current_intent": "Ship it",
+            "compact_keep": ["T1 port.", "  quota  edits ", ""],
+            "compact_drop": ["Docker cleanup"],
+            "compact_label": "Keep the T1 work",
+            "topics": ["T1"],
+            "phases": [
+                {
+                    "label": "Ship",
+                    "summary": "s",
+                    "start_iteration": 1,
+                    "end_iteration": None,
+                }
+            ],
+            "scores": "g1:9:0",
+        }
+
+        validated = context_drift._valid_result(result, {"g1"})
+
+        self.assertEqual(
+            validated["compact_prompt"],
+            "Preserve: T1 port; quota edits. Drop: Docker cleanup.",
+        )
+        result["compact_keep"] = []
+        self.assertEqual(
+            context_drift._valid_result(result, {"g1"})["compact_prompt"], ""
+        )
+
+    def test_rerating_keeps_cards_and_sends_only_cards(self) -> None:
+        runner = Mock(side_effect=self.outcome)
+        scheduler = ContextDriftScheduler(runner)
+        snapshot = self.snapshot()
+        self.run_scheduler(scheduler, snapshot)
+        state = json.loads(context_map_path("codex", SESSION_ID).read_text())
+        for index in range(11, 21):
+            state["epochs"][0]["events"].append(
+                {**self.events[0], "id": f"event-{index}", "iteration": index}
+            )
+        state["iteration"] = 20
+        write_private_json(context_map_path("codex", SESSION_ID), state)
+        snapshot["sessions"][0]["context_map"]["iteration"] = 20
+
+        scheduler.refresh(snapshot, self.quotas(observed_at=NOW + 2), NOW + 2)
+        self.assertTrue(scheduler.wait_for_idle())
+        scheduler.refresh(snapshot, self.quotas(observed_at=NOW + 3), NOW + 3)
+
+        second = runner.call_args.args[1]["items"]
+        self.assertEqual(sum(1 for item in second if "card" in item), 10)
+        self.assertEqual(sum(1 for item in second if "card" not in item), 10)
+        items = json.loads(context_map_path("codex", SESSION_ID).read_text())[
+            "analysis"
+        ]["items"]
+        self.assertTrue(all(item.get("card") for item in items.values()))
+
+    def test_compact_command_is_built_from_the_prompt(self) -> None:
+        analysis = {"compact_prompt": "Keep the T1 port."}
+
+        high = context_drift._compact_advice(
+            analysis, {"relevant": 70, "drifting": 10, "stale": 20}, 100
+        )
+
+        self.assertNotIn("compact_recommended", high)
+        self.assertEqual(high["compact_command"], "/compact Keep the T1 port.")
+        self.assertNotIn("compact_label", high)
+        labelled = context_drift._compact_advice(
+            {**analysis, "compact_label": "Keep the T1 work"},
+            {"relevant": 70, "drifting": 10, "stale": 20},
+            100,
+        )
+        self.assertEqual(labelled["compact_label"], "Keep the T1 work")
+        self.assertEqual(
+            context_drift._compact_advice(
+                {}, {"relevant": 0, "drifting": 50, "stale": 50}, 100
+            ),
+            {},
+        )
+
+    def test_compact_scores_are_parsed_and_model_cards_ignored(self) -> None:
+        result = {
+            "current_intent": "Ship it",
+            "topics": ["Quota attribution fixes"],
+            "phases": [
+                {
+                    "label": "Ship",
+                    "summary": "s",
+                    "start_iteration": 1,
+                    "end_iteration": None,
+                }
+            ],
+            "scores": "g1:9:0 | Read of quota_attribution.py\ng2:1:- | Bare ls output\ng3:0.5:7\ng9:3:0",
+        }
+
+        valid = context_drift._valid_result(result, {"g1", "g2", "g3"})
+
+        assert valid is not None
+        self.assertEqual(
+            valid["items"],
+            {
+                "g1": {"ai_topic": "Quota attribution fixes", "relevance": 0.9},
+                "g2": {"ai_topic": "", "relevance": 0.1},
+            },
+        )
+        # A decimal score is ambiguous, so g3 stays unrated and the run is partial.
+        self.assertFalse(valid["complete"])
+
+    def test_latest_prompt_context_is_never_rated_stale(self) -> None:
+        def all_stale(provider: str, payload: dict[str, object]) -> dict[str, object]:
+            outcome = self.outcome(provider, payload)
+            result = outcome["result"]
+            assert isinstance(result, dict)
+            result["scores"] = str(result["scores"]).replace(":9:", ":0:")
+            return outcome
+
+        scheduler = ContextDriftScheduler(Mock(side_effect=all_stale))
+        self.run_scheduler(scheduler, self.snapshot())
+
+        items = json.loads(context_map_path("codex", SESSION_ID).read_text())[
+            "analysis"
+        ]["items"]
+        self.assertEqual(items["event-10"]["relevance"], 0.8)
+        self.assertEqual(items["event-9"]["relevance"], 0.0)
 
     def test_client_wrappers_are_removed_from_prompts(self) -> None:
         wrapped = (
@@ -314,15 +482,14 @@ class ContextDriftTests(unittest.TestCase):
             "t1": ("command", "pytest -q"),
             "t2": ("command", "pytest -q"),
         }
-        hints = context_drift._superseded_hints
+        steps = context_drift._later_steps(events, targets)
 
-        self.assertEqual(
-            hints([read], events, targets), ["a.py was edited again by prompt 7"]
-        )
-        self.assertEqual(
-            hints([run], events, targets), ["the same command ran again by prompt 9"]
-        )
-        self.assertEqual(hints([rerun], events, targets), [])
+        def hints(group: list[dict[str, object]]) -> list[str]:
+            return context_drift._superseded_hints(group, steps, targets)
+
+        self.assertEqual(hints([read]), ["a.py was edited again by prompt 7"])
+        self.assertEqual(hints([run]), ["the same command ran again by prompt 9"])
+        self.assertEqual(hints([rerun]), [])
 
     def test_shell_edits_supersede_earlier_reads_of_the_same_file(self) -> None:
         read = {"id": "r", "iteration": 2, "category": "repository_and_files"}
@@ -336,7 +503,9 @@ class ContextDriftTests(unittest.TestCase):
         }
 
         self.assertEqual(
-            context_drift._superseded_hints([read], [read, shell_edit], targets),
+            context_drift._superseded_hints(
+                [read], context_drift._later_steps([read, shell_edit], targets), targets
+            ),
             ["context_drift.py was edited again by prompt 6"],
         )
 
@@ -466,7 +635,8 @@ class ContextDriftTests(unittest.TestCase):
         self.assertEqual(summary["stale_percent"], 10.0)
         ai_topics = summary["ai_topics"]
         assert isinstance(ai_topics, list)
-        self.assertEqual(ai_topics[0]["tokens"], 10)
+        tokens = {row["label"]: row["tokens"] for row in ai_topics}
+        self.assertEqual(tokens, {"Session setup": 90, "Abandoned work": 10})
 
     def test_sources_from_the_same_turn_and_category_are_grouped(self) -> None:
         state = json.loads(context_map_path("codex", SESSION_ID).read_text())
@@ -478,7 +648,7 @@ class ContextDriftTests(unittest.TestCase):
         prepared = context_drift._payload(state)
 
         assert prepared is not None
-        payload, group_members = prepared
+        payload, group_members, _ = prepared
         self.assertEqual(len(payload["items"]), 1)
         self.assertEqual(len(next(iter(group_members.values()))), 5)
 
@@ -525,7 +695,7 @@ class ContextDriftTests(unittest.TestCase):
         prepared = context_drift._payload(state)
 
         assert prepared is not None
-        payload, group_members = prepared
+        payload, group_members, _ = prepared
         compact_items = [
             item
             for item in payload["items"]
@@ -551,9 +721,7 @@ class ContextDriftTests(unittest.TestCase):
             outcome = self.outcome(provider, payload)
             result = outcome["result"]
             assert isinstance(result, dict)
-            items = result["items"]
-            assert isinstance(items, list)
-            result["items"] = items[:1]
+            result["scores"] = str(result["scores"]).splitlines()[0]
             return outcome
 
         scheduler = ContextDriftScheduler(Mock(side_effect=partial))
@@ -620,7 +788,7 @@ class ContextDriftTests(unittest.TestCase):
 
         rebuilt = json.loads(context_map_path("codex", SESSION_ID).read_text())
         self.assertEqual(rebuilt["analysis"]["version"], 3)
-        self.assertEqual(rebuilt["analysis"]["method_version"], 3)
+        self.assertEqual(rebuilt["analysis"]["method_version"], 19)
         self.assertNotIn(
             "assistant activity metadata", rebuilt["analysis"]["ai_topics"]
         )
@@ -761,16 +929,31 @@ class ContextDriftTests(unittest.TestCase):
 
         runner.assert_called_once()
 
-    def test_analysis_runs_while_five_percent_of_the_limit_remains(self) -> None:
+    def test_allow_paid_still_keeps_the_plan_reserve_for_plan_sessions(self) -> None:
+        preference = read_preferences()
+        write_preferences(
+            preference["cadence"],
+            preference["custom_rule"],
+            preference["jump_percent"],
+            context_analysis_allow_paid=True,
+        )
         runner = Mock(side_effect=self.outcome)
         scheduler = ContextDriftScheduler(runner)
 
-        scheduler.refresh(self.snapshot(), self.quotas(94), NOW)
+        scheduler.refresh(self.snapshot(), self.quotas(95), NOW)
+
+        runner.assert_not_called()
+
+    def test_analysis_runs_while_ten_percent_of_the_limit_remains(self) -> None:
+        runner = Mock(side_effect=self.outcome)
+        scheduler = ContextDriftScheduler(runner)
+
+        scheduler.refresh(self.snapshot(), self.quotas(89), NOW)
         self.assertTrue(scheduler.wait_for_idle())
 
         runner.assert_called_once()
 
-    def test_analysis_preserves_the_last_five_percent_of_the_usage_limit(self) -> None:
+    def test_analysis_preserves_the_last_ten_percent_of_the_usage_limit(self) -> None:
         runner = Mock(side_effect=self.outcome)
         scheduler = ContextDriftScheduler(runner)
 
@@ -832,6 +1015,12 @@ class ContextDriftTests(unittest.TestCase):
         )
         self.assertEqual(len(incremental["prior_session_drift"]), 1)
 
+    def test_older_method_ratings_are_rebuilt_without_waiting(self) -> None:
+        state = json.loads(context_map_path("codex", SESSION_ID).read_text())
+        state["analysis"] = {"version": 3, "method_version": 3, "analyzed_iteration": 9}
+
+        self.assertEqual(ContextDriftScheduler._due(state), "delta")
+
     def test_first_pass_waits_for_ten_prompts(self) -> None:
         state = json.loads(context_map_path("codex", SESSION_ID).read_text())
         state["iteration"] = 9
@@ -869,6 +1058,65 @@ class ContextDriftTests(unittest.TestCase):
 
         runner.assert_not_called()
         self.assertFalse(read_preferences()["context_analysis_enabled"])
+
+    def test_a_cancelled_pass_starts_no_further_batches(self) -> None:
+        payload = {"items": [{"id": "g1"}, {"id": "g2"}, {"id": "g3"}]}
+        runner = Mock(side_effect=self.outcome)
+
+        def lead_then_cancel(provider: str, batch: dict[str, object]) -> object:
+            context_drift.cancel_active_analysis()
+            return runner(provider, batch)
+
+        with patch.object(context_drift, "MAX_BATCH_ITEMS", 1):
+            outcome = context_drift._run_batched(lead_then_cancel, "claude", payload)
+
+        runner.assert_called_once()
+        self.assertEqual(outcome["batch_errors"], ["cancelled", "cancelled"])
+
+    def test_turning_analysis_off_cancels_the_running_pass(self) -> None:
+        scheduler = ContextDriftScheduler(Mock(side_effect=self.outcome))
+        scheduler._pending = cast(PendingJob, {})
+        preference = read_preferences()
+        write_preferences(
+            preference["cadence"],
+            preference["custom_rule"],
+            preference["jump_percent"],
+            context_analysis_enabled=False,
+        )
+
+        with patch.object(context_drift, "cancel_active_analysis") as cancel:
+            scheduler.refresh(self.snapshot(), self.quotas(), NOW)
+
+        cancel.assert_called_once()
+
+    def test_an_unsaved_result_backs_off_like_a_failure(self) -> None:
+        runner = Mock(side_effect=self.outcome)
+        scheduler = ContextDriftScheduler(runner)
+        snapshot = self.snapshot()
+        scheduler.refresh(snapshot, self.quotas(), NOW)
+        self.assertTrue(scheduler.wait_for_idle())
+
+        with (
+            patch.object(
+                context_drift, "write_private_json_if_changed", side_effect=OSError
+            ),
+            self.assertLogs("konvu_telemetry.context_drift", level="ERROR"),
+        ):
+            scheduler.refresh(snapshot, self.quotas(observed_at=NOW + 60), NOW + 60)
+        scheduler.refresh(snapshot, self.quotas(observed_at=NOW + 120), NOW + 120)
+        self.assertTrue(scheduler.wait_for_idle())
+
+        runner.assert_called_once()
+
+    def test_a_stored_backoff_survives_a_collector_restart(self) -> None:
+        state = json.loads(context_map_path("codex", SESSION_ID).read_text())
+        state["analysis"] = {"retry_at": iso(NOW + 600)}
+        write_private_json(context_map_path("codex", SESSION_ID), state)
+        runner = Mock(side_effect=self.outcome)
+
+        ContextDriftScheduler(runner).refresh(self.snapshot(), self.quotas(), NOW)
+
+        runner.assert_not_called()
 
     def test_completed_iteration_is_not_analyzed_twice(self) -> None:
         runner = Mock(side_effect=self.outcome)
@@ -946,7 +1194,7 @@ class ContextDriftTests(unittest.TestCase):
         modes = [call.args[1]["analysis_mode"] for call in runner.call_args_list]
         self.assertEqual(modes, ["initial", "backfill", "backfill"])
         batches = [
-            {item["iteration"] for item in call.args[1]["items"]}
+            {item["iteration"] for item in call.args[1]["items"] if "card" not in item}
             for call in runner.call_args_list
         ]
         self.assertEqual([len(batch) for batch in batches], [45, 45, 10])
@@ -957,6 +1205,18 @@ class ContextDriftTests(unittest.TestCase):
 
         scheduler.refresh(snapshot, self.quotas(observed_at=NOW + 5), NOW + 5)
         self.assertEqual(runner.call_count, 3)
+
+    def test_groups_after_the_last_pass_do_not_keep_backfill_running(self) -> None:
+        old = ((3, "repository_and_files", "a.py"), [{"id": "old"}])
+        # Leftovers of the analyzed prompt itself still belong to the backlog.
+        same = ((9, "repository_and_files", "c.py"), [{"id": "same"}])
+        new = ((10, "repository_and_files", "b.py"), [{"id": "new"}])
+
+        backlog = context_drift._backlog_groups(
+            [old, same, new], {"items": {}, "analyzed_iteration": 9}
+        )
+
+        self.assertEqual(backlog, [old, same])
 
     def test_backfill_resumes_after_a_collector_restart(self) -> None:
         snapshot = self.write_long_session(60)
@@ -970,7 +1230,8 @@ class ContextDriftTests(unittest.TestCase):
         self.assertTrue(restarted.wait_for_idle())
 
         runner.assert_called_once()
-        self.assertEqual(len(runner.call_args.args[1]["items"]), 15)
+        new_items = [i for i in runner.call_args.args[1]["items"] if "card" not in i]
+        self.assertEqual(len(new_items), 15)
 
     def test_backfill_rechecks_the_quota_reserve_before_each_batch(self) -> None:
         snapshot = self.write_long_session(60)
@@ -991,9 +1252,7 @@ class ContextDriftTests(unittest.TestCase):
             outcome = self.outcome(provider, payload)
             result = outcome["result"]
             assert isinstance(result, dict)
-            items = result["items"]
-            assert isinstance(items, list)
-            result["items"] = items[:-1]
+            result["scores"] = "\n".join(str(result["scores"]).splitlines()[:-1])
             return outcome
 
         snapshot = self.write_long_session(60)
@@ -1009,7 +1268,473 @@ class ContextDriftTests(unittest.TestCase):
 
         self.assertEqual(runner.call_count, 2)
         stored = json.loads(context_map_path("codex", SESSION_ID).read_text())
-        self.assertEqual(len(stored["analysis"]["items"]), 58)
+        # The group pass one omitted is retried and rated in pass two; the one pass two
+        # omits waits, never looping.
+        self.assertEqual(len(stored["analysis"]["items"]), 59)
+        self.assertEqual(stored["analysis"]["summary"]["backfill_state"], "complete")
+
+    def test_backfill_passes_send_only_new_groups(self) -> None:
+        snapshot = self.write_long_session(100)
+        runner = Mock(side_effect=self.outcome)
+        scheduler = ContextDriftScheduler(runner)
+
+        self.run_scheduler(scheduler, snapshot)
+        self.assertTrue(scheduler.wait_for_idle())
+        scheduler.refresh(snapshot, self.quotas(observed_at=NOW + 2), NOW + 2)
+        self.assertTrue(scheduler.wait_for_idle())
+
+        second = runner.call_args_list[1].args[1]
+        self.assertEqual(second["analysis_mode"], "backfill")
+        self.assertFalse([item for item in second["items"] if "card" in item])
+
+    def test_context_arriving_during_a_pass_waits_for_new_prompts(self) -> None:
+        def add_late_event(
+            provider: str, payload: dict[str, object]
+        ) -> dict[str, object]:
+            if runner.call_count == 1:
+                state = json.loads(context_map_path("codex", SESSION_ID).read_text())
+                template = dict(state["epochs"][0]["events"][0])
+                state["epochs"][0]["events"].append(
+                    {**template, "id": "late", "iteration": 5, "tool": "late"}
+                )
+                write_private_json(context_map_path("codex", SESSION_ID), state)
+            return self.outcome(provider, payload)
+
+        snapshot = self.write_long_session(20)
+        runner = Mock(side_effect=add_late_event)
+        scheduler = ContextDriftScheduler(runner)
+
+        self.run_scheduler(scheduler, snapshot)
+        for offset in (2, 3):
+            self.assertTrue(scheduler.wait_for_idle())
+            scheduler.refresh(
+                snapshot, self.quotas(observed_at=NOW + offset), NOW + offset
+            )
+
+        runner.assert_called_once()
+
+    def test_reply_excerpt_names_each_call_instead_of_the_tool_alone(self) -> None:
+        claude = {
+            "message": {
+                "content": [
+                    {"type": "thinking", "thinking": "hidden", "signature": "x"},
+                    {"type": "text", "text": "Wiring the routes."},
+                    {
+                        "type": "tool_use",
+                        "id": "t1",
+                        "name": "Bash",
+                        "input": {
+                            "command": "git push\nmore",
+                            "description": "Push the branch",
+                        },
+                    },
+                ]
+            }
+        }
+        codex = {
+            "payload": {
+                "type": "function_call",
+                "name": "exec",
+                "arguments": '{"cmd": "pytest -q"}',
+            }
+        }
+
+        self.assertEqual(
+            context_drift._reply_text(claude),
+            "Wiring the routes.\nBash: Push the branch",
+        )
+        self.assertEqual(context_drift._reply_text(codex), "exec: pytest -q")
+
+    def test_large_passes_are_rated_in_batches_sharing_one_topic_list(self) -> None:
+        payload = {"items": [{"id": f"g{index}"} for index in range(1, 6)]}
+        calls: list[dict[str, object]] = []
+
+        def runner(provider: str, batch: dict[str, object]) -> dict[str, object]:
+            calls.append(batch)
+            ids = [item["id"] for item in batch["items"]]
+            topics = ["Newest work"] if "g5" in ids else ["Old work", "Newest work"]
+            return {
+                "result": {
+                    "current_intent": "x",
+                    "topics": topics,
+                    "phases": [],
+                    "scores": "\n".join(
+                        f"{i}:7:{len(topics) - 1}" if i == "g1" else f"{i}:2:0"
+                        for i in ids
+                    ),
+                },
+                "model": "m",
+                "usage": {"input_tokens": 10},
+                "duration_seconds": 1.0,
+                "error": None,
+            }
+
+        with patch.object(context_drift, "MAX_BATCH_ITEMS", 2):
+            outcome = context_drift._run_batched(runner, "claude", payload)
+
+        self.assertEqual(len(calls), 3)
+        self.assertEqual([item["id"] for item in calls[0]["items"]], ["g4", "g5"])
+        self.assertEqual(calls[1]["existing_ai_topics"], ["Newest work"])
+        result = outcome["result"]
+        self.assertEqual(result["topics"], ["Newest work", "Old work"])
+        lines = dict(line.split(":", 1) for line in result["scores"].splitlines())
+        self.assertEqual(lines["g1"], "7:0")
+        self.assertEqual(lines["g2"], "2:1")
+        self.assertEqual(outcome["usage"]["input_tokens"], 30)
+
+    def test_a_failed_older_batch_keeps_the_other_batches(self) -> None:
+        payload = {"items": [{"id": f"g{index}"} for index in range(1, 5)]}
+
+        def runner(provider: str, batch: dict[str, object]) -> dict[str, object]:
+            ids = [item["id"] for item in batch["items"]]
+            if "g1" in ids:
+                return {
+                    "result": None,
+                    "model": "m",
+                    "usage": {},
+                    "duration_seconds": 1.0,
+                    "error": "timeout",
+                }
+            # A stray id from another batch must not be taken.
+            lines = [f"{i}:8:0" for i in ids] + ["g1:0:0"]
+            return {
+                "result": {
+                    "current_intent": "x",
+                    "topics": ["Work"],
+                    "phases": [],
+                    "scores": "\n".join(lines),
+                },
+                "model": "m",
+                "usage": {},
+                "duration_seconds": 1.0,
+                "error": None,
+            }
+
+        with patch.object(context_drift, "MAX_BATCH_ITEMS", 2):
+            outcome = context_drift._run_batched(runner, "claude", payload)
+
+        self.assertIsNone(outcome["error"])
+        lines = dict(
+            line.split(":", 1) for line in outcome["result"]["scores"].splitlines()
+        )
+        # The stray g1 line came from a batch that was not sent g1, so it is dropped.
+        self.assertEqual(sorted(lines), ["g3", "g4"])
+
+    def test_spending_guard_spaces_passes_and_caps_them_per_hour(self) -> None:
+        def state(*ages: float) -> dict[str, object]:
+            return {
+                "analysis": {"runs": [{"completed_at": iso(NOW - age)} for age in ages]}
+            }
+
+        with (
+            patch.object(context_drift, "MIN_SECONDS_BETWEEN_PASSES", 30),
+            patch.object(context_drift, "MAX_CALLS_PER_HOUR", 3),
+        ):
+            self.assertTrue(context_drift._over_budget(state(10), NOW))
+            self.assertFalse(context_drift._over_budget(state(60), NOW))
+            self.assertTrue(context_drift._over_budget(state(60, 600, 1200), NOW))
+            self.assertFalse(context_drift._over_budget(state(60, 600, 4000), NOW))
+
+    def test_spending_cap_counts_model_calls_not_passes(self) -> None:
+        state = {"analysis": {"runs": [{"completed_at": iso(NOW - 600), "calls": 4}]}}
+
+        with patch.object(context_drift, "MAX_CALLS_PER_HOUR", 6):
+            self.assertFalse(context_drift._over_budget(state, NOW, 2))
+            self.assertTrue(context_drift._over_budget(state, NOW, 3))
+
+    def test_scores_must_be_whole_numbers(self) -> None:
+        self.assertEqual(context_drift._fraction("7"), 0.7)
+        self.assertIsNone(context_drift._fraction("1.0"))
+        self.assertIsNone(context_drift._fraction("11"))
+
+    def test_large_turns_split_so_every_event_is_in_the_excerpt(self) -> None:
+        state = json.loads(context_map_path("codex", SESSION_ID).read_text())
+        template = dict(state["epochs"][0]["events"][0])
+        state["epochs"][0]["events"] = [
+            {
+                **template,
+                "id": f"e{index}",
+                "iteration": 1,
+                "tool": "t",
+                "estimated_tokens": 10,
+            }
+            for index in range(20)
+        ]
+
+        groups = context_drift._analysis_groups(state, Path(state["source_path"]))
+
+        self.assertTrue(
+            all(len(events) <= context_drift.MAX_GROUP_EVENTS for _, events in groups)
+        )
+
+    def test_every_member_of_a_large_group_is_in_its_excerpt(self) -> None:
+        state = json.loads(context_map_path("codex", SESSION_ID).read_text())
+        template = dict(state["epochs"][0]["events"][0])
+        state["epochs"][0]["events"] = [
+            {
+                **template,
+                "id": f"e{index}",
+                "iteration": 1,
+                "tool": "t",
+                "label": "A very long label that would crowd the excerpt",
+                "estimated_tokens": 10,
+                "analysis_content": f"member-{index:02d} " + "x" * 200,
+            }
+            for index in range(20)
+        ]
+        state["analysis"] = {}
+
+        prepared = context_drift._payload(state)
+
+        assert prepared is not None
+        content = " ".join(
+            str(item.get("content", "")) for item in prepared[0]["items"]
+        )
+        self.assertEqual(
+            [index for index in range(20) if f"member-{index:02d}" not in content], []
+        )
+
+    def test_old_method_ratings_are_hidden_and_rebuilt_at_once(self) -> None:
+        old = {
+            "version": context_drift.ANALYSIS_VERSION,
+            "method_version": 1,
+            "analyzed_iteration": 3,
+        }
+        state = {"iteration": 4, "current_epoch": 0, "analysis": old}
+
+        self.assertEqual(ContextDriftScheduler._due(state), "delta")
+        summary = context_drift._rebuilding_summary(
+            {"relevant_percent": 80, "current_intent": "x"}
+        )
+        self.assertEqual(summary["state"], "rebuilding")
+        self.assertNotIn("relevant_percent", summary)
+
+    def test_the_overall_call_cap_survives_a_restart(self) -> None:
+        context_drift.record_analysis_usage(
+            "claude",
+            "s",
+            "run-1",
+            NOW - 120,
+            NOW - 60,
+            100,
+            model="m",
+            cost_usd=0.01,
+            calls=4,
+        )
+
+        self.assertEqual(len(context_drift._recent_call_starts(NOW)), 4)
+
+    def test_a_claude_compaction_is_rated_from_its_summary(self) -> None:
+        boundary = {
+            "type": "system",
+            "subtype": "compact_boundary",
+            "compactMetadata": {"preTokens": 90_000, "postTokens": 2_000},
+        }
+        summary = {
+            "type": "user",
+            "isCompactSummary": True,
+            "message": {
+                "role": "user",
+                "content": "1. Goal:\n   Keep auth work\n\n2. Pending:\n   Finish the token audit",
+            },
+        }
+        start = self.transcript.stat().st_size
+        raw = json.dumps(boundary).encode() + b"\n"
+        with self.transcript.open("ab") as handle:
+            handle.write(raw + json.dumps(summary).encode() + b"\n")
+        state = json.loads(context_map_path("codex", SESSION_ID).read_text())
+        state["epochs"][0]["events"].append(
+            {
+                "id": "compact-event",
+                "category": "previous_compact",
+                "label": "Previous compact",
+                "iteration": 5,
+                "estimated_tokens": 2_000,
+                "source_start": start,
+                "source_end": start + len(raw),
+            }
+        )
+
+        prepared = context_drift._payload(state)
+
+        assert prepared is not None
+        payload, group_members, _ = prepared
+        compact_items = [
+            item
+            for item in payload["items"]
+            if item["technical_category"] == "previous_compact"
+        ]
+        self.assertEqual(len(compact_items), 2)
+        self.assertIn("Keep auth work", str(compact_items[0]["content"]))
+        self.assertIn("Finish the token audit", str(compact_items[1]["content"]))
+        self.assertEqual(
+            sum(
+                member["tokens"]
+                for item in compact_items
+                for member in group_members[str(item["id"])]
+            ),
+            2_000,
+        )
+
+    def test_an_unreadable_event_is_shown_to_the_model_before_it_is_rated(self) -> None:
+        state = json.loads(context_map_path("codex", SESSION_ID).read_text())
+        state["epochs"][0]["events"] = [
+            {**self.events[0], "id": "readable", "iteration": 5},
+            {
+                **self.events[0],
+                "id": "blank",
+                "iteration": 5,
+                "analysis_content": "",
+                "estimated_tokens": 700,
+            },
+        ]
+
+        prepared = context_drift._payload(state)
+
+        assert prepared is not None
+        payload, group_members, _ = prepared
+        self.assertEqual(len(payload["items"]), 1)
+        self.assertIn(
+            "no readable text, about 700 tokens", payload["items"][0]["content"]
+        )
+        self.assertEqual(
+            {member["id"] for member in group_members["g1"]}, {"readable", "blank"}
+        )
+
+    def test_compact_entries_keep_only_plain_naming_characters(self) -> None:
+        entries = context_drift._compact_entries(
+            ["PR 91 review; rm -rf ~ `x` $(y) <z>", "quota_attribution.py edits"], 5
+        )
+
+        self.assertEqual(
+            entries, ["PR 91 review rm -rf x (y) z", "quota_attribution.py edits"]
+        )
+
+    def test_codex_summary_includes_compact_focus_for_a_current_analysis(self) -> None:
+        state = json.loads(context_map_path("codex", SESSION_ID).read_text())
+        state["epochs"][0]["events"][0]["estimated_tokens"] = 100
+        analysis = {
+            "epoch": state["current_epoch"],
+            "compact_prompt": "Preserve: the open dashboard work. Drop: finished setup.",
+            "items": {
+                "event-1": {"ai_topic": "Finished setup", "relevance": 0.1},
+            },
+        }
+
+        summary = context_drift._public_summary(state, analysis)
+
+        self.assertEqual(summary["compact_prompt"], analysis["compact_prompt"])
+        self.assertEqual(
+            summary["compact_command"], "/compact " + analysis["compact_prompt"]
+        )
+        self.assertEqual(summary["state"], "ready")
+
+    def test_a_compaction_clears_old_advice_and_makes_the_session_due(self) -> None:
+        state = {
+            "iteration": 12,
+            "current_epoch": 2,
+            "analysis": {
+                "version": context_drift.ANALYSIS_VERSION,
+                "method_version": context_drift.ANALYSIS_METHOD_VERSION,
+                "epoch": 1,
+                "analyzed_iteration": 11,
+                "current_intent": "Old goal",
+                "compact_prompt": "Preserve: old work.",
+                "items": {},
+            },
+        }
+
+        self.assertEqual(ContextDriftScheduler._due(state), "delta")
+        summary = context_drift._public_summary(state, state["analysis"])
+        self.assertEqual(summary["current_intent"], "")
+        self.assertNotIn("compact_command", summary)
+
+    def test_topics_only_an_older_batch_names_are_kept(self) -> None:
+        payload = {"items": [{"id": "g1"}, {"id": "g2"}]}
+
+        def runner(provider: str, batch: dict[str, object]) -> dict[str, object]:
+            ids = [item["id"] for item in batch["items"]]
+            topics = ["Lead work"] if "g2" in ids else ["lead  WORK", "Side task"]
+            lines = "g2:8:0" if "g2" in ids else "g1:3:1"
+            return {
+                "result": {
+                    "current_intent": "x",
+                    "topics": topics,
+                    "phases": [],
+                    "scores": lines,
+                },
+                "model": "m",
+                "usage": {},
+                "duration_seconds": 1.0,
+                "error": None,
+            }
+
+        with patch.object(context_drift, "MAX_BATCH_ITEMS", 1):
+            outcome = context_drift._run_batched(runner, "claude", payload)
+
+        result = outcome["result"]
+        self.assertEqual(result["topics"], ["Lead work", "Side task"])
+        self.assertIn("g1:3:1", result["scores"].splitlines())
+
+    def test_stored_excerpts_mask_credentials_but_keep_paths(self) -> None:
+        redact = context_drift._redact
+
+        self.assertEqual(
+            redact("OPENAI=sk-abcdefghijklmnopqrstuvwx"), "OPENAI=[redacted]"
+        )
+        self.assertEqual(redact("password = hunter2 ok"), "[redacted] ok")
+        path = "cd /Users/ag/Desktop/code/konvu-telemetry-context-drift && ls"
+        self.assertEqual(redact(path), path)
+
+    def test_scores_glued_without_newlines_still_parse(self) -> None:
+        matches = context_drift._SCORE_ENTRY.findall("g1:9:0g2:5:1")
+
+        self.assertEqual(matches, [("g1", "9", "0"), ("g2", "5", "1")])
+
+    def test_starting_context_counts_as_session_setup(self) -> None:
+        self.assertIn("starting_context", context_drift.FIXED_RELEVANT_CATEGORIES)
+
+    def test_large_turn_groups_are_split_into_chunks(self) -> None:
+        state = json.loads(context_map_path("codex", SESSION_ID).read_text())
+        template = dict(state["epochs"][0]["events"][0])
+        state["epochs"][0]["events"] = [
+            {
+                **template,
+                "id": f"e{index}",
+                "iteration": 1,
+                "tool": "assistant",
+                "estimated_tokens": 3_000,
+            }
+            for index in range(7)
+        ]
+
+        groups = context_drift._analysis_groups(state, Path(state["source_path"]))
+
+        self.assertEqual([len(events) for _, events in groups], [2, 2, 2, 1])
+        self.assertEqual(
+            [key[2] for key, _ in groups],
+            ["assistant", "assistant #2", "assistant #3", "assistant #4"],
+        )
+
+    def test_backfill_ends_when_only_unreadable_groups_remain(self) -> None:
+        snapshot = self.write_long_session(60)
+        state = json.loads(context_map_path("codex", SESSION_ID).read_text())
+        # The oldest, smallest group has no text; it is sent as a placeholder and rated once.
+        state["epochs"][0]["events"][0]["analysis_content"] = ""
+        state["epochs"][0]["events"][0]["estimated_tokens"] = 1
+        write_private_json(context_map_path("codex", SESSION_ID), state)
+        runner = Mock(side_effect=self.outcome)
+        scheduler = ContextDriftScheduler(runner)
+
+        self.run_scheduler(scheduler, snapshot)
+        for offset in (2, 3, 4):
+            self.assertTrue(scheduler.wait_for_idle())
+            scheduler.refresh(
+                snapshot, self.quotas(observed_at=NOW + offset), NOW + offset
+            )
+
+        self.assertEqual(runner.call_count, 2)
+        stored = json.loads(context_map_path("codex", SESSION_ID).read_text())
         self.assertEqual(stored["analysis"]["summary"]["backfill_state"], "complete")
 
     def test_failed_analysis_uses_exponential_backoff(self) -> None:
@@ -1124,6 +1849,8 @@ class ContextDriftTests(unittest.TestCase):
         self.assertEqual(command[command.index("--tools") + 1], "")
         self.assertIn("--no-session-persistence", command)
         self.assertIn("--strict-mcp-config", command)
+        # The user's CLAUDE.md, rules and hooks must not reach the rater.
+        self.assertIn("--setting-sources=", command)
         self.assertEqual(
             run.call_args.args[3],
             {"MAX_THINKING_TOKENS": "0", "DISABLE_PROMPT_CACHING": "1"},
@@ -1192,6 +1919,16 @@ class ContextDriftTests(unittest.TestCase):
         self.assertEqual(command[command.index("--sandbox") + 1], "read-only")
         self.assertIn('model_reasoning_effort="none"', command)
         self.assertEqual(command.count("--model"), 1)
+        # Untrusted transcript text gets no shell, files, web or apps.
+        disabled = {
+            command[index + 1]
+            for index, flag in enumerate(command)
+            if flag == "--disable"
+        }
+        self.assertTrue(
+            {"shell_tool", "unified_exec", "apps", "computer_use"} <= disabled
+        )
+        self.assertIn('web_search="disabled"', command)
         self.assertEqual(outcome["usage"]["input_tokens"], 12)
 
     def test_scheduler_close_terminates_an_active_cli_process(self) -> None:
