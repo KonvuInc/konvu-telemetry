@@ -999,7 +999,7 @@ function ledgerTable(group, scale) {
 }
 function ledger(rows) {
   const scale = ledgerDollarScale(rows);
-  const key = '<div class="context-ring-key"><span>Context rings</span><span><i class="context-key-needed"></i>Needed</span><span title="AI estimate: not needed for the current work. Review before compacting."><i class="context-key-old"></i>Not needed now</span><span><i class="context-key-unreviewed"></i>Unreviewed</span><span><i class="context-key-free"></i>Free space</span><small>When enabled, AI reviews after 10 prompts or a major context change.</small></div>';
+  const key = '<div class="context-ring-key"><span>Context rings</span><span><i class="context-key-needed"></i>Needed</span><span title="AI estimate: not needed for the current work. Review before compacting."><i class="context-key-old"></i>Not needed now</span><span><i class="context-key-unreviewed"></i>Unreviewed</span><span><i class="context-key-free"></i>Free space</span></div>';
   return key + planGroups(rows).map((group) => ledgerTable(group, scale)).join("");
 }
 
