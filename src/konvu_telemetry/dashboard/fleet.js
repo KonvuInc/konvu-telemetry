@@ -23,7 +23,7 @@ const state = {
   selected: null,
   chart: "cumulative",
   inspectorTab: "overview",
-  topicMode: "sources",
+  topicMode: "topics",
   error: false,
   refreshInFlight: false,
   nextRefreshAt: null,
@@ -355,11 +355,7 @@ function subagentDetails(s) {
     })
     .join("");
   return (
-    '<div class="section-title"><h3>Subagents</h3><span class="tiny">' +
-    agents.length +
-    " spawned · " +
-    agents.filter((a) => a.live === true).length +
-    ' live</span></div><div class="agent-map"><div class="agent-map-header"><span>Agent</span><span>Context received</span><span>' + subagentMetricHeading(s) + '</span></div><div class="agent-root"><i></i>This session</div><div class="agent-branches">' +
+    '<div class="agent-map"><div class="agent-map-header"><span>Agent</span><span>Context received</span><span>' + subagentMetricHeading(s) + '</span></div><div class="agent-root"><i></i>This session</div><div class="agent-branches">' +
     branches +
     "</div></div>"
   );
@@ -381,6 +377,25 @@ function analysisFor(s) {
   }
   return analysis;
 }
+/* Shown once compactable context fills 20 points of the context window (same rule as the
+   status line): the AI's keep and drop lists as a ready /compact command. */
+const COMPACT_RECOMMEND_WINDOW_POINTS = 20;
+const COMPACT_MIN_COVERAGE_PERCENT = 70;
+function compactAdvice(s) {
+  const analysis = analysisFor(s);
+  if (!analysis || typeof analysis.compact_command !== "string" || (s.provider === "codex" && typeof analysis.compact_prompt !== "string")) return "";
+  // Only clearly dead context (finished, replaced, rejected, noise) counts toward the hint.
+  const waste = clampPercent(analysis.droppable_percent);
+  // Advice built on a small reviewed slice of the window is not shown (same rule as the status line).
+  if (clampPercent(analysis.coverage_percent) < COMPACT_MIN_COVERAGE_PERCENT) return "";
+  const used = context(s);
+  if (!nonnegative(used) || (waste / 100) * clampPercent(used) < COMPACT_RECOMMEND_WINDOW_POINTS) return "";
+  const terminal = (label, command) => '<div class="compact-terminal"><div class="compact-terminal-bar"><span>' + label + '</span><button type="button" class="compact-advice-copy" data-copy-compact="' + esc(command) + '">Copy</button></div><pre class="compact-advice-command"><code>' + esc(command) + '</code></pre></div>';
+  const steps = s.provider === 'codex'
+    ? '<div class="compact-steps"><div><h4>1 · Send this message to Codex</h4>' + terminal('Message', 'Keep these priorities when my next message says /compact:\n' + analysis.compact_prompt + '\nI will send /compact next.') + '</div><div><h4>2 · Then send this command</h4>' + terminal('Command', '/compact') + '</div></div>'
+    : terminal('Claude Code', analysis.compact_command);
+  return '<section class="compact-advice" aria-label="Compact suggestion"><div class="compact-advice-head"><h3>Compact this session</h3><span>' + percentage(waste) + ' finished or replaced</span></div>' + steps + '</section>';
+}
 function clampPercent(value) {
   return nonnegative(value) ? Math.min(100, Math.max(0, value)) : 0;
 }
@@ -389,13 +404,14 @@ function contextWindowSlices(s) {
   const observed = context(s);
   if (!nonnegative(observed)) return { analysis: null, used: null, portions: [], background: '#edeaf2' };
   const used = clampPercent(observed);
-  const weights = analysis ? [analysis.relevant_percent, analysis.drifting_percent, analysis.stale_percent].map(clampPercent) : [];
+  // Two bands: needed, and compactable (anything rated below needed, drifting included).
+  const weights = analysis ? [clampPercent(analysis.relevant_percent), 0, clampPercent(clampPercent(analysis.drifting_percent) + clampPercent(analysis.stale_percent))] : [];
   const rated = weights.reduce((sum, value) => sum + value, 0);
   const scale = rated > 100 ? 100 / rated : 1;
   const portions = weights.map((value) => used * value * scale / 100);
   const slices = analysis
     ? [['#2c9d75', portions[0]], ['#e5ad34', portions[1]], ['#dc5b65', portions[2]], ['#b9b1c9', Math.max(0, used - portions.reduce((sum, value) => sum + value, 0))], ['#edeaf2', 100 - used]]
-    : [['#6d55aa', used], ['#edeaf2', 100 - used]];
+    : [['#b9b1c9', used], ['#edeaf2', 100 - used]];
   let position = 0;
   const background = 'conic-gradient(' + slices.map(([color, amount]) => {
     const from = position;
@@ -407,8 +423,12 @@ function contextWindowSlices(s) {
 function donut(s) {
   const slices = contextWindowSlices(s);
   if (slices.used === null) return '<div class="context-donut" role="img" aria-label="Context use unavailable"><i class="context-donut-ring" style="background:#edeaf2"></i><span>—<small>window used</small></span></div>';
-  const label = percentage(slices.used) + ' of context window used' + (slices.analysis ? '; colors show relevance as a share of the full window' : '; relevance not analyzed yet');
-  return '<div class="context-donut" role="img" aria-label="' + esc(label) + '"><i class="context-donut-ring" style="background:' + slices.background + '"></i><span>' + percentage(slices.used) + '<small>window used</small></span></div>';
+  const runs = slices.analysis?.run_events;
+  const lastRun = (Array.isArray(runs) && runs.length ? runs[runs.length - 1] : null) || slices.analysis?.last_run;
+  const iteration = lastRun?.iteration;
+  const review = slices.analysis ? 'AI reviewed' + (finite(iteration) && iteration > 0 ? ' after prompt ' + iteration : '') : 'No AI review';
+  const label = percentage(slices.used) + ' of context window used; ' + review + (slices.analysis ? '; colors show relevance as a share of the full window' : '');
+  return '<div class="context-donut" role="img" aria-label="' + esc(label) + '"><i class="context-donut-ring" style="background:' + slices.background + '"></i><span>' + percentage(slices.used) + '<small>window used</small><small class="context-review-note">' + esc(review) + '</small></span></div>';
 }
 function roundedDollarCeiling(value) {
   const total = Math.max(0.01, value),
@@ -969,7 +989,8 @@ function ledgerTable(group, scale) {
 }
 function ledger(rows) {
   const scale = ledgerDollarScale(rows);
-  return planGroups(rows).map((group) => ledgerTable(group, scale)).join("");
+  const key = '<div class="context-ring-key"><span>Context rings</span><span><i class="context-key-needed"></i>Needed now</span><span title="AI rated this context as drifting from the current goal or stale"><i class="context-key-old"></i>Less useful now</span><span><i class="context-key-unreviewed"></i>Not reviewed</span><span><i class="context-key-free"></i>Free space</span><small>When enabled, AI reviews after 10 prompts or a major context change.</small></div>';
+  return key + planGroups(rows).map((group) => ledgerTable(group, scale)).join("");
 }
 
 function curvePoints(b) {
@@ -1522,7 +1543,6 @@ function initialUrl() {
   state.sort = ["activity", "spent", "forecast", "share", "context"].includes(q.get("sort")) ? q.get("sort") : "forecast";
   state.selected = q.get("session");
   state.inspectorTab = q.get("tab") === "context" ? "context" : "overview";
-  if (previewName === "topics") state.topicMode = "topics";
   saveUrl();
 }
 function render() {
@@ -1763,6 +1783,17 @@ function bindEvents() {
     },
     true,
   );
+  document.addEventListener("click", async (event) => {
+    const copy = event.target instanceof Element ? event.target.closest("[data-copy-compact]") : null;
+    if (!copy) return;
+    try {
+      await navigator.clipboard?.writeText(copy.getAttribute("data-copy-compact") || "");
+      copy.textContent = "Copied";
+    } catch {
+      copy.textContent = "Select and copy";
+    }
+    setTimeout(() => { copy.textContent = "Copy"; }, 1600);
+  });
   document.addEventListener("click", (event) => {
     const target = event.target;
     if (!(target instanceof Element)) return;
@@ -2201,7 +2232,7 @@ function contextRows(s) {
 function contextGraph(s) {
   const rows = contextRows(s);
   if (rows.length < 2) return '<p class="graph-empty">Not enough prompts recorded yet to draw a trend.</p>';
-  const W = 620, H = 210, L = 46, R = 16, T = 16, B = 30;
+  const W = 900, H = 180, L = 50, R = 20, T = 15, B = 34;
   const lastIter = rows[rows.length - 1].iteration;
   const firstIter = rows[0].iteration;
   const span = Math.max(1, lastIter - firstIter);
@@ -2371,14 +2402,14 @@ function analysisUsageText(session) {
 }
 function relevanceLegend(analysis) {
   if (!analysis) return '<span class="relevance-occupied"><i></i>Used</span>';
-  return '<span class="relevance-good"><i></i>Relevant</span><span class="relevance-drift" title="Partly useful to the current focus"><i></i>Drifting</span><span class="relevance-stale" title="Superseded or no longer useful"><i></i>Stale</span><span class="relevance-unknown"><i></i>Unreviewed</span>';
+  return '<span class="relevance-good" title="Still needed for the current work"><i></i>Needed</span><span class="relevance-stale" title="AI estimate: not needed for the current work. Review before compacting."><i></i>Not needed now</span><span class="relevance-unknown"><i></i>Unreviewed</span>';
 }
 function contextHero(s) {
   const { analysis, used, portions, background } = contextWindowSlices(s);
   if (used === null) return '<div class="context-hero"><div class="context-hero-main"><div class="context-hero-ring" role="img" aria-label="Context use unavailable" style="background:#edeaf2"><div class="context-hero-ring-center"><strong>—</strong><span>window used</span></div></div><div class="context-hero-copy"><p class="context-rating-pending">Waiting for a provider context checkpoint.</p></div></div></div>';
-  const ringLabel = percentage(used) + ' of the full context window used' + (analysis ? '; ' + portions.map((value, index) => percentage(value) + ' ' + ['relevant', 'drifting', 'stale'][index]).join(', ') + ' of the full window' : '; relevance not rated');
+  const ringLabel = percentage(used) + ' of the full context window used' + (analysis ? '; ' + percentage(portions[0]) + ' needed, ' + percentage(portions[2]) + ' not needed now, of the full window' : '; relevance not rated');
   const ring = '<div class="context-hero-ring" role="img" aria-label="' + esc(ringLabel) + '" style="background:' + background + '"><div class="context-hero-ring-center"><strong>' + percentage(used) + '</strong><span>window used</span></div></div>';
-  const parts = analysis ? [['Relevant', portions[0], 'relevant', 'Useful to the current focus'], ['Drifting', portions[1], 'drifting', 'Only partly useful now'], ['Stale', portions[2], 'stale', 'No longer useful']] : [];
+  const parts = analysis ? [['Needed', portions[0], 'relevant', 'Still needed for the current work'], ['Not needed now', portions[2], 'stale', 'AI estimate: not needed for the current work. Review before compacting.']] : [];
   const unreviewed = used - portions.reduce((sum, value) => sum + value, 0);
   if (analysis && used > 0 && unreviewed / used * 100 > 0.1) parts.push(['Unreviewed', unreviewed, 'unreviewed', 'Not rated by AI']);
   const legend = parts.map(([label, value, kind, meaning]) => '<div class="context-mix-row ' + kind + '" title="' + esc(meaning) + '"><i></i><span>' + label + '</span><strong>' + percentage(used ? value / used * 100 : 0) + '</strong></div>').join('');
@@ -2391,7 +2422,8 @@ function contextFocus(s) {
 }
 function topicTiles(rows, contextTokens, analyzed, sourceTypes) {
   if (!rows.length) return '<p class="context-topic-empty">No context sources were recorded for this checkpoint.</p>';
-  function tile(row) {
+  const columns = 3;
+  function tile(row, alone) {
     const share = row.tokens / Math.max(1, contextTokens) * 100;
     const shareLabel = share > 0 && share < 0.1 ? (share < 0.01 ? share.toFixed(3) : share.toFixed(2)) + '%' : percentage(share);
     const label = row.label || (sourceTypes ? contextCategoryLabel(row.id) : 'Other work');
@@ -2399,40 +2431,54 @@ function topicTiles(rows, contextTokens, analyzed, sourceTypes) {
     const drifting = nonnegative(row.drifting_tokens) ? row.drifting_tokens : 0;
     const stale = nonnegative(row.stale_tokens) ? row.stale_tokens : 0;
     const rated = analyzed && relevant + drifting + stale > 0;
-    const rawStops = [relevant, drifting, stale].map((value) => row.tokens > 0 ? Math.min(100, value / row.tokens * 100) : 0);
-    const totalStops = rawStops.reduce((sum, value) => sum + value, 0);
-    const stops = totalStops > 100 ? rawStops.map((value) => value * 100 / totalStops) : rawStops;
-    const [good, drift, old] = stops;
-    const unreviewed = Math.max(0, 100 - good - drift - old);
-    const mix = rated ? 'conic-gradient(#2c9d75 0 ' + good.toFixed(2) + '%,#e5ad34 ' + good.toFixed(2) + '% ' + (good + drift).toFixed(2) + '%,#dc5b65 ' + (good + drift).toFixed(2) + '% ' + Math.min(100, good + drift + old).toFixed(2) + '%,#b9b1c9 ' + Math.min(100, good + drift + old).toFixed(2) + '% 100%)' : 'conic-gradient(#b9b1c9 0 100%)';
-    const title = label + (row.other_count ? ' (' + row.other_count + ' more)' : '') + ' · ' + shareLabel + ' of used context';
+    const weights = [relevant, 0, drifting + stale].map((value) => row.tokens > 0 ? value / row.tokens * 100 : 0);
+    const scale = weights.reduce((sum, value) => sum + value, 0) > 100 ? 100 / weights.reduce((sum, value) => sum + value, 0) : 1;
+    const [good, drift, old] = weights.map((value) => value * scale);
+    const middle = good + drift;
+    const end = middle + old;
+    const mix = rated ? 'linear-gradient(90deg,#84b7a5 0 ' + good.toFixed(2) + '%,#ddbd72 ' + good.toFixed(2) + '% ' + middle.toFixed(2) + '%,#d5929b ' + middle.toFixed(2) + '% ' + end.toFixed(2) + '%,#c8c3d1 ' + end.toFixed(2) + '% 100%)' : '';
+    const detail = rated ? (old > 0.1 ? percentage(old) + ' not needed now' : '') : 'Relevance pending';
+    const title = label + (row.other_count ? ' (' + row.other_count + ' more)' : '') + ' · ' + shareLabel + ' of used context' + (row.id === 'unassigned_topic' ? ' · AI assigned no conversation topic' : detail ? ' · ' + detail : '');
     const other = row.id === 'others';
+    const unassigned = row.id === 'unassigned_topic';
     const tag = other ? 'button' : 'article';
     const action = other ? '<span class="context-others-action">View all ' + (sourceTypes ? 'sources' : 'topics') + ' <span aria-hidden="true">→</span></span>' : '';
     const aria = other ? 'View all ' + row.all_count + ' ' + (sourceTypes ? 'source types' : 'conversation topics') + '. ' + title : title;
-    const status = rated ? '<div class="context-topic-status"><span class="relevant">' + percentage(good) + ' relevant</span><span class="drifting">' + percentage(drift) + ' drifting</span><span class="stale">' + percentage(old) + ' stale</span>' + (unreviewed > 0.1 ? '<span class="unreviewed">' + percentage(unreviewed) + ' unreviewed</span>' : '') + '</div>' : '<p class="context-topic-unrated">Relevance pending</p>';
-    return '<' + tag + (other ? ' type="button" data-context-expand="true"' : '') + ' class="context-topic-tile' + (other ? ' context-topic-others' : '') + '" title="' + esc(title) + '" aria-label="' + esc(aria) + '"><div class="context-topic-card-top"><span class="context-topic-card-share">' + shareLabel + '<small>of used context</small></span><span class="context-topic-mini-ring" role="img" aria-label="' + esc(rated ? stops.map((value, index) => percentage(value) + ' ' + ['relevant', 'drifting', 'stale'][index]).join(', ') : 'Relevance pending') + '" style="background:' + mix + '"><i></i></span></div><h4>' + esc(label) + '</h4>' + status + action + '</' + tag + '>';
+    const tileDetail = unassigned ? '' : detail;
+    const width = alone ? 'flex:none;width:' + (columns === 3 ? '34%' : '50%') : 'flex:' + Math.max(1, row.tokens) + ' 1 0;min-width:' + (columns === 3 ? '26%' : '34%');
+    return '<' + tag + (other ? ' type="button" data-context-expand="true"' : '') + ' class="context-topic-tile' + (other ? ' context-topic-others' : '') + (unassigned ? ' context-topic-unassigned' : '') + '" style="' + width + '" title="' + esc(title) + '" aria-label="' + esc(aria) + '"><span class="context-topic-mixbar" aria-hidden="true"' + (mix ? ' style="background:' + mix + '"' : '') + '></span><strong>' + shareLabel + '</strong><h4>' + esc(label) + '</h4>' + (tileDetail ? '<small>' + esc(tileDetail) + '</small>' : '') + action + '</' + tag + '>';
   }
-  return '<div class="context-topic-mosaic" role="group" aria-label="Share of used context by ' + (sourceTypes ? 'source type' : 'conversation topic') + '">' + rows.map(tile).join('') + '</div>';
+  const groups = [];
+  for (let index = 0; index < rows.length; index += columns) groups.push(rows.slice(index, index + columns));
+  const total = rows.reduce((sum, row) => sum + row.tokens, 0);
+  const body = groups.map((group) => {
+    const weight = group.reduce((sum, row) => sum + row.tokens, 0) / Math.max(1, total);
+    const height = 82 + 26 * weight;
+    return '<div class="context-topic-row" style="height:' + height.toFixed(1) + 'px">' + group.map((row) => tile(row, group.length === 1)).join('') + '</div>';
+  }).join('');
+  return '<div class="context-topic-mosaic" role="group" aria-label="Share of used context by ' + (sourceTypes ? 'source type' : 'conversation topic') + '">' + body + '</div>';
+}
+function namedThemes(analysis) {
+  return Array.isArray(analysis?.themes) ? analysis.themes.filter((row) => row?.label !== 'Not reviewed yet') : [];
 }
 function contextTopics(s, full = false) {
   const map = s.context_map;
-  if (!map || map.state !== 'ready' || !map.categories || typeof map.categories !== 'object') return '<section class="context-section context-topic-section"><h3>Source types</h3><p class="context-topic-empty">Waiting for the next complete provider checkpoint.</p></section>';
-  if (!contextMapMatchesCurrent(s)) return '<section class="context-section context-topic-section"><h3>Source types</h3><p class="context-topic-empty">Waiting for an updated breakdown.</p></section>';
+  if (!map || map.state !== 'ready' || !map.categories || typeof map.categories !== 'object') return '<section class="context-section context-topic-section"><p class="context-topic-empty">Waiting for the next complete provider checkpoint.</p></section>';
+  if (!contextMapMatchesCurrent(s)) return '<section class="context-section context-topic-section"><p class="context-topic-empty">Waiting for an updated breakdown.</p></section>';
   const observed = nonnegative(map.observed_context_tokens) ? map.observed_context_tokens : 0;
   const sources = Object.entries(map.categories).filter(([, value]) => nonnegative(value) && value > 0).map(([id, value]) => ({ id, tokens: value }));
   const known = sources.reduce((sum, row) => sum + row.tokens, 0);
   if (observed > known) sources.push({ id: 'provider_internal', tokens: observed - known });
   const analysis = analysisFor(s);
-  const mode = analysis?.themes?.length && state.topicMode === 'topics' ? 'topics' : 'sources';
+  const themes = namedThemes(analysis);
+  const mode = themes.length && state.topicMode === 'topics' ? 'topics' : 'sources';
   const technical = Array.isArray(analysis?.technical_categories) ? analysis.technical_categories.filter((row) => row && nonnegative(row.tokens) && row.tokens > 0) : [];
   const ratedSources = mode === 'sources' && technical.length > 0;
-  const rows = mode === 'topics' ? [...analysis.themes] : ratedSources ? [...technical] : sources;
-  const assigned = rows.reduce((sum, row) => sum + row.tokens, 0);
+  const rows = mode === 'topics' ? [...themes] : ratedSources ? [...technical] : sources;
+  const assigned = (mode === 'topics' ? analysis.themes : rows).reduce((sum, row) => sum + row.tokens, 0);
   if (mode === 'sources' && observed > assigned) rows.push({ id: 'provider_internal', label: 'Other context', tokens: observed - assigned });
   const unassigned = mode === 'topics' ? Math.max(0, observed - assigned) : 0;
   rows.sort((a, b) => b.tokens - a.tokens);
-  const title = mode === 'topics' ? 'Conversation topics' : 'Source types';
   function preview(limit) {
     const hidden = rows.slice(limit);
     if (!hidden.length) return rows;
@@ -2444,17 +2490,16 @@ function contextTopics(s, full = false) {
       stale_tokens: hidden.reduce((sum, row) => sum + (nonnegative(row.stale_tokens) ? row.stale_tokens : 0), 0),
     }];
   }
-  const shown = full ? rows : preview(6);
-  const caption = analysis ? 'Each card shows its share of used context. Its ring shows how much remains relevant, drifting, or stale.' : 'Source sizes come from recorded activity. Relevance appears after AI enrichment.';
-  const note = unassigned > 0 ? '<p class="context-topic-unassigned-note">' + percentage(unassigned / observed * 100) + ' of used context has no AI topic; it remains included in the context ring above.</p>' : '';
-  return '<section class="context-section context-topic-section ' + (mode === 'topics' ? 'mode-topics' : 'mode-sources') + '">' + (full ? '' : '<div class="context-topics-head"><h3>' + title + '</h3><p>' + caption + '</p></div>') + topicTiles(shown, Math.max(observed, assigned), mode === 'topics' || ratedSources, mode === 'sources') + note + '</section>';
+  const unassignedRow = unassigned > 0 ? [{ id: 'unassigned_topic', label: 'No named topic', tokens: unassigned }] : [];
+  const shown = full ? [...rows, ...unassignedRow] : [...preview(unassignedRow.length ? 7 : 8), ...unassignedRow];
+  return '<section class="context-section context-topic-section ' + (mode === 'topics' ? 'mode-topics' : 'mode-sources') + '">' + topicTiles(shown, Math.max(observed, assigned), mode === 'topics' || ratedSources, mode === 'sources') + '</section>';
 }
 function openContextBreakdown() {
   const existing = document.querySelector('#context-breakdown-dialog');
   if (existing) { existing.querySelector('[data-context-close]')?.focus(); return; }
   const session = allRows().find((row) => keyOf(row) === state.selected || row.id === state.selected);
   if (!session) return;
-  const mode = analysisFor(session)?.themes?.length && state.topicMode === 'topics' ? 'Conversation topics' : 'Source types';
+  const mode = namedThemes(analysisFor(session)).length && state.topicMode === 'topics' ? 'Conversation topics' : 'Source types';
   const dialog = document.createElement('dialog');
   dialog.id = 'context-breakdown-dialog';
   dialog.setAttribute('aria-labelledby', 'context-breakdown-title');
@@ -2467,7 +2512,7 @@ function openContextBreakdown() {
 }
 function contextTopicChooser(s) {
   const analysis = analysisFor(s);
-  if (!analysis?.themes?.length) return '';
+  if (!namedThemes(analysis).length) return '';
   const mode = state.topicMode === 'topics' ? 'topics' : 'sources';
   return '<div class="context-topic-chooser" role="group" aria-label="Context grouping"><button type="button" data-topic-mode="topics" aria-pressed="' + String(mode === 'topics') + '">Conversation topics</button><button type="button" data-topic-mode="sources" aria-pressed="' + String(mode === 'sources') + '">Source types</button></div>';
 }
@@ -2475,8 +2520,7 @@ function contextTimeline(s) {
   const analysis = analysisFor(s);
   if (!analysis) return '';
   const phases = Array.isArray(analysis.phases) ? analysis.phases : [];
-  const focus = analysis.current_intent ? '<div class="context-work-focus"><span>Now</span><strong>' + esc(analysis.current_intent) + '</strong></div>' : '';
-  if (!phases.length && !focus) return '';
+  if (!phases.length) return '';
   const lastPrompt = Math.max(1, s.context_map?.iteration || 1, ...phases.map((phase) => Number.isInteger(phase.end_iteration) ? phase.end_iteration : 0));
   const segments = phases.map((phase, index) => {
     const from = Number.isInteger(phase.start_iteration) ? Math.max(1, phase.start_iteration) : 1;
@@ -2490,7 +2534,7 @@ function contextTimeline(s) {
     return '<div class="context-journey-segment phase-' + Math.min(segment.index, 5) + (segment.to === lastPrompt ? ' current' : '') + (length / lastPrompt < 0.07 ? ' narrow' : '') + '" style="left:' + ((segment.from - 1) / lastPrompt * 100).toFixed(2) + '%;width:' + (length / lastPrompt * 100).toFixed(2) + '%" title="' + esc(segment.label + ' · prompts ' + segment.from + '–' + segment.to + (segment.summary ? ' · ' + segment.summary : '')) + '"><span>' + String(segment.index + 1).padStart(2, '0') + '</span></div>';
   }).join('');
   const key = segments.map((segment) => '<div class="context-journey-item"><span class="context-journey-index phase-' + Math.min(segment.index, 5) + '">' + String(segment.index + 1).padStart(2, '0') + '</span><strong>' + esc(segment.label) + '</strong></div>').join('');
-  return '<section class="context-section context-journey"><div class="context-section-head"><h3>Work so far</h3></div>' + focus + (segments.length ? '<div class="context-journey-axis"><span>First prompt</span><span>Now · prompt ' + lastPrompt + '</span></div><div class="context-journey-track" role="img" aria-label="Work topics across ' + lastPrompt + ' prompts">' + track + '</div><div class="context-journey-key">' + key + '</div>' : '') + '</section>';
+  return '<section class="context-section context-journey"><div class="context-section-head"><h3>Work so far</h3></div>' + (segments.length ? '<div class="context-journey-axis"><span>First prompt</span><span>Now · prompt ' + lastPrompt + '</span></div><div class="context-journey-track" role="img" aria-label="Work topics across ' + lastPrompt + ' prompts">' + track + '</div><div class="context-journey-key">' + key + '</div>' : '') + '</section>';
 }
 function contextAnalysisState(s) {
   if (analysisFor(s)) return '<p class="context-analysis-note">' + esc(analysisUsageText(s)) + '</p>';
@@ -2527,9 +2571,10 @@ function renderInspector() {
   const analysisCost = analysisUsageText(s);
   const paidDetails = included ? '' : '<details id="spend-details" class="inspector-extra" data-session-key="' + esc(keyOf(s)) + '"' + (spendOpen ? ' open' : '') + '><summary>Spending trend</summary><div class="section-title"><h3>How this session is spending</h3><div class="mini-tabs"><button data-chart="cumulative" class="' + (state.chart === 'cumulative' ? 'on' : '') + '">Cumulative</button><button data-chart="prompt" class="' + (state.chart === 'prompt' ? 'on' : '') + '">Per prompt</button></div></div>' + sessionGraph(s) + '</details>';
   const warning = signal?.severity ? '<div class="inspector-signal"><strong>' + esc(signal.action) + '</strong><p>' + esc(signal.evidence) + '</p></div>' : '';
-  const content = warning + '<section class="context-visual"><div class="context-visual-head"><h3>Current context</h3>' + contextTopicChooser(s) + '</div><div class="context-visual-body">' + contextHero(s) + contextTopics(s) + '</div>' + (analysisCost ? '<p class="context-analysis-usage">' + esc(analysisCost) + '</p>' : '') + '</section>' + contextTimeline(s) + history + paidDetails +
-    '<details id="subagent-section" class="inspector-extra"><summary>Subagent activity <span>' + agents.length + ' spawned · ' + agents.filter((agent) => agent.live === true).length + ' live</span></summary>' + (subagentDetails(s) || '<p>No subagents were recorded.</p>') + '</details>' +
-    '<details class="inspector-extra"><summary>Recorded token traffic</summary>' + tokenBreakdown(s) + '</details>';
+  const grouping = namedThemes(analysisFor(s)).length && state.topicMode === 'topics' ? 'Conversation topics' : 'Source types';
+  const content = warning + '<section class="context-visual"><div class="context-visual-head"><h3>Current context</h3><div class="context-visual-topic-head"><h3>' + grouping + '</h3>' + contextTopicChooser(s) + '</div></div><div class="context-visual-body">' + contextHero(s) + contextTopics(s) + '</div>' + (analysisCost ? '<p class="context-analysis-usage">' + esc(analysisCost) + '</p>' : '') + '</section>' + compactAdvice(s) + contextTimeline(s) + history + paidDetails +
+    '<section id="subagent-section" class="inspector-extra inspector-static"><div class="section-title"><h3>Subagent activity</h3><span class="tiny">' + agents.length + ' spawned · ' + agents.filter((agent) => agent.live === true).length + ' live</span></div>' + (subagentDetails(s) || '<p>No subagents were recorded.</p>') + '</section>' +
+    '<section class="inspector-extra inspector-static"><div class="section-title"><h3>Recorded token traffic</h3></div>' + tokenBreakdown(s) + '</section>';
   const sessionActivity = activity(s);
   const activityText = sessionActivity.kind === 'running' ? '<span class="inspector-live">Running</span><span>Active ' + age(s.last_activity_at) + ' ago</span>' : '<span>Last activity ' + age(s.last_activity_at) + ' ago</span>';
   $("#inspector-body").innerHTML = (previewName === "topics" ? '<div class="topic-demo-label">Demo session · sample data <a href="/">Live dashboard</a></div>' : '') + '<h2 class="inspector-title" id="inspector-title" title="' + esc(displayTitle(s)) + '">' + esc(displayTitle(s)) + '</h2>' +
@@ -2562,7 +2607,7 @@ async function openSession(id, opener) {
   state.selected = id;
   state.chart = "cumulative";
   state.inspectorTab = "overview";
-  state.topicMode = previewName === "topics" ? "topics" : "sources";
+  state.topicMode = "topics";
   $("#inspector-body").scrollTop = 0;
   saveUrl();
   renderInspector();

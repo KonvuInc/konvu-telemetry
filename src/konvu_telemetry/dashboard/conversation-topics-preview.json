@@ -209,7 +209,10 @@
               "iteration": 30,
               "started_at": "2026-10-02T10:40:00Z"
             }
-          ]
+          ],
+          "droppable_percent": 32.1,
+          "compact_prompt": "Preserve: finish and test team sign-in; keep the current auth flow and release checks. Drop: the resolved CI investigation and abandoned approaches.",
+          "compact_command": "/compact Preserve: finish and test team sign-in; keep the current auth flow and release checks. Drop: the resolved CI investigation and abandoned approaches."
         }
       },
       "analysis_usage": {

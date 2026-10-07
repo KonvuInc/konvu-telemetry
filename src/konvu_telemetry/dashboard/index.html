@@ -110,13 +110,12 @@
           <h3>Context drift analysis</h3>
           <p class="settings-note">An AI estimate of how useful the context in each active session is to its current goal.</p>
           <div class="analysis-key" role="list" aria-label="Context ratings">
-            <div role="listitem"><span class="analysis-key-dot relevant" aria-hidden="true"></span><strong>Relevant</strong><span>Helps with the current goal</span></div>
-            <div role="listitem"><span class="analysis-key-dot drifting" aria-hidden="true"></span><strong>Drifting</strong><span>Only partly useful now</span></div>
-            <div role="listitem"><span class="analysis-key-dot stale" aria-hidden="true"></span><strong>Stale</strong><span>Superseded or no longer useful</span></div>
+            <div role="listitem"><span class="analysis-key-dot relevant" aria-hidden="true"></span><strong>Needed</strong><span>Still needed for the current work</span></div>
+            <div role="listitem"><span class="analysis-key-dot stale" aria-hidden="true"></span><strong>Not needed now</strong><span>AI estimate: not needed for the current work. Review before compacting.</span></div>
           </div>
           <button id="analysis-info" class="analysis-info" type="button" aria-expanded="false" aria-controls="analysis-popover">How and when it runs <span aria-hidden="true">⌄</span></button>
           <div id="analysis-popover" class="analysis-popover" role="note" hidden>
-            <div><strong>When</strong><span>About every 10 prompts in an active session.</span></div>
+            <div><strong>When</strong><span>About every 10 prompts in an active session, capped at 30 calls per session an hour.</span></div>
             <div><strong>Where</strong><span>A small model runs through your local CLI login, without tools or a saved session. Session text goes to your AI provider, not Konvu.</span></div>
             <div><strong>Usage</strong><span>Each run uses your provider’s allowance or credits. Its measured share or estimated cost appears on the session.</span></div>
           </div>
