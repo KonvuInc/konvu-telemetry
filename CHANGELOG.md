@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.3 - 2026-10-07
+
+- Refresh the README media link; application behavior is unchanged.
+
 ## 1.0.2 - 2026-10-07
 
 - Keep Codex session context and AI ratings stable while subagents run by reading
