@@ -661,7 +661,7 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
             return
         try:
             body = json.loads(self.rfile.read(length))
-        except (ValueError, RecursionError, OSError):
+        except (ValueError, OSError):
             self.send_error(400)
             return
         if not isinstance(body, dict) or not isinstance(body.get("event"), str):
@@ -688,7 +688,7 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
             return
         try:
             body = json.loads(self.rfile.read(length))
-        except (ValueError, RecursionError, OSError):
+        except (ValueError, OSError):
             self.send_error(400)
             return
         if not isinstance(body, dict):

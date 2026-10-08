@@ -1852,8 +1852,9 @@ class ServiceTests(unittest.TestCase):
             accepted = post(b'{"event":"compact prompt copied","provider":"codex"}')
             unknown = post(b'{"event":"$autocapture"}')
             malformed = post(b"[]")
-            undecodable = post(b"\xff\xfe")
-            nested = post(b"[" * 1024)
+            undecodable = post(b"\x80")
+            no_event = post(b'{"provider":"codex"}')
+            list_event = post(b'{"event":["notifications enabled"]}')
             oversized = post(
                 json.dumps(
                     {"event": "notifications enabled", "pad": "x" * 1100}
@@ -1864,7 +1865,8 @@ class ServiceTests(unittest.TestCase):
         unknown.send_error.assert_called_once_with(400)
         malformed.send_error.assert_called_once_with(400)
         undecodable.send_error.assert_called_once_with(400)
-        nested.send_error.assert_called_once_with(400)
+        no_event.send_error.assert_called_once_with(400)
+        list_event.send_error.assert_called_once_with(400)
         oversized.send_error.assert_called_once_with(400)
         scheduled.assert_called_once_with(
             "compact prompt copied", {"provider": "codex"}
@@ -1896,12 +1898,41 @@ class ServiceTests(unittest.TestCase):
         with (
             patch(
                 "konvu_telemetry.service.write_preferences",
+                return_value={**stored, "context_analysis_enabled": False},
+            ),
+            patch("konvu_telemetry.service.record_settings_saved") as recorded,
+        ):
+            DashboardRequestHandler.do_POST(handler)
+        recorded.assert_called_once_with("every-tool-call", False)
+
+        handler.rfile = Mock(read=Mock(return_value=body))
+        with (
+            patch(
+                "konvu_telemetry.service.write_preferences",
                 side_effect=OSError("read only"),
             ),
             patch("konvu_telemetry.service.record_settings_saved") as recorded,
         ):
             DashboardRequestHandler.do_POST(handler)
         recorded.assert_not_called()
+
+    def test_json_endpoints_answer_bad_lengths_and_bytes_with_400(self) -> None:
+        for path in ("/api/track", "/api/preferences"):
+            for length, body in (("ten", b"{}"), ("1", b"\x80")):
+                handler = object.__new__(DashboardRequestHandler)
+                handler.headers = {"Host": "127.0.0.1:7824", "Content-Length": length}
+                handler.path = path
+                handler.rfile = Mock(read=Mock(return_value=body))
+                handler.send_error = MagicMock()
+                with (
+                    self.subTest(path=path, length=length),
+                    patch("konvu_telemetry.service.record_dashboard_action") as tracked,
+                    patch("konvu_telemetry.service.write_preferences") as stored,
+                ):
+                    DashboardRequestHandler.do_POST(handler)
+                    handler.send_error.assert_called_once_with(400)
+                    tracked.assert_not_called()
+                    stored.assert_not_called()
 
     def test_track_endpoint_refuses_foreign_origins(self) -> None:
         handler = object.__new__(DashboardRequestHandler)

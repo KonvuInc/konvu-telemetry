@@ -408,9 +408,11 @@ class TrackingStoreTests(unittest.TestCase):
             state_path = directory / "tracking-state.json"
             state = json.loads(state_path.read_text())
             state["active_day"] = "2026-10-08"
+            state["collector_failure_day"] = "2026-10-08"
             state_path.write_text(json.dumps(state))
 
             store.record_daily("telemetry active day", {}, "2026-10-08")
+            store.record_daily("collector failed", {"stage": "snapshot"}, "2026-10-08")
             self.assertFalse((directory / "tracking-queue.json").exists())
 
             store.record_daily("telemetry active day", {}, "2026-10-09")
@@ -532,6 +534,41 @@ class TrackingStoreTests(unittest.TestCase):
             )
         self.assertTrue(pending.empty())
         flushed.assert_not_called()
+
+    def test_suppressed_process_leaves_the_shared_delivery_state_alone(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            store = self.enabled_store(directory)
+            store.record_daily("telemetry active day", {}, "2026-10-08")
+            before = (directory / "tracking-state.json").read_text()
+            with (
+                patch.dict("os.environ", {"DO_NOT_TRACK": "", "CI": "1"}),
+                patch(
+                    "konvu_telemetry.tracking.analytics_suppressed",
+                    tracking_module_suppressed,
+                ),
+                patch("konvu_telemetry.tracking._store", return_value=store),
+                patch("konvu_telemetry.tracking.Thread") as thread,
+            ):
+                tracking.flush_in_background()
+            thread.assert_not_called()
+            self.assertEqual((directory / "tracking-state.json").read_text(), before)
+
+    def test_opt_out_write_failure_reaches_setup(self) -> None:
+        with (
+            patch.dict("os.environ", {"DO_NOT_TRACK": "1", "CI": ""}),
+            patch(
+                "konvu_telemetry.tracking.analytics_suppressed",
+                tracking_module_suppressed,
+            ),
+            patch("konvu_telemetry.tracking._store") as store,
+        ):
+            store.return_value.set_enabled.side_effect = OSError("disk full")
+            with self.assertRaisesRegex(OSError, "disk full"):
+                tracking.store_suppression_opt_out()
+            # The analytics helpers themselves never break setup.
+            tracking.record_setup_completed(20.0, default_enabled=True)
+            tracking.record_setup_failed("install", default_enabled=True)
 
     def test_failed_setup_under_do_not_track_stores_an_opt_out(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

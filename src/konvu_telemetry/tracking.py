@@ -600,6 +600,9 @@ def _schedule_retry(delay: float) -> None:
 
 
 def flush_in_background() -> None:
+    # A suppressed process must not even record a failed send, which would delay the daemon.
+    if analytics_suppressed():
+        return
     if not _WORKER_LOCK.acquire(blocking=False):
         return
 
