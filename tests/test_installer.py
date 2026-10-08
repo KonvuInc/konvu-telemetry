@@ -178,6 +178,24 @@ class InstallerTests(unittest.TestCase):
             installer.setup(60, False)
         self.assertEqual(order, ["opt-out", "collector"])
 
+    def test_setup_stops_before_the_collector_when_the_opt_out_cannot_be_stored(
+        self,
+    ) -> None:
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(installer.Path, "home", return_value=Path(temporary)),
+            patch.object(installer.sys, "platform", "darwin"),
+            patch.object(
+                installer,
+                "store_suppression_opt_out",
+                side_effect=OSError("disk full"),
+            ),
+            patch.object(installer, "install_launch_agent") as collector,
+            self.assertRaisesRegex(OSError, "disk full"),
+        ):
+            installer.setup(60, False)
+        collector.assert_not_called()
+
     def test_failed_setup_records_the_failing_stage(self) -> None:
         cases = (
             ("integrations", {"validate_integrations": RuntimeError("bad json")}),

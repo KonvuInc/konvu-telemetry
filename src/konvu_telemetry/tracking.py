@@ -504,20 +504,20 @@ def _duration_bucket(duration_seconds: float) -> str:
 
 
 def store_suppression_opt_out() -> bool:
-    """Store DO_NOT_TRACK or CI as an opt-out, since the launchd collector never sees it."""
+    """Store DO_NOT_TRACK or CI as an opt-out, since the launchd collector never sees it.
+
+    A failed write raises, like `telemetry off`, so setup stops before the collector starts.
+    """
     if not analytics_suppressed():
         return False
-    try:
-        _store().set_enabled(False)
-    except Exception:
-        pass
+    _store().set_enabled(False)
     return True
 
 
 def record_setup_completed(duration_seconds: float, *, default_enabled: bool) -> None:
-    if store_suppression_opt_out():
-        return
     try:
+        if store_suppression_opt_out():
+            return
         store = _store()
         store.initialize(default_enabled=default_enabled)
         store.record_setup_completed(_duration_bucket(duration_seconds))
@@ -528,9 +528,9 @@ def record_setup_completed(duration_seconds: float, *, default_enabled: bool) ->
 
 def record_setup_failed(stage: str, *, default_enabled: bool) -> None:
     """Queue and try once to send a failed setup, since no resident process may follow."""
-    if store_suppression_opt_out():
-        return
     try:
+        if store_suppression_opt_out():
+            return
         store = _store()
         store.initialize(default_enabled=default_enabled)
         store.record("telemetry setup failed", {"stage": stage})
