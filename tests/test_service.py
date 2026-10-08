@@ -1852,6 +1852,8 @@ class ServiceTests(unittest.TestCase):
             accepted = post(b'{"event":"compact prompt copied","provider":"codex"}')
             unknown = post(b'{"event":"$autocapture"}')
             malformed = post(b"[]")
+            undecodable = post(b"\xff\xfe")
+            nested = post(b"[" * 1024)
             oversized = post(
                 json.dumps(
                     {"event": "notifications enabled", "pad": "x" * 1100}
@@ -1861,6 +1863,8 @@ class ServiceTests(unittest.TestCase):
         accepted.send_response.assert_called_once_with(204)
         unknown.send_error.assert_called_once_with(400)
         malformed.send_error.assert_called_once_with(400)
+        undecodable.send_error.assert_called_once_with(400)
+        nested.send_error.assert_called_once_with(400)
         oversized.send_error.assert_called_once_with(400)
         scheduled.assert_called_once_with(
             "compact prompt copied", {"provider": "codex"}
