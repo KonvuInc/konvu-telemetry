@@ -8,8 +8,8 @@
 - Add a few anonymous events to see what helps: a failed setup and its stage,
   copying a compact prompt, opening the session inspector, allowing notifications
   and saving settings.
-- Send nothing when `DO_NOT_TRACK` or `CI` is set, and keep the test suite from
-  ever reaching PostHog.
+- Running setup with `DO_NOT_TRACK` or `CI` set now turns product analytics off,
+  and the installer and service tests can no longer reach PostHog.
 
 ## 1.0.3 - 2026-10-07
 

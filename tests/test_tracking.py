@@ -437,6 +437,11 @@ class TrackingStoreTests(unittest.TestCase):
                 {"cadence": "made-up", "context_analysis_enabled": True},
                 day,
             )
+            store.record_daily(
+                "settings saved",
+                {"cadence": "every-tool-call", "context_analysis_enabled": "yes"},
+                day,
+            )
             store.record_daily("unknown click", {}, day)
 
             events = json.loads((directory / "tracking-queue.json").read_text())
@@ -455,6 +460,95 @@ class TrackingStoreTests(unittest.TestCase):
                     ),
                 ],
             )
+
+    def test_unhashable_property_values_are_dropped_without_raising(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            store = self.enabled_store(directory)
+            day = "2026-10-08"
+
+            store.record_daily("compact prompt copied", {"provider": ["x"]}, day)
+            store.record_daily(
+                "settings saved",
+                {"cadence": ["x"], "context_analysis_enabled": True},
+                day,
+            )
+            store.record("telemetry setup failed", {"stage": {"x": 1}})
+            store.record("telemetry setup completed", {"duration_bucket": []})
+
+            self.assertFalse((directory / "tracking-queue.json").exists())
+
+    def test_public_helpers_schedule_the_allowlisted_events(self) -> None:
+        pending: SimpleQueue = SimpleQueue()
+        with (
+            patch("konvu_telemetry.tracking._PENDING_EVENTS", pending),
+            patch("konvu_telemetry.tracking.flush_in_background"),
+            patch("konvu_telemetry.tracking.date") as today,
+        ):
+            today.today.return_value.isoformat.return_value = "2026-10-08"
+            tracking.record_dashboard_opened(True)
+            tracking.record_active_day()
+            tracking.record_collector_failure()
+            tracking.record_first_snapshot_ready()
+            tracking.record_dashboard_action("notifications enabled", {})
+            tracking.record_settings_saved("every-tool-call", False)
+        scheduled = []
+        while not pending.empty():
+            scheduled.append(pending.get())
+        day = "2026-10-08"
+        self.assertEqual(
+            scheduled,
+            [
+                ("dashboard opened", {"data_available": True}, day),
+                ("telemetry active day", {}, day),
+                ("collector failed", {"stage": "snapshot"}, day),
+                ("first snapshot ready", {}, None),
+                ("notifications enabled", {}, day),
+                (
+                    "settings saved",
+                    {"cadence": "every-tool-call", "context_analysis_enabled": False},
+                    day,
+                ),
+            ],
+        )
+        for event, properties, _ in scheduled:
+            self.assertIsNotNone(TrackingStore._normalize_properties(event, properties))
+
+    def test_suppressed_process_schedules_nothing_even_when_enabled(self) -> None:
+        pending: SimpleQueue = SimpleQueue()
+        with (
+            patch.dict("os.environ", {"DO_NOT_TRACK": " 1 ", "CI": ""}),
+            patch(
+                "konvu_telemetry.tracking.analytics_suppressed",
+                tracking_module_suppressed,
+            ),
+            patch("konvu_telemetry.tracking._PENDING_EVENTS", pending),
+            patch("konvu_telemetry.tracking.flush_in_background") as flushed,
+        ):
+            tracking.record_dashboard_opened(True)
+            tracking.record_active_day()
+            self.assertTrue(
+                tracking.record_dashboard_action("notifications enabled", {})
+            )
+        self.assertTrue(pending.empty())
+        flushed.assert_not_called()
+
+    def test_failed_setup_under_do_not_track_stores_an_opt_out(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            sent: list[bytes] = []
+            store = self.store(directory, sender=sent.append)
+            with (
+                patch.dict("os.environ", {"DO_NOT_TRACK": "", "CI": "true"}),
+                patch(
+                    "konvu_telemetry.tracking.analytics_suppressed",
+                    tracking_module_suppressed,
+                ),
+                patch("konvu_telemetry.tracking._store", return_value=store),
+            ):
+                tracking.record_setup_failed("install", default_enabled=True)
+            self.assertEqual(sent, [])
+            self.assertFalse(store.status().enabled)
 
     def test_unknown_dashboard_action_is_refused(self) -> None:
         self.assertFalse(tracking.record_dashboard_action("rage click", {}))
@@ -497,11 +591,53 @@ class TrackingStoreTests(unittest.TestCase):
                     with self.assertRaisesRegex(OSError, "suppressed"):
                         tracking._send_to_posthog(b'{"batch":[]}')
 
-            self.assertFalse((directory / "tracking-queue.json").exists())
-            self.assertFalse((directory / "tracking-state.json").exists())
+            queue_path = directory / "tracking-queue.json"
+            self.assertFalse(queue_path.exists() and json.loads(queue_path.read_text()))
+            # Setup stores the opt-out so the launchd collector, which never sees
+            # the shell environment, stops too.
+            self.assertFalse(store.status().enabled)
+
+    def test_setup_under_do_not_track_turns_off_an_earlier_opt_in(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            store = self.enabled_store(directory)
+            store.record_daily("telemetry active day", {}, "2026-10-08")
+            with (
+                patch.dict("os.environ", {"DO_NOT_TRACK": "1", "CI": ""}),
+                patch(
+                    "konvu_telemetry.tracking.analytics_suppressed",
+                    tracking_module_suppressed,
+                ),
+                patch("konvu_telemetry.tracking._store", return_value=store),
+            ):
+                tracking.record_setup_completed(20.0, default_enabled=True)
+
+            self.assertFalse(store.status().enabled)
+            self.assertEqual(
+                json.loads((directory / "tracking-queue.json").read_text()), []
+            )
+            store.record_daily("telemetry active day", {}, "2026-10-09")
+            self.assertEqual(
+                json.loads((directory / "tracking-queue.json").read_text()), []
+            )
+
+    def test_an_older_day_never_erases_a_newer_days_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            store = self.enabled_store(directory)
+
+            store.record_daily("session inspector opened", {}, "2026-10-09")
+            store.record_daily("telemetry active day", {}, "2026-10-08")
+            store.record_daily("session inspector opened", {}, "2026-10-09")
+
+            events = json.loads((directory / "tracking-queue.json").read_text())
+            self.assertEqual(
+                [event["event"] for event in events],
+                ["session inspector opened", "telemetry active day"],
+            )
 
     def test_suppression_ignores_empty_and_false_values(self) -> None:
-        for value in ("", "0", "false", "FALSE"):
+        for value in ("", "0", "false", "FALSE", " 0 ", " false\n"):
             with patch.dict("os.environ", {"DO_NOT_TRACK": value, "CI": value}):
                 self.assertFalse(tracking_module_suppressed())
 

@@ -81,7 +81,7 @@ What it costs and when it runs:
 - Your transcripts stay on your Mac and are never changed. Konvu stores only derived numbers in `~/.konvu/telemetry`.
 - To show plan limits, the collector asks Anthropic and OpenAI for your usage using your existing logins. Credentials are never written to disk or logs.
 - The AI review sends short excerpts of a session only to that session's own provider, with no tools and nothing saved.
-- Setup turns on a small amount of anonymous product analytics (like "setup finished"), never prompts, code, paths or account details. Turn it off with `konvu-telemetry telemetry off`, or set `DO_NOT_TRACK=1`.
+- Setup turns on a small amount of anonymous product analytics (like "setup finished"), never prompts, code, paths or account details. Turn it off with `konvu-telemetry telemetry off`, or run setup with `DO_NOT_TRACK=1`.
 
 Full detail on what is fetched, stored and sent: [SECURITY.md](SECURITY.md#data-handling-in-detail). How costs are estimated: [ACCURACY.md](ACCURACY.md).
 

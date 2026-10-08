@@ -208,7 +208,11 @@ class TrackingStore:
                 return
             sent = state.get("daily_sent")
             sent = (
-                {name: value for name, value in sent.items() if value == day}
+                {
+                    name: value
+                    for name, value in sent.items()
+                    if isinstance(value, str) and value >= day
+                }
                 if isinstance(sent, dict)
                 else {}
             )
@@ -425,7 +429,11 @@ class TrackingStore:
     ) -> dict[str, object] | None:
         if event == "telemetry setup completed":
             bucket = properties.get("duration_bucket")
-            return {"duration_bucket": bucket} if bucket in DURATION_BUCKETS else None
+            return (
+                {"duration_bucket": bucket}
+                if isinstance(bucket, str) and bucket in DURATION_BUCKETS
+                else None
+            )
         if event == "dashboard opened":
             data_available = properties.get("data_available")
             return (
@@ -435,20 +443,32 @@ class TrackingStore:
             )
         if event == "telemetry setup failed":
             stage = properties.get("stage")
-            return {"stage": stage} if stage in SETUP_FAILURE_STAGES else None
+            return (
+                {"stage": stage}
+                if isinstance(stage, str) and stage in SETUP_FAILURE_STAGES
+                else None
+            )
         if event in {"first snapshot ready", "telemetry active day"}:
             return {}
         if event == "collector failed" and properties.get("stage") == "snapshot":
             return {"stage": "snapshot"}
         if event == "compact prompt copied":
             provider = properties.get("provider")
-            return {"provider": provider} if provider in AGENT_PROVIDERS else None
+            return (
+                {"provider": provider}
+                if isinstance(provider, str) and provider in AGENT_PROVIDERS
+                else None
+            )
         if event in {"session inspector opened", "notifications enabled"}:
             return {}
         if event == "settings saved":
             cadence = properties.get("cadence")
             analysis = properties.get("context_analysis_enabled")
-            if cadence not in CADENCES or type(analysis) is not bool:
+            if (
+                not isinstance(cadence, str)
+                or cadence not in CADENCES
+                or type(analysis) is not bool
+            ):
                 return None
             return {"cadence": cadence, "context_analysis_enabled": analysis}
         return None
@@ -483,8 +503,20 @@ def _duration_bucket(duration_seconds: float) -> str:
     return "15_seconds_or_more"
 
 
+def _persist_suppression() -> bool:
+    """Turn a DO_NOT_TRACK or CI setup into a stored opt-out the collector honours."""
+    if not analytics_suppressed():
+        return False
+    try:
+        _store().set_enabled(False)
+    except Exception:
+        pass
+    return True
+
+
 def record_setup_completed(duration_seconds: float, *, default_enabled: bool) -> None:
-    if analytics_suppressed():
+    # The launchd collector never sees the shell's environment, so store the choice.
+    if _persist_suppression():
         return
     try:
         store = _store()
@@ -497,7 +529,7 @@ def record_setup_completed(duration_seconds: float, *, default_enabled: bool) ->
 
 def record_setup_failed(stage: str, *, default_enabled: bool) -> None:
     """Queue and try once to send a failed setup, since no resident process may follow."""
-    if analytics_suppressed():
+    if _persist_suppression():
         return
     try:
         store = _store()

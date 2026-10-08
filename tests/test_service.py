@@ -1839,18 +1839,23 @@ class ServiceTests(unittest.TestCase):
             accepted = post(b'{"event":"compact prompt copied","provider":"codex"}')
             unknown = post(b'{"event":"$autocapture"}')
             malformed = post(b"[]")
+            oversized = post(
+                json.dumps(
+                    {"event": "notifications enabled", "pad": "x" * 1100}
+                ).encode()
+            )
 
         accepted.send_response.assert_called_once_with(204)
         unknown.send_error.assert_called_once_with(400)
         malformed.send_error.assert_called_once_with(400)
+        oversized.send_error.assert_called_once_with(400)
         scheduled.assert_called_once_with(
             "compact prompt copied", {"provider": "codex"}
         )
 
     def test_saved_settings_are_recorded_after_they_are_stored(self) -> None:
-        body = json.dumps(
-            {"cadence": "every-tool-call", "context_analysis_enabled": False}
-        ).encode()
+        # The request omits analysis, so the stored value is what must be recorded.
+        body = json.dumps({"cadence": "every-tool-call"}).encode()
         handler = object.__new__(DashboardRequestHandler)
         handler.headers = {"Host": "127.0.0.1:7824", "Content-Length": str(len(body))}
         handler.path = "/api/preferences"
@@ -1860,14 +1865,15 @@ class ServiceTests(unittest.TestCase):
         stored = {
             "cadence": "every-tool-call",
             "custom_rule": "",
-            "context_analysis_enabled": False,
+            "context_analysis_enabled": True,
         }
         with (
             patch("konvu_telemetry.service.write_preferences", return_value=stored),
             patch("konvu_telemetry.service.record_settings_saved") as recorded,
         ):
             DashboardRequestHandler.do_POST(handler)
-        recorded.assert_called_once_with("every-tool-call", False)
+        recorded.assert_called_once_with("every-tool-call", True)
+        self.assertNotIn("context_analysis_enabled", json.loads(body))
 
         handler.rfile = Mock(read=Mock(return_value=body))
         with (
