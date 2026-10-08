@@ -109,9 +109,31 @@ from konvu_telemetry.storage import (
     transcript_files,
     write_private_json_if_changed,
 )
+from konvu_telemetry.tracking import TrackingStore
 
 
 DASHBOARD_HINT = "🔗 run konvu-telemetry setup to start the dashboard"
+
+
+def setUpModule() -> None:  # noqa: N802
+    # No test in this module may reach PostHog, whatever the local tracking state.
+    suppressed = patch(
+        "konvu_telemetry.tracking.analytics_suppressed", return_value=True
+    )
+    suppressed.start()
+    unittest.addModuleCleanup(suppressed.stop)
+    # Nor touch the developer's real tracking state, even with KONVU_LIVE_USAGE_HOME set.
+    directory = tempfile.TemporaryDirectory()
+    unittest.addModuleCleanup(directory.cleanup)
+    isolated = patch(
+        "konvu_telemetry.tracking._store",
+        return_value=TrackingStore(
+            Path(directory.name) / "tracking-state.json",
+            Path(directory.name) / "tracking-queue.json",
+        ),
+    )
+    isolated.start()
+    unittest.addModuleCleanup(isolated.stop)
 
 
 def health_patch(health: object) -> object:
@@ -1810,6 +1832,118 @@ class ServiceTests(unittest.TestCase):
                 DashboardRequestHandler.do_GET(handler)
         recorded.assert_called_once_with(data_available=False)
 
+    def test_track_endpoint_accepts_only_allowlisted_dashboard_actions(self) -> None:
+        def post(body: bytes) -> MagicMock:
+            handler = object.__new__(DashboardRequestHandler)
+            handler.headers = {
+                "Host": "127.0.0.1:7824",
+                "Origin": "http://127.0.0.1:7824",
+                "Content-Length": str(len(body)),
+            }
+            handler.path = "/api/track"
+            handler.rfile = Mock(read=Mock(return_value=body))
+            handler.send_response = MagicMock()
+            handler.send_error = MagicMock()
+            handler.end_headers = MagicMock()
+            DashboardRequestHandler.do_POST(handler)
+            return handler
+
+        with patch("konvu_telemetry.tracking._schedule") as scheduled:
+            accepted = post(b'{"event":"compact prompt copied","provider":"codex"}')
+            unknown = post(b'{"event":"$autocapture"}')
+            malformed = post(b"[]")
+            undecodable = post(b"\x80")
+            no_event = post(b'{"provider":"codex"}')
+            list_event = post(b'{"event":["notifications enabled"]}')
+            oversized = post(
+                json.dumps(
+                    {"event": "notifications enabled", "pad": "x" * 1100}
+                ).encode()
+            )
+
+        accepted.send_response.assert_called_once_with(204)
+        unknown.send_error.assert_called_once_with(400)
+        malformed.send_error.assert_called_once_with(400)
+        undecodable.send_error.assert_called_once_with(400)
+        no_event.send_error.assert_called_once_with(400)
+        list_event.send_error.assert_called_once_with(400)
+        oversized.send_error.assert_called_once_with(400)
+        scheduled.assert_called_once_with(
+            "compact prompt copied", {"provider": "codex"}
+        )
+
+    def test_saved_settings_are_recorded_after_they_are_stored(self) -> None:
+        # The request omits analysis, so the stored value is what must be recorded.
+        body = json.dumps({"cadence": "every-tool-call"}).encode()
+        handler = object.__new__(DashboardRequestHandler)
+        handler.headers = {"Host": "127.0.0.1:7824", "Content-Length": str(len(body))}
+        handler.path = "/api/preferences"
+        handler.rfile = Mock(read=Mock(return_value=body))
+        handler._send_json = MagicMock()
+        handler.send_error = MagicMock()
+        stored = {
+            "cadence": "every-tool-call",
+            "custom_rule": "",
+            "context_analysis_enabled": True,
+        }
+        with (
+            patch("konvu_telemetry.service.write_preferences", return_value=stored),
+            patch("konvu_telemetry.service.record_settings_saved") as recorded,
+        ):
+            DashboardRequestHandler.do_POST(handler)
+        recorded.assert_called_once_with("every-tool-call", True)
+        self.assertNotIn("context_analysis_enabled", json.loads(body))
+
+        handler.rfile = Mock(read=Mock(return_value=body))
+        with (
+            patch(
+                "konvu_telemetry.service.write_preferences",
+                return_value={**stored, "context_analysis_enabled": False},
+            ),
+            patch("konvu_telemetry.service.record_settings_saved") as recorded,
+        ):
+            DashboardRequestHandler.do_POST(handler)
+        recorded.assert_called_once_with("every-tool-call", False)
+
+        handler.rfile = Mock(read=Mock(return_value=body))
+        with (
+            patch(
+                "konvu_telemetry.service.write_preferences",
+                side_effect=OSError("read only"),
+            ),
+            patch("konvu_telemetry.service.record_settings_saved") as recorded,
+        ):
+            DashboardRequestHandler.do_POST(handler)
+        recorded.assert_not_called()
+
+    def test_json_endpoints_answer_bad_lengths_and_bytes_with_400(self) -> None:
+        for path in ("/api/track", "/api/preferences"):
+            for length, body in (("ten", b"{}"), ("1", b"\x80")):
+                handler = object.__new__(DashboardRequestHandler)
+                handler.headers = {"Host": "127.0.0.1:7824", "Content-Length": length}
+                handler.path = path
+                handler.rfile = Mock(read=Mock(return_value=body))
+                handler.send_error = MagicMock()
+                with (
+                    self.subTest(path=path, length=length),
+                    patch("konvu_telemetry.service.record_dashboard_action") as tracked,
+                    patch("konvu_telemetry.service.write_preferences") as stored,
+                ):
+                    DashboardRequestHandler.do_POST(handler)
+                    handler.send_error.assert_called_once_with(400)
+                    tracked.assert_not_called()
+                    stored.assert_not_called()
+
+    def test_track_endpoint_refuses_foreign_origins(self) -> None:
+        handler = object.__new__(DashboardRequestHandler)
+        handler.headers = {"Host": "127.0.0.1:7824", "Origin": "https://evil.example"}
+        handler.path = "/api/track"
+        handler.send_error = MagicMock()
+        with patch("konvu_telemetry.service.record_dashboard_action") as recorded:
+            DashboardRequestHandler.do_POST(handler)
+        handler.send_error.assert_called_once_with(403)
+        recorded.assert_not_called()
+
     def test_dashboard_open_does_not_read_snapshot_for_analytics(self) -> None:
         handler = object.__new__(DashboardRequestHandler)
         handler.headers = {"Host": "127.0.0.1:7824"}
@@ -2858,6 +2992,7 @@ class ServiceTests(unittest.TestCase):
             patch("konvu_telemetry.service.write_provider_quotas"),
             patch("konvu_telemetry.service.write_health"),
             patch("konvu_telemetry.service.record_first_snapshot_ready") as recorded,
+            patch("konvu_telemetry.service.record_active_day") as active_day,
             patch("konvu_telemetry.service.time.time", return_value=1_767_225_630.0),
             self.assertRaises(StopIteration),
         ):
@@ -2869,6 +3004,7 @@ class ServiceTests(unittest.TestCase):
                 Mock(refresh=Mock(return_value={})),
             )
         recorded.assert_called_once()
+        active_day.assert_called_once()
         self.assertTrue(service._DASHBOARD_DATA_AVAILABLE)
 
     def test_dashboard_rejects_non_local_or_malformed_origins(self) -> None:
