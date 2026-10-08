@@ -503,8 +503,8 @@ def _duration_bucket(duration_seconds: float) -> str:
     return "15_seconds_or_more"
 
 
-def _persist_suppression() -> bool:
-    """Turn a DO_NOT_TRACK or CI setup into a stored opt-out the collector honours."""
+def store_suppression_opt_out() -> bool:
+    """Store DO_NOT_TRACK or CI as an opt-out, since the launchd collector never sees it."""
     if not analytics_suppressed():
         return False
     try:
@@ -515,8 +515,7 @@ def _persist_suppression() -> bool:
 
 
 def record_setup_completed(duration_seconds: float, *, default_enabled: bool) -> None:
-    # The launchd collector never sees the shell's environment, so store the choice.
-    if _persist_suppression():
+    if store_suppression_opt_out():
         return
     try:
         store = _store()
@@ -529,7 +528,7 @@ def record_setup_completed(duration_seconds: float, *, default_enabled: bool) ->
 
 def record_setup_failed(stage: str, *, default_enabled: bool) -> None:
     """Queue and try once to send a failed setup, since no resident process may follow."""
-    if _persist_suppression():
+    if store_suppression_opt_out():
         return
     try:
         store = _store()

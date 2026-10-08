@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Send each anonymous product event at most once per day: dashboard opens no
+- Send each recurring anonymous event at most once per day for each value: dashboard opens no
   longer count every page reload, and the active-day event now means the collector
   produced visible data that day.
 - Add a few anonymous events to see what helps: a failed setup and its stage,

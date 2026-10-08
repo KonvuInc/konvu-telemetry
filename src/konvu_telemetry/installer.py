@@ -24,6 +24,7 @@ from .preferences import ensure_preferences_file
 from .service import load_health
 from .tracking import record_setup_completed as record_setup_event
 from .tracking import record_setup_failed as record_setup_failure_event
+from .tracking import store_suppression_opt_out
 
 LABEL = "com.konvu.telemetry"
 PORT = 7824
@@ -707,6 +708,8 @@ def setup(
     if sys.platform != "darwin":
         raise RuntimeError("Konvu setup currently supports macOS only")
     started_at = time.monotonic()
+    # Before the collector starts, or it sends events the shell asked to suppress.
+    store_suppression_opt_out()
     try:
         validate_integrations()
     except Exception:

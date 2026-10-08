@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from konvu_telemetry import cli, installer
 from konvu_telemetry.config import package_version
+from konvu_telemetry.tracking import TrackingStore
 
 
 def setUpModule() -> None:  # noqa: N802
@@ -20,6 +21,18 @@ def setUpModule() -> None:  # noqa: N802
     )
     suppressed.start()
     unittest.addModuleCleanup(suppressed.stop)
+    # Nor touch the developer's real tracking state, even with KONVU_LIVE_USAGE_HOME set.
+    directory = tempfile.TemporaryDirectory()
+    unittest.addModuleCleanup(directory.cleanup)
+    isolated = patch(
+        "konvu_telemetry.tracking._store",
+        return_value=TrackingStore(
+            Path(directory.name) / "tracking-state.json",
+            Path(directory.name) / "tracking-queue.json",
+        ),
+    )
+    isolated.start()
+    unittest.addModuleCleanup(isolated.stop)
 
 
 class InstallerTests(unittest.TestCase):
@@ -128,6 +141,42 @@ class InstallerTests(unittest.TestCase):
         recorded.assert_called_once()
         self.assertIsInstance(recorded.call_args.args[0], float)
         self.assertTrue(recorded.call_args.kwargs["default_enabled"])
+
+    def test_setup_stores_a_suppression_opt_out_before_the_collector_starts(
+        self,
+    ) -> None:
+        order: list[str] = []
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(installer.Path, "home", return_value=Path(temporary)),
+            patch.object(installer.sys, "platform", "darwin"),
+            patch.object(installer, "validate_integrations"),
+            patch.object(installer, "install_launcher"),
+            patch.object(
+                installer, "install_claude_statusline", return_value="installed"
+            ),
+            patch.object(
+                installer, "install_claude_prompt_hook", return_value="installed"
+            ),
+            patch.object(installer, "remove_claude_stop_hook", return_value=False),
+            patch.object(installer, "install_codex_hook", return_value="installed"),
+            patch.object(
+                installer, "install_codex_prompt_hook", return_value="installed"
+            ),
+            patch.object(
+                installer,
+                "store_suppression_opt_out",
+                side_effect=lambda: order.append("opt-out"),
+            ),
+            patch.object(
+                installer,
+                "install_launch_agent",
+                side_effect=lambda *_args, **_kwargs: order.append("collector"),
+            ),
+            patch.object(installer, "record_setup_completed"),
+        ):
+            installer.setup(60, False)
+        self.assertEqual(order, ["opt-out", "collector"])
 
     def test_failed_setup_records_the_failing_stage(self) -> None:
         cases = (

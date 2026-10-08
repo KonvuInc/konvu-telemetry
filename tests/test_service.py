@@ -109,6 +109,7 @@ from konvu_telemetry.storage import (
     transcript_files,
     write_private_json_if_changed,
 )
+from konvu_telemetry.tracking import TrackingStore
 
 
 DASHBOARD_HINT = "🔗 run konvu-telemetry setup to start the dashboard"
@@ -121,6 +122,18 @@ def setUpModule() -> None:  # noqa: N802
     )
     suppressed.start()
     unittest.addModuleCleanup(suppressed.stop)
+    # Nor touch the developer's real tracking state, even with KONVU_LIVE_USAGE_HOME set.
+    directory = tempfile.TemporaryDirectory()
+    unittest.addModuleCleanup(directory.cleanup)
+    isolated = patch(
+        "konvu_telemetry.tracking._store",
+        return_value=TrackingStore(
+            Path(directory.name) / "tracking-state.json",
+            Path(directory.name) / "tracking-queue.json",
+        ),
+    )
+    isolated.start()
+    unittest.addModuleCleanup(isolated.stop)
 
 
 def health_patch(health: object) -> object:
