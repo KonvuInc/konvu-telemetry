@@ -56,6 +56,7 @@ from .storage import (
 )
 from .tracking import (
     flush_in_background as flush_tracking_in_background,
+    record_active_day,
     record_collector_failure,
     record_dashboard_opened,
     record_first_snapshot_ready,
@@ -421,6 +422,7 @@ def collect_forever(
             )
             if _DASHBOARD_DATA_AVAILABLE:
                 record_first_snapshot_ready()
+                record_active_day()
             with collection_lock():
                 write_health(time.time(), interval_seconds=interval_seconds)
         except Exception as error:

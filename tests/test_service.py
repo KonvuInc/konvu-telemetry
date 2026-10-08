@@ -2858,6 +2858,7 @@ class ServiceTests(unittest.TestCase):
             patch("konvu_telemetry.service.write_provider_quotas"),
             patch("konvu_telemetry.service.write_health"),
             patch("konvu_telemetry.service.record_first_snapshot_ready") as recorded,
+            patch("konvu_telemetry.service.record_active_day") as active_day,
             patch("konvu_telemetry.service.time.time", return_value=1_767_225_630.0),
             self.assertRaises(StopIteration),
         ):
@@ -2869,6 +2870,7 @@ class ServiceTests(unittest.TestCase):
                 Mock(refresh=Mock(return_value={})),
             )
         recorded.assert_called_once()
+        active_day.assert_called_once()
         self.assertTrue(service._DASHBOARD_DATA_AVAILABLE)
 
     def test_dashboard_rejects_non_local_or_malformed_origins(self) -> None:
