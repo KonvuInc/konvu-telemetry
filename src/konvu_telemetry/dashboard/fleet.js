@@ -389,11 +389,22 @@ function compactAdvice(s) {
   if (clampPercent(analysis.coverage_percent) < COMPACT_MIN_COVERAGE_PERCENT) return "";
   const used = context(s);
   if (!nonnegative(used) || (waste / 100) * clampPercent(used) < COMPACT_RECOMMEND_WINDOW_POINTS) return "";
-  const terminal = (label, command) => '<div class="compact-terminal"><div class="compact-terminal-bar"><span>' + label + '</span><button type="button" class="compact-advice-copy" data-copy-compact="' + esc(command) + '">Copy</button></div><pre class="compact-advice-command"><code>' + esc(command) + '</code></pre></div>';
+  const terminal = (label, command) => '<div class="compact-terminal"><div class="compact-terminal-bar"><span>' + label + '</span><button type="button" class="compact-advice-copy" data-copy-compact="' + esc(command) + '" data-compact-provider="' + esc(s.provider) + '">Copy</button></div><pre class="compact-advice-command"><code>' + esc(command) + '</code></pre></div>';
   const steps = s.provider === 'codex'
     ? '<div class="compact-steps"><div><h4>1 · Send this message to Codex</h4>' + terminal('Message', 'My next message will be /compact. Please follow these priorities:\n' + analysis.compact_prompt) + '</div><div><h4>2 · Then send this command</h4>' + terminal('Command', '/compact') + '</div></div>'
     : terminal('Claude Code', analysis.compact_command);
   return '<section class="compact-advice" aria-label="Compact suggestion"><div class="compact-advice-head"><h3>Compact this session</h3><span>' + percentage(waste) + ' finished or replaced</span></div>' + steps + '</section>';
+}
+/* Anonymous product analytics: the local server allowlists the event and sends
+   at most one of each per day, so a failed or repeated call costs nothing. */
+function track(event, properties = {}) {
+  if (previewMode) return;
+  fetch("/api/track", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...properties, event }),
+    keepalive: true,
+  }).catch(() => {});
 }
 function clampPercent(value) {
   return nonnegative(value) ? Math.min(100, Math.max(0, value)) : 0;
@@ -1801,6 +1812,7 @@ function bindEvents() {
     try {
       await navigator.clipboard?.writeText(copy.getAttribute("data-copy-compact") || "");
       copy.textContent = "Copied";
+      track("compact prompt copied", { provider: copy.getAttribute("data-compact-provider") });
     } catch {
       copy.textContent = "Select and copy";
     }
@@ -2600,6 +2612,7 @@ async function loadSessionDetails(id) {
   }
 }
 async function openSession(id, opener) {
+  track("session inspector opened");
   hideGraphTip();
   state.lastOpener = opener;
   state.selected = id;
@@ -2690,7 +2703,7 @@ function bindNotificationPanel() {
     notificationButton();
     $("#notification-feedback").textContent = "";
     try {
-      await Notification.requestPermission();
+      if (await Notification.requestPermission() === "granted") track("notifications enabled");
     } catch {
       $("#notification-feedback").textContent = "Permission could not be requested. Open this dashboard in your regular browser and try again.";
     } finally {

@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Send each anonymous product event at most once per day: dashboard opens no
+  longer count every page reload, and the active-day event now means the collector
+  produced visible data that day.
+- Add a few anonymous events to see what helps: a failed setup and its stage,
+  copying a compact prompt, opening the session inspector, allowing notifications
+  and saving settings.
+- Send nothing when `DO_NOT_TRACK` or `CI` is set, and keep the test suite from
+  ever reaching PostHog.
+
 ## 1.0.3 - 2026-10-07
 
 - Turn context drift analysis on by default for sessions within your plan, including

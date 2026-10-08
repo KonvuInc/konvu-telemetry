@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 import fcntl
 import json
+import os
 from pathlib import Path
 import platform
 from queue import Empty, SimpleQueue
@@ -18,6 +19,7 @@ from uuid import UUID, uuid4
 
 from .config import package_version
 from .outbound import open_without_redirects
+from .preferences import CADENCES
 from .storage import (
     ensure_private_directory,
     tracking_queue_path,
@@ -47,9 +49,30 @@ PROTECTED_EVENTS = frozenset({"telemetry setup completed", "first snapshot ready
 DURATION_BUCKETS = frozenset(
     {"under_1_second", "under_5_seconds", "under_15_seconds", "15_seconds_or_more"}
 )
+SETUP_FAILURE_STAGES = frozenset({"integrations", "install"})
+AGENT_PROVIDERS = frozenset({"claude", "codex"})
+DASHBOARD_ACTIONS = frozenset(
+    {"compact prompt copied", "session inspector opened", "notifications enabled"}
+)
+# Old per-event day markers, honoured so the upgrade day sends no second copy.
+LEGACY_DAY_KEYS = {
+    "telemetry active day": "active_day",
+    "collector failed": "collector_failure_day",
+}
+SUPPRESSING_VARIABLES = ("DO_NOT_TRACK", "CI")
+
+
+def analytics_suppressed() -> bool:
+    """Return whether DO_NOT_TRACK or a CI environment turns analytics off."""
+    return any(
+        os.environ.get(name, "").strip().lower() not in {"", "0", "false"}
+        for name in SUPPRESSING_VARIABLES
+    )
 
 
 def _send_to_posthog(payload: bytes) -> None:
+    if analytics_suppressed():
+        raise OSError("Product analytics are suppressed in this environment")
     request = Request(
         POSTHOG_BATCH_URL,
         data=payload,
@@ -173,32 +196,31 @@ class TrackingStore:
                 return
             self._append(event, properties, queue)
 
-    def record_active_day(self, day: str) -> None:
+    def record_daily(self, event: str, properties: dict[str, object], day: str) -> None:
+        """Queue an event at most once per day for each distinct property set."""
+        normalized = self._normalize_properties(event, properties)
+        if normalized is None:
+            return
+        key = event + json.dumps(normalized, sort_keys=True)
         with self._locked():
             kind, state = self._read_state()
-            if (
-                kind != "valid"
-                or not bool(state["enabled"])
-                or state.get("active_day") == day
+            if kind != "valid" or not bool(state["enabled"]):
+                return
+            sent = state.get("daily_sent")
+            sent = (
+                {name: value for name, value in sent.items() if value == day}
+                if isinstance(sent, dict)
+                else {}
+            )
+            legacy_key = LEGACY_DAY_KEYS.get(event)
+            if sent.get(key) == day or (
+                legacy_key is not None and state.get(legacy_key) == day
             ):
                 return
-            self._append("telemetry active day", {})
+            self._append(event, normalized)
             state = dict(state)
-            state["active_day"] = day
-            write_private_json(self._state_path, state)
-
-    def record_collector_failure(self, day: str) -> None:
-        with self._locked():
-            kind, state = self._read_state()
-            if (
-                kind != "valid"
-                or not bool(state["enabled"])
-                or state.get("collector_failure_day") == day
-            ):
-                return
-            self._append("collector failed", {"stage": "snapshot"})
-            state = dict(state)
-            state["collector_failure_day"] = day
+            sent[key] = day
+            state["daily_sent"] = sent
             write_private_json(self._state_path, state)
 
     def send_queued(self) -> float | None:
@@ -411,14 +433,28 @@ class TrackingStore:
                 if type(data_available) is bool
                 else None
             )
+        if event == "telemetry setup failed":
+            stage = properties.get("stage")
+            return {"stage": stage} if stage in SETUP_FAILURE_STAGES else None
         if event in {"first snapshot ready", "telemetry active day"}:
             return {}
         if event == "collector failed" and properties.get("stage") == "snapshot":
             return {"stage": "snapshot"}
+        if event == "compact prompt copied":
+            provider = properties.get("provider")
+            return {"provider": provider} if provider in AGENT_PROVIDERS else None
+        if event in {"session inspector opened", "notifications enabled"}:
+            return {}
+        if event == "settings saved":
+            cadence = properties.get("cadence")
+            analysis = properties.get("context_analysis_enabled")
+            if cadence not in CADENCES or type(analysis) is not bool:
+                return None
+            return {"cadence": cadence, "context_analysis_enabled": analysis}
         return None
 
 
-_PENDING_EVENTS: SimpleQueue[tuple[str, dict[str, object]]] = SimpleQueue()
+_PENDING_EVENTS: SimpleQueue[tuple[str, dict[str, object], str | None]] = SimpleQueue()
 _WORKER_LOCK = Lock()
 _RETRY_LOCK = Lock()
 _RETRY_TIMER: Timer | None = None
@@ -428,41 +464,79 @@ def _store() -> TrackingStore:
     return TrackingStore(tracking_state_path(), tracking_queue_path())
 
 
-def _schedule(action: str, properties: dict[str, object]) -> None:
-    _PENDING_EVENTS.put((action, properties))
+def _schedule(event: str, properties: dict[str, object], daily: bool = True) -> None:
+    if analytics_suppressed():
+        return
+    _PENDING_EVENTS.put(
+        (event, properties, date.today().isoformat() if daily else None)
+    )
     flush_in_background()
 
 
-def record_setup_completed(duration_seconds: float, *, default_enabled: bool) -> None:
+def _duration_bucket(duration_seconds: float) -> str:
     if duration_seconds < 1:
-        bucket = "under_1_second"
-    elif duration_seconds < 5:
-        bucket = "under_5_seconds"
-    elif duration_seconds < 15:
-        bucket = "under_15_seconds"
-    else:
-        bucket = "15_seconds_or_more"
+        return "under_1_second"
+    if duration_seconds < 5:
+        return "under_5_seconds"
+    if duration_seconds < 15:
+        return "under_15_seconds"
+    return "15_seconds_or_more"
+
+
+def record_setup_completed(duration_seconds: float, *, default_enabled: bool) -> None:
+    if analytics_suppressed():
+        return
     try:
         store = _store()
         store.initialize(default_enabled=default_enabled)
-        store.record_setup_completed(bucket)
+        store.record_setup_completed(_duration_bucket(duration_seconds))
     except Exception:
         return
     flush_in_background()
 
 
+def record_setup_failed(stage: str, *, default_enabled: bool) -> None:
+    """Queue and try once to send a failed setup, since no resident process may follow."""
+    if analytics_suppressed():
+        return
+    try:
+        store = _store()
+        store.initialize(default_enabled=default_enabled)
+        store.record("telemetry setup failed", {"stage": stage})
+        store.send_queued()
+    except Exception:
+        return
+
+
 def record_dashboard_opened(data_available: bool) -> None:
     _schedule("dashboard opened", {"data_available": data_available})
-    if data_available:
-        _schedule("active day", {"day": date.today().isoformat()})
+
+
+def record_active_day() -> None:
+    _schedule("telemetry active day", {})
 
 
 def record_first_snapshot_ready() -> None:
-    _schedule("first snapshot ready", {})
+    _schedule("first snapshot ready", {}, daily=False)
 
 
 def record_collector_failure() -> None:
-    _schedule("collector failure", {"day": date.today().isoformat()})
+    _schedule("collector failed", {"stage": "snapshot"})
+
+
+def record_dashboard_action(event: str, properties: dict[str, object]) -> bool:
+    """Queue an allowlisted dashboard click; return whether the event is known."""
+    if event not in DASHBOARD_ACTIONS:
+        return False
+    _schedule(event, properties)
+    return True
+
+
+def record_settings_saved(cadence: str, context_analysis_enabled: bool) -> None:
+    _schedule(
+        "settings saved",
+        {"cadence": cadence, "context_analysis_enabled": context_analysis_enabled},
+    )
 
 
 def set_tracking_enabled(enabled: bool) -> None:
@@ -503,17 +577,15 @@ def flush_in_background() -> None:
             store = _store()
             while True:
                 try:
-                    action, properties = _PENDING_EVENTS.get_nowait()
+                    event, properties, day = _PENDING_EVENTS.get_nowait()
                 except Empty:
                     break
-                if action == "active day":
-                    store.record_active_day(str(properties["day"]))
-                elif action == "first snapshot ready":
+                if event == "first snapshot ready":
                     store.record_first_snapshot_ready()
-                elif action == "collector failure":
-                    store.record_collector_failure(str(properties["day"]))
+                elif day is not None:
+                    store.record_daily(event, properties, day)
                 else:
-                    store.record(action, properties)
+                    store.record(event, properties)
             retry_delay = store.send_queued()
             if retry_delay is not None:
                 _schedule_retry(retry_delay)

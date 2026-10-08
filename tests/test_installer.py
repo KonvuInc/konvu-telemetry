@@ -13,6 +13,15 @@ from konvu_telemetry import cli, installer
 from konvu_telemetry.config import package_version
 
 
+def setUpModule() -> None:  # noqa: N802
+    # No test in this module may reach PostHog, whatever the local tracking state.
+    suppressed = patch(
+        "konvu_telemetry.tracking.analytics_suppressed", return_value=True
+    )
+    suppressed.start()
+    unittest.addModuleCleanup(suppressed.stop)
+
+
 class InstallerTests(unittest.TestCase):
     def test_initial_collection_wait_ignores_pre_setup_health(self) -> None:
         with patch.object(
@@ -119,6 +128,48 @@ class InstallerTests(unittest.TestCase):
         recorded.assert_called_once()
         self.assertIsInstance(recorded.call_args.args[0], float)
         self.assertTrue(recorded.call_args.kwargs["default_enabled"])
+
+    def test_failed_setup_records_the_failing_stage(self) -> None:
+        cases = (
+            ("integrations", {"validate_integrations": RuntimeError("bad json")}),
+            ("install", {"install_launch_agent": RuntimeError("launchctl")}),
+        )
+        for stage, failures in cases:
+            with (
+                self.subTest(stage=stage),
+                tempfile.TemporaryDirectory() as temporary,
+                patch.object(installer.Path, "home", return_value=Path(temporary)),
+                patch.object(installer.sys, "platform", "darwin"),
+                patch.object(
+                    installer,
+                    "validate_integrations",
+                    side_effect=failures.get("validate_integrations"),
+                ),
+                patch.object(installer, "install_launcher"),
+                patch.object(
+                    installer, "install_claude_statusline", return_value="installed"
+                ),
+                patch.object(
+                    installer, "install_claude_prompt_hook", return_value="installed"
+                ),
+                patch.object(installer, "remove_claude_stop_hook", return_value=False),
+                patch.object(installer, "install_codex_hook", return_value="installed"),
+                patch.object(
+                    installer, "install_codex_prompt_hook", return_value="installed"
+                ),
+                patch.object(
+                    installer,
+                    "install_launch_agent",
+                    side_effect=failures.get("install_launch_agent"),
+                ),
+                patch.object(installer, "restore_installation"),
+                patch.object(installer, "record_setup_completed") as completed,
+                patch.object(installer, "record_setup_failed") as failed,
+                self.assertRaises(RuntimeError),
+            ):
+                installer.setup(60, False)
+            failed.assert_called_once_with(stage, default_enabled=True)
+            completed.assert_not_called()
 
     def test_setup_can_explicitly_enable_telemetry(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
