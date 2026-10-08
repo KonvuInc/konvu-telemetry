@@ -8,7 +8,10 @@ Konvu Telemetry tracks every Claude Code and Codex session on your Mac: what it 
 
 
 
-https://github.com/user-attachments/assets/78605dd3-953d-40b5-9b2d-4b0690ef87f6
+
+
+https://github.com/user-attachments/assets/883f2285-0de4-4e65-b776-ebba80f3b486
+
 
 
 
