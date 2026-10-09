@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 import fcntl
 import json
+import os
 from pathlib import Path
 import platform
 from queue import Empty, SimpleQueue
@@ -424,8 +425,17 @@ _RETRY_LOCK = Lock()
 _RETRY_TIMER: Timer | None = None
 
 
+def _running_in_ci() -> bool:
+    return os.environ.get("CI", "").strip().lower() not in {"", "0", "false"}
+
+
+def _discard(_payload: bytes) -> None:
+    """Accept a batch without sending it: CI runners are not installs."""
+
+
 def _store() -> TrackingStore:
-    return TrackingStore(tracking_state_path(), tracking_queue_path())
+    sender = _discard if _running_in_ci() else _send_to_posthog
+    return TrackingStore(tracking_state_path(), tracking_queue_path(), sender)
 
 
 def _schedule(action: str, properties: dict[str, object]) -> None:
@@ -453,8 +463,11 @@ def record_setup_completed(duration_seconds: float, *, default_enabled: bool) ->
 
 def record_dashboard_opened(data_available: bool) -> None:
     _schedule("dashboard opened", {"data_available": data_available})
-    if data_available:
-        _schedule("active day", {"day": date.today().isoformat()})
+
+
+def record_active_day() -> None:
+    """Count a day the collector saw Claude or Codex in use, dashboard or not."""
+    _schedule("active day", {"day": date.today().isoformat()})
 
 
 def record_first_snapshot_ready() -> None:

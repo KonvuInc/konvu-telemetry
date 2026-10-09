@@ -556,6 +556,7 @@ class InstallerTests(unittest.TestCase):
                 patch.object(installer.sys, "platform", "darwin"),
                 patch.object(installer, "stop_launch_agent"),
                 patch.object(installer, "start_launch_agent"),
+                patch.object(installer, "record_setup_completed"),
             ):
                 legacy = {
                     "type": "command",

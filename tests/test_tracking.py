@@ -382,7 +382,7 @@ class TrackingStoreTests(unittest.TestCase):
                 ["telemetry setup completed"],
             )
 
-    def test_empty_dashboard_open_does_not_count_as_an_active_day(self) -> None:
+    def test_only_the_collector_counts_an_active_day(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
 
@@ -405,10 +405,36 @@ class TrackingStoreTests(unittest.TestCase):
                 patch("konvu_telemetry.tracking._WORKER_LOCK", worker_lock),
                 patch("konvu_telemetry.tracking.Thread", ImmediateThread),
             ):
-                tracking.record_dashboard_opened(False)
+                tracking.record_dashboard_opened(True)
+                tracking.record_active_day()
+                tracking.record_active_day()
 
             events = json.loads((directory / "tracking-queue.json").read_text())
-            self.assertEqual([event["event"] for event in events], ["dashboard opened"])
+            self.assertEqual(
+                [event["event"] for event in events],
+                ["dashboard opened", "telemetry active day"],
+            )
+
+    def test_ci_runs_never_reach_posthog(self) -> None:
+        for ci, expected_requests in (("true", 0), ("false", 1)):
+            with self.subTest(ci=ci), tempfile.TemporaryDirectory() as temporary:
+                with (
+                    patch.dict(
+                        "os.environ", {"KONVU_LIVE_USAGE_HOME": temporary, "CI": ci}
+                    ),
+                    patch("konvu_telemetry.tracking.open_without_redirects") as opened,
+                ):
+                    opened.return_value.__enter__.return_value.status = 200
+                    tracking.set_tracking_enabled(True)
+                    store = tracking._store()
+                    store.record("dashboard opened", {"data_available": True})
+                    store.send_queued()
+
+                self.assertEqual(opened.call_count, expected_requests)
+                queue = json.loads(
+                    (Path(temporary) / "tracking-queue.json").read_text()
+                )
+                self.assertEqual(queue, [])
 
     def test_cli_opt_out_disables_tracking(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
