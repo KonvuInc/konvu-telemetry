@@ -419,26 +419,90 @@ function contextWindowSlices(s) {
   }).join(',') + ')';
   return { analysis, used, portions, background };
 }
-const AI_REVIEW_EVERY_PROMPTS = 10;
-/* Says when the AI will next look at this session, or why it will not. */
-function aiReviewNote(s, lastRun) {
-  if (cadenceState.loaded && cadenceState.context_analysis_enabled !== true) return 'AI review is off';
+const CONTEXT_ANALYSIS_EVERY_PROMPTS = 10;
+const manualAnalysis = new Map();
+function lastAnalysisRun(s) {
+  const analysis = s.context_map?.analysis;
+  const runs = analysis?.run_events;
+  return (Array.isArray(runs) && runs.length ? runs[runs.length - 1] : null) || analysis?.last_run || null;
+}
+function analysisUpToDate(s) {
+  const analysis = s.context_map?.analysis;
+  const reviewed = lastAnalysisRun(s)?.iteration;
+  const current = s.context_map?.iteration;
+  return finite(analysis?.epoch) && analysis.epoch === s.context_map?.epoch && finite(reviewed) && finite(current) && reviewed >= current;
+}
+function analysisButton(s, panel = false) {
+  if (previewMode || !cadenceState.loaded || cadenceState.context_analysis_enabled !== true || s.context_map?.state !== 'ready') return '';
+  const allowed = s.usage_mode === 'included' || (cadenceState.context_analysis_allow_paid === true && s.usage_mode === 'exhausted');
+  if (!allowed) return '';
+  const busy = manualAnalysis.has(keyOf(s));
+  const upToDate = analysisUpToDate(s);
+  const label = busy ? 'Analyzing…' : panel ? (lastAnalysisRun(s) ? 'Retrigger analysis now' : 'Run analysis now') : 'Analyze';
+  const title = upToDate ? 'No new prompts since the last analysis' : label;
+  return '<button type="button" class="context-analysis-trigger' + (panel ? ' context-analysis-trigger-panel' : '') + '" data-run-context-analysis="' + esc(keyOf(s)) + '" aria-label="' + label + '" title="' + title + '"' + (busy || upToDate ? ' disabled' : '') + '>' + label + '</button>';
+}
+/* Says when context analysis will next run for this session, or why it will not. */
+function contextAnalysisNote(s, lastRun) {
+  if (cadenceState.loaded && cadenceState.context_analysis_enabled !== true) return 'Context analysis is off';
   const plan = s.usage_mode === 'included' || (cadenceState.context_analysis_allow_paid === true && s.usage_mode === 'exhausted');
-  if (cadenceState.loaded && !plan) return s.usage_mode === 'unknown' ? 'AI review waits for plan limits' : 'AI review is off outside your plan';
+  if (cadenceState.loaded && !plan) return s.usage_mode === 'unknown' ? 'Context analysis waits for plan limits' : 'Context analysis is off outside your plan';
   const reviewed = finite(lastRun?.iteration) ? lastRun.iteration : 0;
   const current = finite(s.context_map?.iteration) ? s.context_map.iteration : null;
   if (current === null) return '';
-  const left = reviewed + AI_REVIEW_EVERY_PROMPTS - current;
-  return left <= 0 ? 'AI review due now' : 'Next AI review in ' + left + (left === 1 ? ' prompt' : ' prompts');
+  const left = reviewed + CONTEXT_ANALYSIS_EVERY_PROMPTS - current;
+  return left <= 0 ? 'Context analysis due now' : 'Next context analysis in ' + left + (left === 1 ? ' prompt' : ' prompts');
 }
 function donut(s) {
   const slices = contextWindowSlices(s);
-  if (slices.used === null) return '<div class="context-donut" role="img" aria-label="Context use unavailable"><i class="context-donut-ring" style="background:#edeaf2"></i><span>—<small>window used</small></span></div>';
-  const runs = slices.analysis?.run_events;
-  const lastRun = (Array.isArray(runs) && runs.length ? runs[runs.length - 1] : null) || slices.analysis?.last_run;
-  const review = aiReviewNote(s, lastRun);
+  if (slices.used === null) return '<div class="context-donut"><i class="context-donut-ring" role="img" aria-label="Context use unavailable" style="background:#edeaf2"></i><span><span class="context-donut-top"><strong>—</strong>' + analysisButton(s) + '</span><small>context window used</small></span></div>';
+  const lastRun = lastAnalysisRun(s);
+  const review = contextAnalysisNote(s, lastRun);
   const label = percentage(slices.used) + ' of context window used' + (review ? '; ' + review : '') + (slices.analysis ? '; colors show relevance as a share of the full window' : '');
-  return '<div class="context-donut" role="img" aria-label="' + esc(label) + '"><i class="context-donut-ring" style="background:' + slices.background + '"></i><span>' + percentage(slices.used) + '<small>window used</small><small class="context-review-note">' + esc(review) + '</small></span></div>';
+  return '<div class="context-donut"><i class="context-donut-ring" role="img" aria-label="' + esc(label) + '" style="background:' + slices.background + '"></i><span><span class="context-donut-top"><strong>' + percentage(slices.used) + '</strong>' + analysisButton(s) + '</span><small>context window used</small><small class="context-review-note">' + esc(review) + '</small></span></div>';
+}
+async function runContextAnalysis(key) {
+  const session = allRows().find((row) => keyOf(row) === key);
+  if (!session || manualAnalysis.has(key) || analysisUpToDate(session)) return;
+  manualAnalysis.set(key, {
+    lastRunAt: lastAnalysisRun(session)?.started_at,
+    retryAt: session.context_map?.analysis?.retry_at,
+    started: Date.now(),
+  });
+  render();
+  try {
+    const response = await fetch('/api/context-analysis', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: session.provider, session: session.id }),
+    });
+    if (!response.ok) {
+      const result = await response.json();
+      throw new Error(result.error || 'Context analysis could not start');
+    }
+    const poll = async () => {
+      await refresh(true);
+      const current = allRows().find((row) => keyOf(row) === key);
+      const request = manualAnalysis.get(key);
+      if (!request) return;
+      if (current && lastAnalysisRun(current)?.started_at !== request.lastRunAt && lastAnalysisRun(current)?.started_at) {
+        manualAnalysis.delete(key);
+        render();
+      } else if (current?.context_map?.analysis?.retry_at && current.context_map.analysis.retry_at !== request.retryAt) {
+        manualAnalysis.delete(key);
+        render();
+        window.alert('Context analysis failed; it will retry after the cooldown.');
+      } else if (Date.now() - request.started > 180000) {
+        manualAnalysis.delete(key);
+        render();
+        window.alert('Context analysis is taking longer than expected. Check this session again shortly.');
+      } else window.setTimeout(poll, 10000);
+    };
+    window.setTimeout(poll, 10000);
+  } catch (error) {
+    manualAnalysis.delete(key);
+    render();
+    window.alert(error.message);
+  }
 }
 function roundedDollarCeiling(value) {
   const total = Math.max(0.01, value),
@@ -690,7 +754,6 @@ function spendVisual(s, scale) {
     const included = s.usage_mode === "included";
     const ahead = shareAhead(s);
     const window = quotaWindowName(s);
-    const dataState = sessionDataState(s, "forecast");
     if (!included) {
       return '<div class="spending included-copy">' + dataStateMarkup(sessionDataState(s, "plan")) + "</div>";
     }
@@ -704,27 +767,25 @@ function spendVisual(s, scale) {
     const line = finite(ahead)
       ? '<small class="plan-next">Next 10 prompts: <b>+' +
         percentage(ahead) + "</b> of " + esc(window) + " limit</small>"
-      : '<small class="plan-next">Next 10 prompts: ' + dataStateMarkup(dataState) + "</small>";
+      : "";
     return (
       '<div class="spending included-copy"><div class="included-copy-text"><strong>' +
       esc(status) + "</strong>" + line + "</div>" +
       (finite(ahead) ? quotaFireIcon(ahead) : "") + "</div>"
     );
   }
-  const values =
-      '<div class="spend-values"><strong>' +
-      money(spent) +
-      (s.quota_status === "stale" ? '<small>Plan status last known</small>' : "") +
-      '</strong><span class="forecast-label">' +
-      burningCashIcon(next) +
-      '<b class="forecast-amount">' +
-      additional(next) +
-      "</b><small>in next 10 prompts</small></span></div>";
+  const values = spent === null && next === null ? "" :
+      '<div class="spend-values">' +
+      (spent === null ? "" : '<strong>' + money(spent) +
+      (s.quota_status === "stale" ? '<small>Plan status last known</small>' : "") + '</strong>') +
+      (next === null ? "" : '<span class="forecast-label">' + burningCashIcon(next) +
+      '<b class="forecast-amount">' + additional(next) +
+      "</b><small>in next 10 prompts</small></span>") + '</div>';
   const visual =
     spent === null
-      ? '<span class="tiny">Recorded cost unavailable</span>'
+      ? ""
       : '<div class="blue-track" role="img" aria-label="' +
-        esc(money(spent) + " spent, " + additional(next) + " next 10. Full bar " + money(scale)) +
+        esc(money(spent) + " spent" + (next === null ? "" : ", " + additional(next) + " next 10") + ". Full bar " + money(scale)) +
         '"><i class="blue-spent" style="width:' +
         (spent / scale) * 100 +
         '%"></i>' +
@@ -782,21 +843,14 @@ function subagentCell(s) {
    one currency — percent of a limit, or dollars — and sorting inside it stays
    provider-agnostic. When every provider agrees, there is nothing to split and
    one table is shown. */
-/* A provider counts as paying once money has actually been recorded against
-   it. Quota hitting 100% is not enough on its own: the five-hour window
-   refills constantly, so keying off it alone made rows jump between the two
-   tables on every refresh and put "$0.00" under a "Spending real money"
-   heading. The exhausted state still shows — as a note on the plan table —
-   until the first cent lands. */
-function providerHasSpend(provider, rows) {
-  return rows.some((s) => s.provider === provider && (cost(s) ?? 0) > 0);
-}
 function providerExhausted(provider, rows) {
-  if (state.payload?.account_quotas?.[provider]?.ordinary_usage_allowed === false) return true;
+  const quota = state.payload?.account_quotas?.[provider];
+  if (quota?.ordinary_usage_allowed === false) return true;
+  if (quota?.windows?.some((w) => ["five_hour", "weekly"].includes(w?.period) && finite(w.used_percent) && w.used_percent >= 100)) return true;
   return rows.some((s) => s.provider === provider && showsMoney(s));
 }
 function providerState(provider, rows) {
-  return providerExhausted(provider, rows) && providerHasSpend(provider, rows);
+  return providerExhausted(provider, rows);
 }
 function planGroups(rows) {
   const providers = [...new Set(rows.map((s) => s.provider))];
@@ -815,12 +869,10 @@ function planGroups(rows) {
 }
 function groupHeading(group) {
   const n = group.rows.length;
-  const waiting = !group.paying && group.providers.some((p) => providerExhausted(p, group.rows));
   return (
     '<div class="group-heading ' + (group.paying ? "paying" : "included") + '">' +
-    "<h2>" + (group.paying ? "Spending real money" : "Within your plan") + "</h2>" +
+    "<h2>" + (group.paying ? "Paying" : "Within your plan") + "</h2>" +
     '<span class="head-count">' + n + " session" + (n === 1 ? "" : "s") + "</span>" +
-    (waiting ? '<span class="head-warn" title="Quota is spent, so the next prompts will be charged. Nothing has been billed yet.">Quota spent — billing starts on the next prompt</span>' : "") +
     ('<div class="heading-controls"><div class="quota-inline">' + quotaInline(
       group.providers,
       group.providers.some((provider) => providerExhausted(provider, group.rows))
@@ -924,6 +976,7 @@ function planTiles(rows) {
 }
 function moneyTiles(rows) {
   const spend = rows.reduce((sum, s) => sum + (cost(s) ?? 0), 0);
+  const recorded = rows.some((s) => finite(cost(s)));
   const priciest = rows.filter((s) => finite(cost(s))).sort((a, b) => cost(b) - cost(a))[0];
   const hottest = rows.filter((s) => finite(forecast(s))).sort((a, b) => forecast(b) - forecast(a))[0];
   const avgContext = avg(rows.map(context).filter(finite));
@@ -931,7 +984,7 @@ function moneyTiles(rows) {
     .filter((s) => nonnegative(subagentSpend(s, s)))
     .sort((a, b) => subagentSpend(b, b) - subagentSpend(a, a))[0];
   return [
-    kpiTile("Spent beyond plan", money(spend), spend > 0 ? "bad" : "good", kpiFootnote("across " + rows.length + " billing sessions"), true),
+    recorded ? kpiTile("Estimated spend beyond plan", money(spend), spend > 0 ? "bad" : "good", kpiFootnote("across " + rows.length + " billing sessions"), true) : "",
     priciest ? kpiTile("Most expensive session", money(cost(priciest)), band((cost(priciest) / (spend || 1)) * 100, 25, 45, 65), kpiSession(priciest)) : "",
     hottest ? kpiTile("Biggest forecast", additional(forecast(hottest)), band(forecast(hottest), 5, 12, 20), kpiSession(hottest)) : "",
     finite(avgContext) ? kpiTile("Average context used", percentage(avgContext), band(avgContext, 50, 70, 88), kpiFootnote("across " + rows.length + " billing sessions")) : "",
@@ -987,7 +1040,8 @@ function ledgerRow(s, scale) {
   );
 }
 function ledgerTable(group, scale) {
-  const spendHead = group.paying ? "Spend <span>/ next 10 prompts</span>" : "Plan <span>/ next 10 prompts</span>";
+  const hasForecast = group.rows.some((s) => finite(group.paying ? forecast(s) : shareAhead(s)));
+  const spendHead = (group.paying ? "Spend" : "Plan") + (hasForecast ? " <span>/ next 10 prompts</span>" : "");
   const shareHead = group.paying ? "Responsible for" : "Responsible for";
   return (
     '<section class="ledger-block ' + (group.paying ? "paying" : "included") + '">' + groupHeading(group) +
@@ -1244,9 +1298,7 @@ function showGraphTip(point, x, y) {
     money(cost(s)) +
     "</dd><dt>Iterations</dt><dd>" +
     count(s) +
-    "</dd><dt>Next 10 prompts</dt><dd>" +
-    additional(forecast(s)) +
-    "</dd><dt>Context</dt><dd>" +
+    "</dd>" + (forecast(s) === null ? "" : "<dt>Next 10 prompts</dt><dd>" + additional(forecast(s)) + "</dd>") + "<dt>Context</dt><dd>" +
     percentage(context(s)) +
     "</dd></dl>";
   tip.hidden = false;
@@ -1394,7 +1446,7 @@ function viewIcon(view) {
     "</svg>"
   );
 }
-function graphLegend(baselines) {
+function graphLegend(baselines, hasForecast) {
   const medianKeys = baselines
     .map(
       (b) =>
@@ -1440,9 +1492,8 @@ function graphLegend(baselines) {
   return (
     '<div class="graph-key" aria-label="Graph legend"><div class="graph-median-keys">' +
     (medianKeys || '<span class="tiny">Median unavailable</span>') +
-    '</div><div class="graph-forecast-key" title="Arrow direction shows predicted spending over the next 10 prompts. Color compares predicted cost per prompt with your provider median at this stage."><span class="graph-key-label">Next 10 prompts</span>' +
-    arrowKeys +
-    "</div></div>"
+    '</div>' + (hasForecast ? '<div class="graph-forecast-key" title="Arrow direction shows predicted spending over the next 10 prompts. Color compares predicted cost per prompt with your provider median at this stage."><span class="graph-key-label">Next 10 prompts</span>' +
+    arrowKeys + "</div>" : "") + "</div>"
   );
 }
 
@@ -1534,7 +1585,7 @@ function fleetGraph(rows) {
     '" role="group" aria-label="Spend against iterations for every live session">' +
     svg +
     "</svg>" +
-    graphLegend(baselines) +
+    graphLegend(baselines, measurable.some((s) => forecast(s) !== null)) +
     (missing ? '<p class="graph-note">' + missing + " sessions lack plot data; available in the ledger.</p>" : "")
   );
 }
@@ -1606,7 +1657,7 @@ async function loadPreferences() {
     Object.assign(cadenceState, value, { loaded: true });
     renderCadenceOptions();
     renderAnalysisToggles();
-    // Context captions say whether AI review is on, so they follow the loaded settings.
+    // Context captions say whether context analysis is on, so they follow the loaded settings.
     render();
   } catch {
     return;
@@ -1809,6 +1860,12 @@ function bindEvents() {
   document.addEventListener("click", (event) => {
     const target = event.target;
     if (!(target instanceof Element)) return;
+    const manual = target.closest('[data-run-context-analysis]');
+    if (manual) {
+      event.stopPropagation();
+      runContextAnalysis(manual.dataset.runContextAnalysis);
+      return;
+    }
     const provider = target.closest("[data-provider]"),
       session = target.closest("[data-session]"),
       chart = target.closest("[data-chart]"),
@@ -2342,11 +2399,7 @@ function subscriptionStats(s) {
     : s.usage_mode === "included"
     ? "Included"
     : dataStateMarkup(sessionDataState(s, "plan"));
-  const next = providerState.kind !== "ready"
-    ? dataStateMarkup(providerState)
-    : finite(ahead)
-    ? "+" + percentage(ahead) + " of " + window + " limit"
-    : dataStateMarkup(sessionDataState(s, "forecast"));
+  const next = finite(ahead) ? "+" + percentage(ahead) + " of " + window + " limit" : null;
   const responsibility = providerState.kind !== "ready"
     ? dataStateMarkup(providerState)
     : finite(share)
@@ -2354,7 +2407,7 @@ function subscriptionStats(s) {
     : dataStateMarkup(sessionDataState(s, "share"));
   return '<div class="inspector-stats subscription-stats">' +
     '<div><span>Subscription</span><strong>' + subscription + '</strong></div>' +
-    '<div><span>Next 10 prompts</span><strong>' + next + '</strong></div>' +
+    (next === null ? "" : '<div><span>Next 10 prompts</span><strong>' + next + '</strong></div>') +
     '<div><span>Responsible for</span><strong>' + responsibility + '</strong></div>' +
     '<div><span>Context</span><strong>' + percentage(context(s)) + '</strong><small>' + tokens(s.context_tokens) + ' / ' + tokens(s.context_window_tokens) + '</small></div>' +
     '</div>';
@@ -2414,9 +2467,9 @@ function analysisUsageText(session) {
 }
 function contextHero(s) {
   const { analysis, used, portions, background } = contextWindowSlices(s);
-  if (used === null) return '<div class="context-hero"><div class="context-hero-main"><div class="context-hero-ring" role="img" aria-label="Context use unavailable" style="background:#edeaf2"><div class="context-hero-ring-center"><strong>—</strong><span>window used</span></div></div><div class="context-hero-copy"><p class="context-rating-pending">Waiting for a provider context checkpoint.</p></div></div></div>';
+  if (used === null) return '<div class="context-hero"><div class="context-hero-main"><div class="context-hero-ring" role="img" aria-label="Context use unavailable" style="background:#edeaf2"><div class="context-hero-ring-center"><strong>—</strong><span>context window used</span></div></div><div class="context-hero-copy"><p class="context-rating-pending">Waiting for a provider context checkpoint.</p></div></div></div>';
   const ringLabel = percentage(used) + ' of the full context window used' + (analysis ? '; ' + percentage(portions[0]) + ' needed, ' + percentage(portions[2]) + ' not needed now, of the full window' : '; relevance not rated');
-  const ring = '<div class="context-hero-ring" role="img" aria-label="' + esc(ringLabel) + '" style="background:' + background + '"><div class="context-hero-ring-center"><strong>' + percentage(used) + '</strong><span>window used</span></div></div>';
+  const ring = '<div class="context-hero-ring" role="img" aria-label="' + esc(ringLabel) + '" style="background:' + background + '"><div class="context-hero-ring-center"><strong>' + percentage(used) + '</strong><span>context window used</span></div></div>';
   const parts = analysis ? [['Needed', portions[0], 'relevant', 'Still needed for the current work'], ['Not needed now', portions[2], 'stale', 'AI estimate: not needed for the current work. Review before compacting.']] : [];
   const unreviewed = used - portions.reduce((sum, value) => sum + value, 0);
   if (analysis && used > 0 && unreviewed / used * 100 > 0.1) parts.push(['Unreviewed', unreviewed, 'unreviewed', 'Not rated by AI']);
@@ -2563,14 +2616,16 @@ function renderInspector() {
   const spendOpen = priorSpend?.open === true && priorSpend.dataset.sessionKey === keyOf(s);
   const stats = included
     ? subscriptionStats(s)
-    : '<div class="inspector-stats"><div><span>Prompts</span><strong>' + count(s) + '</strong><small>in this session</small></div><div><span>Recorded spend</span><strong>' + money(cost(s)) + '</strong><small>' + (last?.completed === false ? 'Current prompt ' : 'Last prompt ') + money(last?.priced === false ? null : last?.cost_usd) + (last?.completed === false ? ' so far' : '') + '</small></div><div><span>Next 10 prompts</span><strong>' + additional(forecast(s)) + '</strong><small>estimated additional</small></div></div>';
+    : '<div class="inspector-stats"><div><span>Prompts</span><strong>' + count(s) + '</strong><small>in this session</small></div>' +
+      (cost(s) === null ? '' : '<div><span>Recorded spend</span><strong>' + money(cost(s)) + '</strong><small>' + (last?.completed === false ? 'Current prompt ' : 'Last prompt ') + money(last?.priced === false ? null : last?.cost_usd) + (last?.completed === false ? ' so far' : '') + '</small></div>') +
+      (forecast(s) === null ? '' : '<div><span>Next 10 prompts</span><strong>' + additional(forecast(s)) + '</strong><small>estimated additional</small></div>') + '</div>';
   const agents = Array.isArray(s.subagents) ? s.subagents : [];
   const history = '<section class="context-section context-history"><div class="context-section-head"><div><h3>How context fills up</h3></div></div>' + contextGraph(s) + '</section>';
   const analysisCost = analysisUsageText(s);
   const paidDetails = included ? '' : '<details id="spend-details" class="inspector-extra" data-session-key="' + esc(keyOf(s)) + '"' + (spendOpen ? ' open' : '') + '><summary>Spending trend</summary><div class="section-title"><h3>How this session is spending</h3><div class="mini-tabs"><button data-chart="cumulative" class="' + (state.chart === 'cumulative' ? 'on' : '') + '">Cumulative</button><button data-chart="prompt" class="' + (state.chart === 'prompt' ? 'on' : '') + '">Per prompt</button></div></div>' + sessionGraph(s) + '</details>';
   const warning = signal?.severity ? '<div class="inspector-signal"><strong>' + esc(signal.action) + '</strong><p>' + esc(signal.evidence) + '</p></div>' : '';
   const grouping = namedThemes(analysisFor(s)).length && state.topicMode === 'topics' ? 'Conversation topics' : 'Source types';
-  const content = warning + '<section class="context-visual"><div class="context-visual-head"><h3>Current context</h3><div class="context-visual-topic-head"><h3>' + grouping + '</h3>' + contextTopicChooser(s) + '</div></div><div class="context-visual-body">' + contextHero(s) + contextTopics(s) + '</div>' + (analysisCost ? '<p class="context-analysis-usage">' + esc(analysisCost) + '</p>' : '') + '</section>' + compactAdvice(s) + contextTimeline(s) + history + paidDetails +
+  const content = warning + '<section class="context-visual"><div class="context-visual-head"><div class="context-visual-title"><h3>Current context</h3>' + analysisButton(s, true) + '</div><div class="context-visual-topic-head"><h3>' + grouping + '</h3>' + contextTopicChooser(s) + '</div></div><div class="context-visual-body">' + contextHero(s) + contextTopics(s) + '</div>' + (analysisCost ? '<p class="context-analysis-usage">' + esc(analysisCost) + '</p>' : '') + '</section>' + compactAdvice(s) + contextTimeline(s) + history + paidDetails +
     '<section id="subagent-section" class="inspector-extra inspector-static"><div class="section-title"><h3>Subagent activity</h3><span class="tiny">' + agents.length + ' spawned · ' + agents.filter((agent) => agent.live === true).length + ' live</span></div>' + (subagentDetails(s) || '<p>No subagents were recorded.</p>') + '</section>' +
     '<section class="inspector-extra inspector-static"><div class="section-title"><h3>Recorded token traffic</h3></div>' + tokenBreakdown(s) + '</section>';
   const sessionActivity = activity(s);

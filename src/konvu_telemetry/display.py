@@ -24,6 +24,7 @@ from .parsers import (
     codex_turn_tool_calls,
 )
 from .provider_limits import stored_provider_quotas
+from .quota_attribution import apply_usage_modes
 from .service import load_health
 from .preferences import read_preferences
 from .storage import (
@@ -199,14 +200,6 @@ def percentage_color(value: float) -> str:
     return "38;5;203" if value >= 85 else "38;5;221" if value >= 60 else "38;5;78"
 
 
-def battery_meter(value: float, width: int = 7) -> str:
-    """Render the compact battery cells used by the Claude CLI HUD."""
-    filled = round(min(100.0, max(0.0, value)) / 100 * width)
-    return terminal_style("■" * filled, percentage_color(value)) + terminal_style(
-        "□" * (width - filled), "38;5;240"
-    )
-
-
 def statusline_width() -> int:
     """Read Claude's width hint with a conservative fallback."""
     try:
@@ -246,40 +239,38 @@ def claude_quota_values(snapshot: dict[str, object] | None) -> dict[str, float]:
     return values
 
 
-def meter_segment(label: str, value: float, width: int) -> str:
-    """Render one labeled responsive status meter."""
-    return (
-        terminal_style(label, "38;5;245")
-        + " "
-        + battery_meter(value, width)
-        + " "
-        + terminal_style(f"{value:.0f}%", f"1;{percentage_color(value)}")
-    )
-
-
 def compact_status_meter(
-    label: str, value: float, width: int, inset: str | None = None
+    label: str, value: float | None, width: int, inset: str | None = None
 ) -> str:
-    """Render a cell-colored meter with optional centered reset text."""
-    if not inset or os.environ.get("NO_COLOR") or os.environ.get("TERM") == "dumb":
-        return meter_segment(label, value, width)
-    bounded = min(100.0, max(0.0, value))
+    """Render the same bar with a value, an unknown value, or a reset label."""
+    bounded = min(100.0, max(0.0, value)) if value is not None else 0.0
     filled = min(width, max(0, round(bounded / 100 * width)))
-    text = f"reset: {inset}"[:width].center(width)
-    fill_code = percentage_color(value).removeprefix("38;")
+    reset_text = f"reset: {inset}"[:width] if inset else ""
+    reset_start = (width - len(reset_text)) // 2
+    plain = bool(os.environ.get("NO_COLOR") or os.environ.get("TERM") == "dumb")
+    fill_code = percentage_color(bounded).removeprefix("38;")
     cells = "".join(
         terminal_style(
-            character,
+            reset_text[index - reset_start]
+            if reset_start <= index < reset_start + len(reset_text)
+            else "━"
+            if plain and index < filled
+            else "─"
+            if plain
+            else " ",
             f"48;{fill_code};38;5;16" if index < filled else "48;5;238;38;5;245",
         )
-        for index, character in enumerate(text)
+        for index in range(width)
     )
     return (
         terminal_style(label, "38;5;245")
         + " "
         + cells
         + " "
-        + terminal_style(f"{value:.0f}%", f"1;{percentage_color(value)}")
+        + terminal_style(
+            f"{value:.0f}%" if value is not None else "—",
+            f"1;{percentage_color(bounded)}" if value is not None else "38;5;245",
+        )
     )
 
 
@@ -459,41 +450,76 @@ def claude_statusline_rows(
 ) -> list[str]:
     """Render the responsive Claude CLI-only usage HUD from real session data."""
     usage_mode = session.get("usage_mode")
-    dashboard = cli_dashboard_line()
-    if usage_mode == "included":
-        quotas = claude_quota_values({"account_quotas": stored_provider_quotas()})
-        context = context_percent
-        if context is None:
-            raw_context, raw_window = (
-                session.get("context_tokens"),
-                session.get("context_window_tokens"),
-            )
-            if (
-                isinstance(raw_context, int)
-                and isinstance(raw_window, int)
-                and raw_window > 0
-            ):
-                context = raw_context / raw_window * 100
-        width = statusline_width()
-        cells = 13 if width < 62 else 14
-        resets = quota_reset_times("claude")
-        quota_stale = session.get("quota_status") == "stale"
-        included_label = (
-            "● Last known: included · retrying" if quota_stale else "● Included"
-        )
-        segments = [
-            terminal_style(included_label, "1;38;5;221" if quota_stale else "1;38;5;78")
-        ]
-        for label, period in (("5h", "five_hour"), ("Week", "weekly")):
-            value = quotas.get(period)
-            if value is not None:
-                segments.append(
-                    compact_status_meter(label, value, cells, resets.get(period))
+    quotas = claude_quota_values({"account_quotas": stored_provider_quotas()})
+    resets = quota_reset_times("claude")
+    width = statusline_width()
+    cells = 13 if width < 62 else 14
+    quota_stale = session.get("quota_status") == "stale"
+    if usage_mode in {"api_billed", "exhausted"}:
+        label = "● Paying"
+        color = "1;38;5;203"
+    elif usage_mode == "included":
+        label = "● Last known: included · retrying" if quota_stale else "● Included"
+        color = "1;38;5;221" if quota_stale else "1;38;5;78"
+    else:
+        label = "● Subscription limits unavailable · retrying"
+        color = "1;38;5;245"
+    segments = [terminal_style(label, color)]
+    if usage_mode in {"api_billed", "exhausted"}:
+        reset = paying_reset_in("claude") if usage_mode == "exhausted" else None
+        if reset:
+            segments.append(terminal_style(f"Limits reset in {reset}", "38;5;245"))
+    else:
+        for meter_label, period in (("5h", "five_hour"), ("Week", "weekly")):
+            segments.append(
+                compact_status_meter(
+                    meter_label, quotas.get(period), cells, resets.get(period)
                 )
-        rows = wrap_statusline_segments(segments, width)
-        # Context always gets its own second line so the /compact hint sits beside it.
-        if context is not None:
-            rows.append(context_meter(session, context))
+            )
+    rows = wrap_statusline_segments(segments, width)
+    context = context_percent
+    if context is None:
+        raw_context = session.get("context_tokens")
+        raw_window = session.get("context_window_tokens")
+        if (
+            isinstance(raw_context, int)
+            and isinstance(raw_window, int)
+            and raw_window > 0
+        ):
+            context = raw_context / raw_window * 100
+    rows.append(context_meter(session, context if context is not None else 0.0))
+    forecast_row: str | None = None
+    if usage_mode in {"api_billed", "exhausted"}:
+        paid = session.get("total_cost_usd")
+        out_of_plan = session.get("out_of_plan_spend_usd")
+        if usage_mode == "exhausted" and isinstance(out_of_plan, (int, float)):
+            paid = out_of_plan
+        paid_forecast = session.get("projected_next_10_tasks_usd")
+        if session.get("cost_status") != "unavailable" and isinstance(
+            paid, (int, float)
+        ):
+            forecast_row = (
+                terminal_style("Estimated paid spend", "38;5;245")
+                + " "
+                + terminal_style(money(paid), "1;38;5;255")
+            )
+        if (
+            session.get("cost_status") != "unavailable"
+            and isinstance(paid, (int, float))
+            and isinstance(paid_forecast, (int, float))
+        ):
+            forecast_row = (
+                terminal_style("Estimated paid spend", "38;5;245")
+                + " "
+                + terminal_style(money(paid), "1;38;5;255")
+                + " "
+                + terminal_style("━━━▶", "1;38;5;141")
+                + " "
+                + terminal_style(money(paid + paid_forecast), "1;38;5;255")
+                + " "
+                + terminal_style("forecasted in next 10 prompts", "38;5;245")
+            )
+    elif usage_mode == "included":
         attribution = quota_window_value(session, "five_hour", "estimated_percent")
         forecast = quota_window_value(session, "five_hour", "projected_next_10_percent")
         if attribution is not None and forecast is not None:
@@ -511,63 +537,9 @@ def claude_statusline_rows(
                 + " "
                 + terminal_style("forecasted in next 10 prompts", "38;5;245")
             )
-            rows.append(forecast_row)
-        if width >= 45:
-            rows.append(dashboard)
-        return rows
-    if usage_mode in {"api_billed", "exhausted"}:
-        paid = session.get("total_cost_usd")
-        out_of_plan = session.get("out_of_plan_spend_usd")
-        if usage_mode == "exhausted" and isinstance(out_of_plan, (int, float)):
-            paid = out_of_plan
-        paid_forecast = session.get("projected_next_10_tasks_usd")
-        reset = paying_reset_in("claude") if usage_mode == "exhausted" else None
-        paying_label = "● Paying" + (f" · resets in {reset}" if reset else "")
-        rows = [terminal_style(paying_label, "1;38;5;203")]
-        context = context_percent
-        if context is None:
-            raw_context = session.get("context_tokens")
-            raw_window = session.get("context_window_tokens")
-            if (
-                isinstance(raw_context, int)
-                and isinstance(raw_window, int)
-                and raw_window > 0
-            ):
-                context = raw_context / raw_window * 100
-        if context is not None:
-            rows.append(context_meter(session, context))
-        if isinstance(paid, (int, float)) and isinstance(paid_forecast, (int, float)):
-            rows.append(
-                terminal_style("Current spend", "38;5;245")
-                + " "
-                + terminal_style(money(paid), "1;38;5;255")
-                + " "
-                + terminal_style("━━━▶", "1;38;5;141")
-                + " "
-                + terminal_style(money(paid + paid_forecast), "1;38;5;255")
-                + " "
-                + terminal_style("forecasted in next 10 prompts", "38;5;245")
-            )
-        rows.append(dashboard)
-        return rows
-    context = context_percent
-    if context is None:
-        raw_context = session.get("context_tokens")
-        raw_window = session.get("context_window_tokens")
-        if (
-            isinstance(raw_context, int)
-            and isinstance(raw_window, int)
-            and raw_window > 0
-        ):
-            context = raw_context / raw_window * 100
-    rows = [
-        terminal_style("● Subscription limits unavailable · retrying", "1;38;5;245")
-    ]
-    if context is not None:
-        rows.append(context_meter(session, context))
-    rows.append(terminal_style("📈 Subscription forecast unavailable", "38;5;245"))
-    if statusline_width() >= 45:
-        rows.append(dashboard)
+    if forecast_row is not None:
+        rows.append(forecast_row)
+    rows.append(cli_dashboard_line())
     return rows
 
 
@@ -585,26 +557,25 @@ def statusline() -> None:
     try:
         payload = json.load(sys.stdin)
     except json.JSONDecodeError:
-        print("Konvu live usage: waiting for Claude session data")
-        return
+        payload = {}
     if not isinstance(payload, dict):
-        print("Konvu live usage: waiting for Claude session data")
-        return
+        payload = {}
     session_id = payload.get("session_id")
-    if (
-        not isinstance(session_id, str)
-        or claude_hook_transcript(payload, session_id) is None
-    ):
-        print("Konvu live usage: collector starting")
-        return
-    session = refreshed_session("claude", session_id)
+    session = None
+    if isinstance(session_id, str) and claude_hook_transcript(payload, session_id):
+        session = refreshed_session("claude", session_id)
+        if session is None:
+            session = retained_session("claude", session_id)
+    context_percent = payload_context_percent(payload)
     if session is None:
-        session = retained_session("claude", session_id)
-    if session is None:
-        print("Konvu live usage: collector starting")
-        return
+        session = {"provider": "claude"}
+        apply_usage_modes(
+            {"sessions": [session], "account_quotas": stored_provider_quotas()}
+        )
+        if context_percent is None:
+            context_percent = 0.0
     # Claude's context is live, but its rate-limit payload can lag the provider API.
-    rows = claude_statusline_rows(session, payload_context_percent(payload))
+    rows = claude_statusline_rows(session, context_percent)
     for row in rows:
         print(row)
 
@@ -735,7 +706,7 @@ def hook_quota_meters(
     )
 
 
-def hook_forecast_row(session: dict[str, object]) -> str:
+def hook_forecast_row(session: dict[str, object]) -> str | None:
     """Render the same session-to-forecast arrow used by the terminal HUD."""
     usage_mode = session.get("usage_mode")
     if usage_mode in {"api_billed", "exhausted"}:
@@ -744,12 +715,16 @@ def hook_forecast_row(session: dict[str, object]) -> str:
         if usage_mode == "exhausted" and isinstance(out_of_plan, (int, float)):
             current = out_of_plan
         forecast = session.get("projected_next_10_tasks_usd")
+        if session.get("cost_status") == "unavailable" or not isinstance(
+            current, (int, float)
+        ):
+            return None
         if isinstance(current, (int, float)) and isinstance(forecast, (int, float)):
             return (
                 f"💸 Current spend {money(current)}  ━━━▶  {money(current + forecast)} "
                 "forecasted in next 10 prompts"
             )
-        return "💸 Forecast unavailable"
+        return f"💸 Current spend {money(current)}"
     attribution = session.get("quota_attribution")
     windows = attribution.get("windows") if isinstance(attribution, dict) else None
     target = "weekly" if session.get("provider") == "codex" else "five_hour"
@@ -765,7 +740,7 @@ def hook_forecast_row(session: dict[str, object]) -> str:
                 f"📈 This session {percentage(current)} of {label} limit  ━━━▶  "
                 f"{percentage(projected_total)} forecasted in next 10 prompts"
             )
-    return "📈 Subscription forecast unavailable"
+    return None
 
 
 def usage_box_lines(
@@ -780,7 +755,7 @@ def usage_box_lines(
     rows = (
         ["🟢 Included"]
         if usage_mode == "included"
-        else ["🔴 Paying" + (f" · resets in {reset}" if reset else "")]
+        else ["🔴 Paying" + (f" · Limits reset in {reset}" if reset else "")]
         if paying
         else ["⚪ Subscription limit unavailable"]
     )
@@ -809,7 +784,9 @@ def usage_box_lines(
             f"🧠 Context {text_context_meter(session, used)} {percentage(used)}"
             + (f"  ·  {advice}" if advice else "")
         )
-    rows.append(hook_forecast_row(session))
+    forecast_row = hook_forecast_row(session)
+    if forecast_row is not None:
+        rows.append(forecast_row)
     rows.append(dashboard_line().replace("dashboard:", "Open live dashboard"))
     return ["╭─", *(f"│ {row}" for row in rows), "╰─"]
 

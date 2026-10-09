@@ -29,7 +29,7 @@ https://github.com/user-attachments/assets/883f2285-0de4-4e65-b776-ebba80f3b486
 
 1. A small background collector reads the session files Claude Code and Codex already keep on your Mac. Nothing is uploaded to Konvu.
 2. It serves the dashboard at `http://127.0.0.1:7824` and adds a usage line to your status bar (Claude Code CLI) or a usage box to replies (Codex and the desktop apps).
-3. If you turn it on, an AI review runs on your side, with your own Claude or Codex login, about every 10 prompts per live session. It costs a few cents per review, pauses at 90% of your plan limits, and is capped per hour. Konvu never sees your code or prompts.
+3. If you turn it on, context analysis runs on your side, with your own Claude or Codex login, about every 10 prompts per live session. It costs a few cents per run, pauses at 90% of your plan limits, and is capped per hour. Konvu never sees your code or prompts.
 
 Every session is either **included** (covered by your Claude or ChatGPT plan, shown as a share of your 5-hour and weekly limits) or **paying** (past your plan or on an API key, shown in dollars with a forecast). Konvu always tells you which.
 
@@ -83,7 +83,7 @@ What it costs and when it runs:
 
 - Your transcripts stay on your Mac and are never changed. Konvu stores only derived numbers in `~/.konvu/telemetry`.
 - To show plan limits, the collector asks Anthropic and OpenAI for your usage using your existing logins. Credentials are never written to disk or logs.
-- The AI review sends short excerpts of a session only to that session's own provider, with no tools and nothing saved.
+- Context analysis sends short excerpts of a session only to that session's own provider, with no tools and nothing saved.
 - Setup turns on a small amount of anonymous product analytics (like "setup finished"), never prompts, code, paths or account details. Turn it off with `konvu-telemetry telemetry off`.
 
 Full detail on what is fetched, stored and sent: [SECURITY.md](SECURITY.md#data-handling-in-detail). How costs are estimated: [ACCURACY.md](ACCURACY.md).

@@ -477,9 +477,11 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
         directory: str | os.PathLike[str] | None = None,
         refresh_coordinator: RefreshCoordinator | None = None,
         snapshot_lock: Lock | None = None,
+        context_drift: ContextDriftScheduler | None = None,
     ) -> None:
         self.refresh_coordinator = refresh_coordinator
         self.snapshot_lock = snapshot_lock
+        self.context_drift = context_drift
         super().__init__(request, client_address, server, directory=directory)
 
     def _write_payload(self, payload: bytes) -> None:
@@ -620,6 +622,9 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
         if path == "/api/preferences":
             self._save_preferences()
             return
+        if path == "/api/context-analysis":
+            self._run_context_analysis()
+            return
         if path != "/api/refresh" or self.refresh_coordinator is None:
             self.send_error(404)
             return
@@ -641,6 +646,54 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
         self.send_response(status)
         self._secure_headers("application/json; charset=utf-8", len(payload))
         self._write_payload(payload)
+
+    def _run_context_analysis(self) -> None:
+        if self.context_drift is None or self.refresh_coordinator is None:
+            self.send_error(503)
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length <= 0 or length > 1024:
+                raise ValueError
+            body = json.loads(self.rfile.read(length))
+        except (ValueError, OSError):
+            self.send_error(400)
+            return
+        if not isinstance(body, dict):
+            self.send_error(400)
+            return
+        provider, session_id = body.get("provider"), body.get("session")
+        if (
+            not isinstance(provider, str)
+            or provider not in ALLOWED_PROVIDERS
+            or not isinstance(session_id, str)
+            or not valid_session_id(session_id)
+        ):
+            self.send_error(400)
+            return
+        if not self.context_drift.request_manual(provider, session_id):
+            self._send_json({"error": "Analysis already running"}, 409)
+            return
+        try:
+            for _ in range(2):
+                error = self.refresh_coordinator.request_refresh()
+                if error is not None:
+                    self._send_json({"error": "Collector refresh failed"}, 503)
+                    return
+                status = self.context_drift.manual_result(provider, session_id)
+                if status != "queued":
+                    self._send_json(
+                        {"status": status}
+                        if status == "scheduled"
+                        else {"error": "Analysis unavailable for this session or plan"},
+                        202 if status == "scheduled" else 409,
+                    )
+                    return
+            self._send_json({"error": "Collector did not pick up request"}, 503)
+        except TimeoutError:
+            self._send_json({"error": "Collector refresh timed out"}, 503)
+        finally:
+            self.context_drift.cancel_manual(provider, session_id)
 
     def _save_preferences(self) -> None:
         """Store a cadence chosen in the dashboard. Rejects unknown cadences
@@ -730,6 +783,7 @@ def _run_local_service(interval_seconds: int, port: int) -> None:
         directory=str(directory),
         refresh_coordinator=refresh_coordinator,
         snapshot_lock=snapshot_lock,
+        context_drift=context_drift,
     )
     try:
         server = ThreadingHTTPServer(("127.0.0.1", port), handler)

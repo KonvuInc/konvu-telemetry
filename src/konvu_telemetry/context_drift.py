@@ -2186,6 +2186,7 @@ def _public_summary(
     summary: dict[str, object] = {
         "version": ANALYSIS_VERSION,
         "method_version": ANALYSIS_METHOD_VERSION,
+        "epoch": analysis.get("epoch"),
         "state": "ready" if covered else "measuring",
         # After a compaction the old goal and advice describe context that is gone.
         "current_intent": analysis.get("current_intent", "") if same_epoch else "",
@@ -2613,10 +2614,41 @@ class ContextDriftScheduler:
         self._threads: dict[tuple[str, str], Thread] = {}
         self._pending: dict[tuple[str, str], PendingJob] = {}
         self._completed: list[CompletedJob] = []
+        self._manual_requests: set[tuple[str, str]] = set()
+        self._manual_results: dict[tuple[str, str], str] = {}
         self._failure_counts: dict[tuple[str, str], int] = {}
         self._retry_after: dict[tuple[str, str], float] = {}
         # Seeded from the usage ledger so a restart does not reset the overall hourly cap.
         self._call_starts: list[float] = _recent_call_starts(time.time())
+
+    def request_manual(self, provider: str, session_id: str) -> bool:
+        key = (provider, session_id)
+        with self._lock:
+            if (
+                key in self._manual_requests
+                or key in self._pending
+                or any(
+                    (job["provider"], job["session_id"]) == key
+                    for job in self._completed
+                )
+            ):
+                return False
+            self._manual_requests.add(key)
+            self._manual_results.pop(key, None)
+        return True
+
+    def manual_result(self, provider: str, session_id: str) -> str:
+        key = (provider, session_id)
+        with self._lock:
+            if key in self._manual_requests:
+                return "queued"
+            return self._manual_results.pop(key, "unavailable")
+
+    def cancel_manual(self, provider: str, session_id: str) -> None:
+        key = (provider, session_id)
+        with self._lock:
+            self._manual_requests.discard(key)
+            self._manual_results.pop(key, None)
 
     def _run(self, job: PendingJob, payload: dict[str, object]) -> None:
         try:
@@ -2685,6 +2717,10 @@ class ContextDriftScheduler:
         sessions = snapshot.get("sessions")
         if not isinstance(sessions, list):
             return
+        with self._lock:
+            manual = self._manual_requests
+            self._manual_requests = set()
+            self._manual_results.update({key: "unavailable" for key in manual})
         self._refresh_summaries(snapshot)
         with self._lock:
             finished = self._completed
@@ -2778,7 +2814,18 @@ class ContextDriftScheduler:
             # The stored backoff outlives a collector restart, which clears _retry_after.
             if current < _stored_retry_at(state):
                 continue
-            mode = self._due(state)
+            analysis = state.get("analysis")
+            already_reviewed = (
+                _analysis_is_current(analysis)
+                and isinstance(analysis, dict)
+                and analysis.get("state") == "ready"
+                and _integer(analysis.get("epoch"), -1)
+                == _integer(state.get("current_epoch"))
+                and _integer(analysis.get("analyzed_iteration"), -1)
+                >= _integer(state.get("iteration"))
+            )
+            manual_trigger = (provider, session_id) in manual and not already_reviewed
+            mode = self._due(state) or ("delta" if manual_trigger else None)
             if mode is None:
                 continue
             try:
@@ -2834,6 +2881,8 @@ class ContextDriftScheduler:
                 if not self._pending:
                     _CANCELLED.clear()
                 self._pending[(provider, session_id)] = job
+                if manual_trigger:
+                    self._manual_results[(provider, session_id)] = "scheduled"
             thread = Thread(target=self._run, args=(job, payload), daemon=True)
             self._threads[(provider, session_id)] = thread
             thread.start()
