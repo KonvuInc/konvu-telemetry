@@ -2624,8 +2624,13 @@ class ContextDriftScheduler:
     def request_manual(self, provider: str, session_id: str) -> bool:
         key = (provider, session_id)
         with self._lock:
-            if key in self._manual_requests or key in self._pending or any(
-                (job["provider"], job["session_id"]) == key for job in self._completed
+            if (
+                key in self._manual_requests
+                or key in self._pending
+                or any(
+                    (job["provider"], job["session_id"]) == key
+                    for job in self._completed
+                )
             ):
                 return False
             self._manual_requests.add(key)

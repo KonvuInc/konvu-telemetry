@@ -1070,7 +1070,10 @@ def apply_out_of_plan_accounting(snapshot: dict[str, object]) -> None:
             if isinstance(pending, list) and isinstance(iterations, list):
                 pending_ids = {value for value in pending if isinstance(value, str)}
                 for row in iterations:
-                    if not isinstance(row, dict) or row.get("started_at") not in pending_ids:
+                    if (
+                        not isinstance(row, dict)
+                        or row.get("started_at") not in pending_ids
+                    ):
                         continue
                     cost = _number(row.get("cost_usd"))
                     if row.get("priced") is True and cost is not None:

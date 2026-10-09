@@ -146,7 +146,9 @@ class DisplayTests(unittest.TestCase):
         with (
             patch.dict(os.environ, {"NO_COLOR": "", "TERM": "xterm-256color"}),
             patch("konvu_telemetry.display.time.time", return_value=1_893_456_000),
-            patch("konvu_telemetry.display.stored_provider_quotas", return_value=quotas),
+            patch(
+                "konvu_telemetry.display.stored_provider_quotas", return_value=quotas
+            ),
             patch("konvu_telemetry.display.dashboard_line", return_value="dashboard"),
         ):
             rows = claude_statusline_rows({"usage_mode": "exhausted"}, 0.0)

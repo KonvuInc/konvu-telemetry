@@ -720,7 +720,9 @@ class QuotaAttributionTests(unittest.TestCase):
                                 "windows": [
                                     {
                                         "period": period,
-                                        "used_percent": 100 if period == exhausted_period else 0,
+                                        "used_percent": 100
+                                        if period == exhausted_period
+                                        else 0,
                                     }
                                     for period in ("five_hour", "weekly")
                                 ]
@@ -1056,7 +1058,11 @@ class QuotaAttributionTests(unittest.TestCase):
                 "usage_mode": "exhausted",
                 "total_cost_usd": 0.0,
                 "iterations": [
-                    {"started_at": "2026-10-09T12:00:00Z", "priced": False, "cost_usd": None}
+                    {
+                        "started_at": "2026-10-09T12:00:00Z",
+                        "priced": False,
+                        "cost_usd": None,
+                    }
                 ],
             }
             apply_out_of_plan_accounting({"sessions": [first_row]})
@@ -1064,7 +1070,11 @@ class QuotaAttributionTests(unittest.TestCase):
                 **first_row,
                 "iterations": [
                     *first_row["iterations"],
-                    {"started_at": "2026-10-09T12:10:00Z", "priced": False, "cost_usd": None},
+                    {
+                        "started_at": "2026-10-09T12:10:00Z",
+                        "priced": False,
+                        "cost_usd": None,
+                    },
                 ],
             }
             apply_out_of_plan_accounting({"sessions": [later_unpriced]})
@@ -1074,8 +1084,16 @@ class QuotaAttributionTests(unittest.TestCase):
                 "usage_mode": "exhausted",
                 "total_cost_usd": 1.2,
                 "iterations": [
-                    {"started_at": "2026-10-09T12:00:00Z", "priced": True, "cost_usd": 1.0},
-                    {"started_at": "2026-10-09T12:10:00Z", "priced": True, "cost_usd": 0.2},
+                    {
+                        "started_at": "2026-10-09T12:00:00Z",
+                        "priced": True,
+                        "cost_usd": 1.0,
+                    },
+                    {
+                        "started_at": "2026-10-09T12:10:00Z",
+                        "priced": True,
+                        "cost_usd": 0.2,
+                    },
                 ],
             }
             apply_out_of_plan_accounting({"sessions": [repriced_row]})

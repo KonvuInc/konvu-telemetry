@@ -495,7 +495,9 @@ def claude_statusline_rows(
         if usage_mode == "exhausted" and isinstance(out_of_plan, (int, float)):
             paid = out_of_plan
         paid_forecast = session.get("projected_next_10_tasks_usd")
-        if session.get("cost_status") != "unavailable" and isinstance(paid, (int, float)):
+        if session.get("cost_status") != "unavailable" and isinstance(
+            paid, (int, float)
+        ):
             forecast_row = (
                 terminal_style("Estimated paid spend", "38;5;245")
                 + " "
