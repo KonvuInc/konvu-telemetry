@@ -4227,6 +4227,16 @@ select {
 .context-key-unreviewed { background: #b9b1c9; }
 .context-key-free { background: #edeaf2; border: 1px solid #d6d0e0; }
 .context-donut .context-review-note { color: var(--muted); margin-top: 3px; }
+.compact-ledger { min-width: 1000px; }
+.compact-ledger .context-donut-ring { width: 52px; height: 52px; }
+.compact-ledger .context-donut-ring::after { inset: 10px; }
+.context-donut-top { display: inline-flex; align-items: center; gap: 7px; }
+.context-visual-title { display: inline-flex; align-items: center; gap: 6px; }
+.context-analysis-trigger { display: inline-flex; align-items: center; justify-content: center; min-height: 20px; padding: 2px 6px; border: 1px solid var(--line); border-radius: 5px; background: #fff; color: var(--ink); font: inherit; font-size: 10px; font-weight: 600; line-height: 1.2; white-space: nowrap; cursor: pointer; }
+.context-analysis-trigger:hover { border-color: var(--ink); background: var(--wash); }
+.context-analysis-trigger:disabled { opacity: .55; cursor: default; }
+.context-analysis-trigger-panel { font-size: 11px; padding: 5px 8px; }
+.session-ledger tbody tr:hover:has(.context-analysis-trigger:hover) { background: transparent; }
 .context-ring-key small { color: var(--mist); font-size: 10px; }
 
 .compact-steps { display: grid; gap: 12px; }

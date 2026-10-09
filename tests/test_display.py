@@ -14,6 +14,7 @@ from konvu_telemetry.display import (
     compact_duration,
     context_meter,
     compact_status_meter,
+    hook_forecast_row,
     hook_quota_meters,
     relevance_context_meter,
     usage_box_lines,
@@ -37,6 +38,16 @@ class DisplayTests(unittest.TestCase):
 
         self.assertIn("reset: 4.2h", ANSI_ESCAPE.sub("", rendered))
         self.assertIn("\x1b[48;5;", rendered)
+
+    def test_cli_meter_keeps_the_bar_when_zero_usage_has_no_reset(self) -> None:
+        with patch.dict(os.environ, {"NO_COLOR": "", "TERM": "xterm-256color"}):
+            colored = compact_status_meter("5h", 0.0, 14)
+        with patch.dict(os.environ, {"NO_COLOR": "1", "TERM": "dumb"}):
+            plain = compact_status_meter("5h", 0.0, 14)
+        self.assertIn("\x1b[48;5;", colored)
+        self.assertEqual(ANSI_ESCAPE.sub("", colored), "5h " + " " * 14 + " 0%")
+        self.assertEqual(plain, "5h " + "─" * 14 + " 0%")
+        self.assertNotIn("□", colored + plain)
 
     def test_hook_meters_put_each_reset_next_to_its_limit_name(self) -> None:
         quotas = {
@@ -62,7 +73,7 @@ class DisplayTests(unittest.TestCase):
             "5h · reset: 1h [█░░░░░░] 8.0%  Week · reset: 1d [██░░░░░] 35.0%",
         )
 
-    def test_paid_claude_hud_shows_reset_and_context_without_limit_meters(self) -> None:
+    def test_paid_claude_hud_shows_spend_instead_of_limit_meters(self) -> None:
         quotas = {
             "claude": {
                 "windows": [
@@ -94,11 +105,74 @@ class DisplayTests(unittest.TestCase):
         ):
             rows = claude_statusline_rows(session, 52.4)
 
-        self.assertEqual(rows[0], "● Paying · resets in 1h")
-        self.assertIn("Context", rows[1])
-        self.assertIn("52%", rows[1])
-        self.assertNotIn("5h", "\n".join(rows))
-        self.assertNotIn("Week", "\n".join(rows))
+        self.assertIn("● Paying", rows[0])
+        self.assertIn("Limits reset in 1h", rows[0])
+        self.assertNotIn("5h ", "\n".join(rows))
+        self.assertNotIn("Week ", "\n".join(rows))
+        self.assertIn("Estimated paid spend $1.3", "\n".join(rows))
+        self.assertIn("$2.1 forecasted in next 10 prompts", "\n".join(rows))
+        self.assertIn("Context", "\n".join(rows))
+        self.assertIn("52%", "\n".join(rows))
+        self.assertNotIn("□", "\n".join(rows))
+
+    def test_paid_claude_hud_shows_spend_before_forecast_is_ready(self) -> None:
+        session = {
+            "usage_mode": "exhausted",
+            "out_of_plan_spend_usd": 0.4,
+            "projected_next_10_tasks_usd": None,
+        }
+        with (
+            patch.dict(os.environ, {"NO_COLOR": "1"}),
+            patch("konvu_telemetry.display.stored_provider_quotas", return_value={}),
+            patch("konvu_telemetry.display.dashboard_line", return_value="dashboard"),
+        ):
+            rows = claude_statusline_rows(session, 10.0)
+
+        self.assertIn("Estimated paid spend $0.4", "\n".join(rows))
+        self.assertNotIn("Subscription forecast unavailable", "\n".join(rows))
+
+    def test_paid_claude_hud_colors_only_paying_red(self) -> None:
+        quotas = {
+            "claude": {
+                "windows": [
+                    {
+                        "period": "weekly",
+                        "used_percent": 100.0,
+                        "resets_at": "2030-01-02T00:00:00+00:00",
+                    }
+                ]
+            }
+        }
+        with (
+            patch.dict(os.environ, {"NO_COLOR": "", "TERM": "xterm-256color"}),
+            patch("konvu_telemetry.display.time.time", return_value=1_893_456_000),
+            patch("konvu_telemetry.display.stored_provider_quotas", return_value=quotas),
+            patch("konvu_telemetry.display.dashboard_line", return_value="dashboard"),
+        ):
+            rows = claude_statusline_rows({"usage_mode": "exhausted"}, 0.0)
+
+        self.assertIn("\x1b[1;38;5;203m● Paying\x1b[0m", rows[0])
+        self.assertIn("\x1b[38;5;245mLimits reset in 1d\x1b[0m", rows[0])
+
+    def test_paid_hooks_keep_spend_when_forecast_is_unavailable(self) -> None:
+        for provider in ("claude", "codex"):
+            with self.subTest(provider=provider):
+                row = {
+                    "provider": provider,
+                    "usage_mode": "exhausted",
+                    "out_of_plan_spend_usd": 0.4,
+                    "projected_next_10_tasks_usd": None,
+                }
+                self.assertEqual(hook_forecast_row(row), "💸 Current spend $0.4")
+                row["cost_status"] = "unavailable"
+                self.assertIsNone(hook_forecast_row(row))
+
+    def test_included_hook_omits_forecast_without_attribution(self) -> None:
+        row = {"provider": "codex", "usage_mode": "included"}
+        self.assertIsNone(hook_forecast_row(row))
+        with patch("konvu_telemetry.display.dashboard_line", return_value="dashboard"):
+            lines = usage_box_lines(row, "35.0% weekly limit", "codex")
+        self.assertNotIn("forecast", "\n".join(lines).lower())
 
     def test_every_claude_hud_state_uses_the_thin_context_bar(self) -> None:
         for usage_mode in ("included", "api_billed", "exhausted", None):
@@ -155,7 +229,7 @@ class DisplayTests(unittest.TestCase):
                 "codex",
             )
 
-        self.assertEqual(rows[1], "│ 🔴 Paying · resets in 1d")
+        self.assertEqual(rows[1], "│ 🔴 Paying · Limits reset in 1d")
         self.assertIn("Credits [██░░░░░] 23.0%", rows[2])
         self.assertEqual(rows[3], "│ 🧠 Context ⬜⬜⬜⬜⬜⬜⬜▫️▫️▫️ 68.1%")
         self.assertNotIn("Week", "\n".join(rows))

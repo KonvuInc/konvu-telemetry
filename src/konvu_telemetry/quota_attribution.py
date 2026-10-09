@@ -1011,12 +1011,17 @@ def apply_out_of_plan_accounting(snapshot: dict[str, object]) -> None:
             billing["mode"] = "included"
             billing["offsets"] = {}
             billing["subagent_offsets"] = {}
+            billing["unpriced_baselines"] = {}
             continue
         previously_exhausted = billing.get("mode") == "exhausted"
         offsets_were_recorded = isinstance(billing.get("offsets"), dict)
         offsets = billing.setdefault("offsets", {})
         if not isinstance(offsets, dict):
             billing["offsets"] = offsets = {}
+        raw_baselines = billing.setdefault("unpriced_baselines", {})
+        baselines = raw_baselines if isinstance(raw_baselines, dict) else {}
+        if baselines is not raw_baselines:
+            billing["unpriced_baselines"] = baselines
         subagent_offsets_were_recorded = isinstance(
             billing.get("subagent_offsets"), dict
         )
@@ -1025,11 +1030,20 @@ def apply_out_of_plan_accounting(snapshot: dict[str, object]) -> None:
             billing["subagent_offsets"] = subagent_offsets = {}
         if not previously_exhausted or not offsets_were_recorded:
             offsets.clear()
+            baselines.clear()
             for session in rows:
                 session_id = session.get("id")
                 total = _number(session.get("total_cost_usd"))
                 if isinstance(session_id, str) and total is not None:
                     offsets[session_id] = total
+                    iterations = session.get("iterations")
+                    baselines[session_id] = [
+                        row["started_at"]
+                        for row in (iterations if isinstance(iterations, list) else [])
+                        if isinstance(row, dict)
+                        and row.get("priced") is False
+                        and isinstance(row.get("started_at"), str)
+                    ]
         if not previously_exhausted or not subagent_offsets_were_recorded:
             subagent_offsets.clear()
             for session in rows:
@@ -1051,6 +1065,20 @@ def apply_out_of_plan_accounting(snapshot: dict[str, object]) -> None:
             total = _number(session.get("total_cost_usd"))
             if not isinstance(session_id, str) or total is None:
                 continue
+            pending = baselines.get(session_id)
+            iterations = session.get("iterations")
+            if isinstance(pending, list) and isinstance(iterations, list):
+                pending_ids = {value for value in pending if isinstance(value, str)}
+                for row in iterations:
+                    if not isinstance(row, dict) or row.get("started_at") not in pending_ids:
+                        continue
+                    cost = _number(row.get("cost_usd"))
+                    if row.get("priced") is True and cost is not None:
+                        offsets[session_id] = round(
+                            (_number(offsets.get(session_id)) or 0.0) + cost, 6
+                        )
+                        pending_ids.remove(row["started_at"])
+                baselines[session_id] = sorted(pending_ids)
             prior = _number(offsets.get(session_id)) or 0.0
             session["out_of_plan_spend_usd"] = round(max(0.0, total - prior), 6)
             session["out_of_plan_spend_status"] = "since_observed_plan_exit"

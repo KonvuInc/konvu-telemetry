@@ -14529,6 +14529,21 @@
         "prompt_cache_min_tokens": 1024,
         "source": "https://platform.claude.com/docs/en/about-claude/pricing"
     },
+    "claude-sonnet-5-5": {
+        "cache_creation_input_token_cost": 2.5e-06,
+        "cache_creation_input_token_cost_above_1hr": 4e-06,
+        "cache_read_input_token_cost": 1e-07,
+        "input_cost_per_token": 2e-06,
+        "litellm_provider": "anthropic",
+        "max_input_tokens": 1000000,
+        "max_output_tokens": 128000,
+        "mode": "chat",
+        "output_cost_per_token": 1e-05,
+        "search_context_cost_per_query": {
+            "search_context_size_medium": 0.01
+        },
+        "source": "https://platform.claude.com/docs/en/models/sonnet-5-5/whats-new-sonnet-5-5"
+    },
     "claude-sonnet-4-6": {
         "deprecation_date": "2027-02-17",
         "cache_creation_input_token_cost": 3.75e-06,

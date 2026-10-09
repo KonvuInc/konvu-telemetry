@@ -708,6 +708,28 @@ class QuotaAttributionTests(unittest.TestCase):
         apply_usage_modes(snapshot_data)
         self.assertEqual(snapshot_data["sessions"][0]["usage_mode"], "included")
 
+    def test_either_ordinary_limit_exhausts_claude_and_codex(self) -> None:
+        for provider in ("claude", "codex"):
+            for exhausted_period in ("five_hour", "weekly"):
+                with self.subTest(provider=provider, period=exhausted_period):
+                    row = {"id": "a", "provider": provider}
+                    data = {
+                        "sessions": [row],
+                        "account_quotas": {
+                            provider: {
+                                "windows": [
+                                    {
+                                        "period": period,
+                                        "used_percent": 100 if period == exhausted_period else 0,
+                                    }
+                                    for period in ("five_hour", "weekly")
+                                ]
+                            }
+                        },
+                    }
+                    apply_usage_modes(data)
+                    self.assertEqual(row["usage_mode"], "exhausted")
+
     def test_starts_observing_then_keeps_finished_session_allocations(self) -> None:
         with (
             tempfile.TemporaryDirectory() as directory,
@@ -1022,6 +1044,45 @@ class QuotaAttributionTests(unittest.TestCase):
             }
             apply_out_of_plan_accounting(second)
             self.assertEqual(second["sessions"][0]["out_of_plan_spend_usd"], 5.5)
+
+    def test_new_pricing_does_not_count_old_unpriced_prompts_as_paid(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+        ):
+            first_row = {
+                "id": "a",
+                "provider": "claude",
+                "usage_mode": "exhausted",
+                "total_cost_usd": 0.0,
+                "iterations": [
+                    {"started_at": "2026-10-09T12:00:00Z", "priced": False, "cost_usd": None}
+                ],
+            }
+            apply_out_of_plan_accounting({"sessions": [first_row]})
+            later_unpriced = {
+                **first_row,
+                "iterations": [
+                    *first_row["iterations"],
+                    {"started_at": "2026-10-09T12:10:00Z", "priced": False, "cost_usd": None},
+                ],
+            }
+            apply_out_of_plan_accounting({"sessions": [later_unpriced]})
+            repriced_row = {
+                "id": "a",
+                "provider": "claude",
+                "usage_mode": "exhausted",
+                "total_cost_usd": 1.2,
+                "iterations": [
+                    {"started_at": "2026-10-09T12:00:00Z", "priced": True, "cost_usd": 1.0},
+                    {"started_at": "2026-10-09T12:10:00Z", "priced": True, "cost_usd": 0.2},
+                ],
+            }
+            apply_out_of_plan_accounting({"sessions": [repriced_row]})
+            self.assertEqual(repriced_row["out_of_plan_spend_usd"], 0.2)
+            apply_out_of_plan_accounting({"sessions": [repriced_row]})
+
+        self.assertEqual(repriced_row["out_of_plan_spend_usd"], 0.2)
 
     def test_subagent_spend_starts_at_the_observed_plan_exit(self) -> None:
         with (
