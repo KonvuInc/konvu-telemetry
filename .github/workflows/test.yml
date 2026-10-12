@@ -27,6 +27,7 @@ jobs:
       - run: python -m mypy src/konvu_telemetry
       - run: python -m compileall -q src
       - run: node --check src/konvu_telemetry/dashboard/fleet.js
+      - run: node --test tests/test_dashboard_auth.js
 
   test:
     runs-on: ubuntu-latest

@@ -31,6 +31,8 @@ https://github.com/user-attachments/assets/883f2285-0de4-4e65-b776-ebba80f3b486
 2. It serves the dashboard at `http://127.0.0.1:7824` and adds a usage line to your status bar (Claude Code CLI) or a usage box to replies (Codex and the desktop apps).
 3. Context analysis runs on your side when enabled, with your own Claude or Codex login, about every 10 prompts per live session. Setup asks whether to enable it and defaults to yes. It costs a few cents per run, pauses at 90% of your plan limits, and is capped per hour. Konvu never sees your code or prompts.
 
+Run `konvu-telemetry dashboard` to authorize a browser. Existing tabs stay authorized across collector restarts; a direct link in a new browser needs this command once. The persistent browser credential is stored in `~/.konvu/telemetry/dashboard-secret` with owner-only permissions; the open URL contains only a short-lived, single-use ticket. Neither is included in usage summaries.
+
 Every session is either **included** (covered by your Claude or ChatGPT plan, shown as a share of your 5-hour and weekly limits) or **paying** (past your plan or on an API key, shown in dollars with a forecast). Konvu always tells you which.
 
 ## Install
