@@ -1863,6 +1863,7 @@ class ServiceTests(unittest.TestCase):
                 context = get(f"/c/{code}")
                 unknown = get("/s/zzzzzzz")
                 malformed = get("/c/../../etc")
+                empty = get("/s/")
 
         target = f"/?session=codex%3A{session_id}"
         session.send_header.assert_any_call("Location", target)
@@ -1871,6 +1872,7 @@ class ServiceTests(unittest.TestCase):
         # A code with no recorded session still lands on the dashboard.
         unknown.send_header.assert_any_call("Location", "/")
         malformed.send_header.assert_any_call("Location", "/")
+        empty.send_header.assert_any_call("Location", "/")
 
     def test_short_codes_are_stable_and_ambiguity_fails_closed(self) -> None:
         self.assertEqual(short_code("codex", "abc"), short_code("codex", "abc"))

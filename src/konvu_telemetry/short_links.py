@@ -54,7 +54,7 @@ def resolve_short_code(code: str) -> tuple[str, str] | None:
 def resolved_dashboard_path(link_path: str) -> str | None:
     """Map a short-link path like /c/abc1234 to its full dashboard path, or None."""
     prefix, _, code = link_path.strip("/").partition("/")
-    if prefix not in TABS or not code:
+    if prefix not in TABS:
         return None
     session = resolve_short_code(code)
     if session is None:
