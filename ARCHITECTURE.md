@@ -7,7 +7,7 @@ Konvu Telemetry is one Python package with a single resident process. The proces
 - The collector never modifies provider transcripts.
 - The dashboard server binds only to IPv4 loopback and rejects non-local `Host` and `Origin` values.
 - The package requires Python 3.12 and pins `tiktoken` for Codex context estimates and `ctok` for Claude context estimates. The collector is the only Konvu component that fetches or writes account limits: every two minutes Claude calls Anthropic's usage endpoint and a validated installed Codex app-server contacts OpenAI. The Claude credential remains in memory for one request; the Codex credential never enters Konvu Telemetry. Only normalized limits are persisted. Authentication failures clear the provider immediately; transient failures retain unexpired provider windows with an explicit stale status. Claude 429 responses trigger exponential backoff with jitter for at least one hour and until the next known reset without blocking transcript collection.
-- A separate outbound client sends a small allowlisted set of anonymous product events to PostHog with a 500 ms timeout. Setup durably queues its event before the setup process exits; network delivery and resident-process events run in a background thread.
+- A separate outbound client sends a small allowlisted set of anonymous product events to PostHog with a 500 ms timeout. Setup durably queues its event before the setup process exits, and a failed setup also tries one synchronous send because no resident process may follow; other delivery runs in a background thread. Recurring events are sent at most once per day, dashboard clicks reach the collector through an allowlisted `POST /api/track`, and a setup run with `DO_NOT_TRACK` or `CI` set stores an opt-out instead of queueing anything.
 - Product analytics uses a random install ID. It does not create person profiles and sends no transcripts, prompts, code, paths, command arguments, usage data, raw errors, environment variables, account IDs, or workspace IDs.
 - Browser notifications require an open dashboard tab and browser permission.
 - A paid session is marked hot when it was active in the last twenty minutes, its cost is complete, and its next-ten-prompt forecast reaches `ALERT_FORECAST_USD`. Browser-local state controls notification cooldowns.
@@ -74,8 +74,9 @@ Raw transcripts remain in `~/.claude/projects` and `~/.codex/sessions`. Normaliz
 | `KONVU_LIVE_USAGE_CLAUDE_DIR` | Claude transcript roots, separated by the platform path separator |
 | `KONVU_LIVE_USAGE_CODEX_DIR` | Codex transcript roots, separated by the platform path separator |
 | `KONVU_TELEMETRY_PRICING_PATH` | Local pricing JSON file |
+| `DO_NOT_TRACK`, `CI` | Any value other than empty, `0` or `false` stops product analytics in that process; setup stores it as an opt-out |
 
-Setup enables anonymous product analytics by default and preserves an existing choice. Run `konvu-telemetry telemetry off` to disable it and delete pending events, `konvu-telemetry telemetry on` to re-enable it, or `konvu-telemetry telemetry status` to inspect the local preference.
+Setup enables anonymous product analytics by default and preserves an existing choice, unless it runs with `DO_NOT_TRACK` or `CI` set, which stores an opt-out. Run `konvu-telemetry telemetry off` to disable it and delete pending events, `konvu-telemetry telemetry on` to re-enable it, or `konvu-telemetry telemetry status` to inspect the local preference.
 
 ## Failure behavior
 

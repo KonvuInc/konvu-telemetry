@@ -57,9 +57,12 @@ from .storage import (
 )
 from .tracking import (
     flush_in_background as flush_tracking_in_background,
+    record_active_day,
     record_collector_failure,
+    record_dashboard_action,
     record_dashboard_opened,
     record_first_snapshot_ready,
+    record_settings_saved,
 )
 
 LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost"})
@@ -422,6 +425,7 @@ def collect_forever(
             )
             if _DASHBOARD_DATA_AVAILABLE:
                 record_first_snapshot_ready()
+                record_active_day()
             with collection_lock():
                 write_health(time.time(), interval_seconds=interval_seconds)
         except Exception as error:
@@ -623,6 +627,9 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
         if path == "/api/preferences":
             self._save_preferences()
             return
+        if path == "/api/track":
+            self._record_dashboard_action()
+            return
         if path == "/api/context-analysis":
             self._run_context_analysis()
             return
@@ -647,6 +654,31 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
         self.send_response(status)
         self._secure_headers("application/json; charset=utf-8", len(payload))
         self._write_payload(payload)
+
+    def _record_dashboard_action(self) -> None:
+        """Accept one allowlisted dashboard click for anonymous product analytics."""
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self.send_error(400)
+            return
+        if length <= 0 or length > 1024:
+            self.send_error(400)
+            return
+        try:
+            body = json.loads(self.rfile.read(length))
+        except (ValueError, OSError):
+            self.send_error(400)
+            return
+        if not isinstance(body, dict) or not isinstance(body.get("event"), str):
+            self.send_error(400)
+            return
+        properties = {key: value for key, value in body.items() if key != "event"}
+        if not record_dashboard_action(body["event"], properties):
+            self.send_error(400)
+            return
+        self.send_response(204)
+        self.end_headers()
 
     def _run_context_analysis(self) -> None:
         if self.context_drift is None or self.refresh_coordinator is None:
@@ -710,7 +742,7 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
             return
         try:
             body = json.loads(self.rfile.read(length))
-        except (json.JSONDecodeError, OSError):
+        except (ValueError, OSError):
             self.send_error(400)
             return
         if not isinstance(body, dict):
@@ -762,6 +794,9 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
         except (ValueError, OSError):
             self.send_error(400)
             return
+        record_settings_saved(
+            preference["cadence"], preference["context_analysis_enabled"] is True
+        )
         self._send_json(
             {
                 **preference,
