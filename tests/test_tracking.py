@@ -776,7 +776,7 @@ class TrackingStoreTests(unittest.TestCase):
             configured.return_value = {}
             cli.main(["setup"])
 
-        configured.assert_called_once_with(60, True)
+        configured.assert_called_once_with(60, True, context_analysis_enabled=None)
 
     def test_cli_opt_out_does_not_report_success_when_write_fails(self) -> None:
         with patch(

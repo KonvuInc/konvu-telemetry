@@ -61,16 +61,13 @@ def run_setup(arguments: argparse.Namespace) -> None:
         else None
     )
     result: dict[str, object] = dict(
-        setup(max(1, arguments.interval), not arguments.no_browser)
-    )
-    if enabled is not None:
-        current = read_preferences()
-        current = write_preferences(
-            current["cadence"],
-            current["custom_rule"],
-            current["jump_percent"],
+        setup(
+            max(1, arguments.interval),
+            not arguments.no_browser,
             context_analysis_enabled=enabled,
         )
+    )
+    current = read_preferences()
     result["context_analysis"] = "on" if current["context_analysis_enabled"] else "off"
     print(json.dumps(result, indent=2))
 
