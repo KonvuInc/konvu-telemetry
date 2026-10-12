@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Show the Codex CLI usage box as the same colored meters as the Claude Code status line,
+  framed by the usage box border, on Codex 0.162.0 and later. Older Codex releases keep
+  the text box unchanged.
+- End the Claude Code status line and the Codex CLI box with "View session in dashboard",
+  which opens the dashboard on that session.
 - Send each recurring anonymous event at most once per day for each value: dashboard opens no
   longer count every page reload, and the active-day event now means the collector
   produced visible data that day.

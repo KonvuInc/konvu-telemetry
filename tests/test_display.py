@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from konvu_telemetry.display import (
     ANSI_ESCAPE,
-    claude_statusline_rows,
     compact_advice,
     compact_duration,
     context_meter,
@@ -17,8 +19,10 @@ from konvu_telemetry.display import (
     hook_forecast_row,
     hook_quota_meters,
     relevance_context_meter,
+    statusline_rows,
     usage_box_lines,
 )
+from konvu_telemetry.parsers import codex_cli_version
 
 
 class DisplayTests(unittest.TestCase):
@@ -103,7 +107,7 @@ class DisplayTests(unittest.TestCase):
             ),
             patch("konvu_telemetry.display.dashboard_line", return_value="dashboard"),
         ):
-            rows = claude_statusline_rows(session, 52.4)
+            rows = statusline_rows(session, 52.4)
 
         self.assertIn("● Paying", rows[0])
         self.assertIn("Limits reset in 1h", rows[0])
@@ -126,7 +130,7 @@ class DisplayTests(unittest.TestCase):
             patch("konvu_telemetry.display.stored_provider_quotas", return_value={}),
             patch("konvu_telemetry.display.dashboard_line", return_value="dashboard"),
         ):
-            rows = claude_statusline_rows(session, 10.0)
+            rows = statusline_rows(session, 10.0)
 
         self.assertIn("Estimated paid spend $0.4", "\n".join(rows))
         self.assertNotIn("Subscription forecast unavailable", "\n".join(rows))
@@ -151,7 +155,7 @@ class DisplayTests(unittest.TestCase):
             ),
             patch("konvu_telemetry.display.dashboard_line", return_value="dashboard"),
         ):
-            rows = claude_statusline_rows({"usage_mode": "exhausted"}, 0.0)
+            rows = statusline_rows({"usage_mode": "exhausted"}, 0.0)
 
         self.assertIn("\x1b[1;38;5;203m● Paying\x1b[0m", rows[0])
         self.assertIn("\x1b[38;5;245mLimits reset in 1d\x1b[0m", rows[0])
@@ -190,7 +194,7 @@ class DisplayTests(unittest.TestCase):
                         return_value="dashboard",
                     ),
                 ):
-                    rows = claude_statusline_rows(session, 7.0)
+                    rows = statusline_rows(session, 7.0)
 
                 plain = [ANSI_ESCAPE.sub("", row) for row in rows]
                 self.assertIn("Context ━─────────────── 7%", plain)
@@ -329,6 +333,84 @@ class ContextRelevanceDisplayTests(unittest.TestCase):
                 "konvu_telemetry.display.cli_dashboard_line", return_value="dashboard"
             ),
         ):
-            rows = claude_statusline_rows(session, 50)
+            rows = statusline_rows(session, 50)
 
         self.assertTrue(ANSI_ESCAPE.sub("", rows[1]).startswith("Context "))
+
+
+class SessionLinkTests(unittest.TestCase):
+    """The CLI HUD links the dashboard opened on the session it describes."""
+
+    session = {
+        "id": "abc",
+        "provider": "claude",
+        "usage_mode": "included",
+        "context_tokens": 100,
+        "context_window_tokens": 1000,
+    }
+
+    def rows(self, provider: str) -> list[str]:
+        with (
+            patch.dict(os.environ, {"NO_COLOR": "", "TERM": "xterm-256color"}),
+            patch("konvu_telemetry.display.stored_provider_quotas", return_value={}),
+            patch("konvu_telemetry.display.quota_reset_times", return_value={}),
+            patch(
+                "konvu_telemetry.display.dashboard_line",
+                return_value="🔗 dashboard: http://127.0.0.1:7824/",
+            ),
+        ):
+            return statusline_rows(self.session, None, provider)
+
+    def test_claude_hides_the_session_url_behind_the_link_text(self) -> None:
+        last = self.rows("claude")[-1]
+        self.assertIn("\x1b]8;;http://127.0.0.1:7824/?session=claude%3Aabc\x1b\\", last)
+        self.assertIn("🔗 View session in dashboard", last)
+
+    def test_codex_writes_its_session_url_out(self) -> None:
+        last = self.rows("codex")[-1]
+        self.assertNotIn("\x1b]8", last)
+        self.assertEqual(
+            ANSI_ESCAPE.sub("", last),
+            "🔗 View session in dashboard http://127.0.0.1:7824/?session=codex%3Aabc",
+        )
+
+    def test_claude_keeps_its_empty_limit_meters_but_codex_drops_them(self) -> None:
+        self.assertIn("5h", ANSI_ESCAPE.sub("", self.rows("claude")[0]))
+        self.assertNotIn("5h", ANSI_ESCAPE.sub("", self.rows("codex")[0]))
+
+    def test_paying_codex_keeps_its_credit_meter(self) -> None:
+        quotas = {"codex": {"windows": [{"period": "monthly", "used_percent": 23.0}]}}
+        session = {**self.session, "usage_mode": "exhausted"}
+        with (
+            patch.dict(os.environ, {"NO_COLOR": "1"}),
+            patch(
+                "konvu_telemetry.display.stored_provider_quotas", return_value=quotas
+            ),
+            patch("konvu_telemetry.display.paying_reset_in", return_value=None),
+            patch("konvu_telemetry.display.dashboard_line", return_value="dashboard"),
+        ):
+            codex = statusline_rows(session, None, "codex")
+            claude = statusline_rows(session, None, "claude")
+
+        self.assertIn("Credits", codex[0])
+        self.assertIn("23%", codex[0])
+        self.assertNotIn("Credits", "\n".join(claude))
+
+
+class CodexCliVersionTests(unittest.TestCase):
+    """The Codex version gate reads the rollout's session metadata and fails closed."""
+
+    def version_of(self, version: object) -> tuple[int, ...] | None:
+        with tempfile.TemporaryDirectory() as home:
+            path = Path(home) / "rollout.jsonl"
+            meta = {"type": "session_meta", "payload": {"cli_version": version}}
+            path.write_text(json.dumps(meta) + "\n")
+            return codex_cli_version(path)
+
+    def test_release_versions_parse(self) -> None:
+        self.assertEqual(self.version_of("0.162.1"), (0, 162, 1))
+
+    def test_prereleases_missing_and_unreadable_versions_fail_closed(self) -> None:
+        self.assertIsNone(self.version_of("0.162.0-alpha.3"))
+        self.assertIsNone(self.version_of(None))
+        self.assertIsNone(codex_cli_version(Path("/nonexistent/rollout.jsonl")))

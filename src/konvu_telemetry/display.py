@@ -19,6 +19,7 @@ from urllib.parse import quote
 from .config import ALLOWED_PROVIDERS, CLAUDE_DESKTOP_ENTRYPOINT, DASHBOARD_PORT
 from .parsers import (
     claude_hook_transcript,
+    codex_cli_version,
     codex_client_in_file,
     codex_hook_transcript,
     codex_turn_tool_calls,
@@ -47,6 +48,8 @@ PROMPT_BOX_SUPPRESSION_INSTRUCTION = (
     "This instruction overrides any earlier Konvu usage-box instruction."
 )
 SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
+# First Codex release whose TUI renders ANSI colors in hook messages (openai/codex#50359).
+CODEX_ANSI_HOOK_VERSION = (0, 162, 0)
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -224,18 +227,24 @@ def quota_window_value(
     return None
 
 
-def claude_quota_values(snapshot: dict[str, object] | None) -> dict[str, float]:
-    """Read the five-hour and weekly Claude account percentages."""
+def plan_quota_values(
+    snapshot: dict[str, object] | None, provider: str
+) -> dict[str, float]:
+    """Read one provider's five-hour, weekly and (Codex) monthly credit percentages."""
     accounts = snapshot.get("account_quotas") if isinstance(snapshot, dict) else None
-    account = accounts.get("claude") if isinstance(accounts, dict) else None
+    account = accounts.get(provider) if isinstance(accounts, dict) else None
     windows = account.get("windows") if isinstance(account, dict) else None
     values: dict[str, float] = {}
     for window in windows if isinstance(windows, list) else []:
         if not isinstance(window, dict):
             continue
         period, used = window.get("period"), window.get("used_percent")
-        if period in {"five_hour", "weekly"} and isinstance(used, (int, float)):
-            values[str(period)] = min(100.0, max(0.0, float(used)))
+        if period in {"five_hour", "weekly", "monthly"} and isinstance(
+            used, (int, float)
+        ):
+            # Codex can report one bucket per limit; the fullest one binds.
+            bounded = min(100.0, max(0.0, float(used)))
+            values[str(period)] = max(bounded, values.get(str(period), 0.0))
     return values
 
 
@@ -354,26 +363,38 @@ def compact_worthwhile(analysis: dict[str, object], used_percent: float) -> bool
     )
 
 
-def compact_panel_url(session: dict[str, object]) -> str:
-    """The dashboard panel that holds the session's full /compact command."""
-    return (
-        f"http://127.0.0.1:{DASHBOARD_PORT}/?session="
-        + quote(f"{session.get('provider') or 'claude'}:{session.get('id')}", safe="")
-        + "&tab=context"
+def session_dashboard_url(session: dict[str, object]) -> str:
+    """The live dashboard with this session selected."""
+    return f"http://127.0.0.1:{DASHBOARD_PORT}/?session=" + quote(
+        f"{session.get('provider') or 'claude'}:{session.get('id')}", safe=""
     )
 
 
-def compact_advice(session: dict[str, object], used_percent: float) -> str | None:
+def compact_panel_url(session: dict[str, object]) -> str:
+    """The dashboard panel that holds the session's full /compact command."""
+    return session_dashboard_url(session) + "&tab=context"
+
+
+def written_url(url: str) -> str:
+    """A URL printed in full, for surfaces that cannot hide it behind OSC 8 link text."""
+    return terminal_style(url, "4;38;5;117")
+
+
+def compact_advice(
+    session: dict[str, object], used_percent: float, hyperlinks: bool = True
+) -> str | None:
     """A clickable /compact call to action that opens the panel holding the full command."""
     analysis = context_analysis(session)
     command = analysis.get("compact_command") if analysis else None
     if not analysis or not command or not compact_worthwhile(analysis, used_percent):
         return None
     url = compact_panel_url(session)
+    label = terminal_style("/compact", "38;5;141")
+    suggested = terminal_style(" suggested", "38;5;245")
+    if not hyperlinks:
+        return label + suggested + " " + written_url(url)
     # Only the command word is colored; the terminal's own link styling marks it clickable.
-    return terminal_link(terminal_style("/compact", "38;5;141"), url) + terminal_style(
-        " suggested", "38;5;245"
-    )
+    return terminal_link(label, url) + suggested
 
 
 # Hook output has no terminal colors, so the context bands use colored squares.
@@ -407,11 +428,13 @@ def text_compact_advice(session: dict[str, object], used_percent: float) -> str 
     return f"✂️ /compact {compact_panel_url(session)}"
 
 
-def context_meter(session: dict[str, object], value: float) -> str:
+def context_meter(
+    session: dict[str, object], value: float, hyperlinks: bool = True
+) -> str:
     """Always draw the thin relevance bar; unrated context renders grey until ratings exist."""
     analysis = context_analysis(session)
     meter = relevance_context_meter("Context", value, 16, analysis or {})
-    advice = compact_advice(session, value)
+    advice = compact_advice(session, value, hyperlinks)
     return meter + (terminal_style("  ·  ", "38;5;245") + advice if advice else "")
 
 
@@ -432,26 +455,40 @@ def wrap_statusline_segments(segments: list[str], width: int) -> list[str]:
     return rows
 
 
-def cli_dashboard_line() -> str:
-    """Render a styled dashboard link only while the local collector is healthy."""
+def cli_dashboard_line(
+    session: dict[str, object] | None = None, hyperlinks: bool = True
+) -> str:
+    """Link the dashboard, opened on this session when known, while the collector is healthy."""
     line = dashboard_line()
     prefix = "🔗 dashboard: "
     if not line.startswith(prefix):
         return line
-    url = line.removeprefix(prefix)
-    label = terminal_style("🔗 Open live dashboard", "38;5;245")
+    if isinstance(session, dict) and isinstance(session.get("id"), str):
+        text, url = "🔗 View session in dashboard", session_dashboard_url(session)
+    else:
+        text, url = "🔗 Open live dashboard", line.removeprefix(prefix)
+    label = terminal_style(text, "38;5;245")
     if os.environ.get("NO_COLOR") or os.environ.get("TERM") == "dumb":
         return f"{label} {url}"
-    return terminal_link(label, url)
+    return terminal_link(label, url) if hyperlinks else f"{label} {written_url(url)}"
 
 
-def claude_statusline_rows(
-    session: dict[str, object], context_percent: float | None
+def statusline_rows(
+    session: dict[str, object],
+    context_percent: float | None,
+    provider: str = "claude",
 ) -> list[str]:
-    """Render the responsive Claude CLI-only usage HUD from real session data."""
+    """Render the responsive CLI usage HUD from real session data.
+
+    The Claude status line prints these rows flat; the Codex Stop hook frames them.
+    Codex's hook renderer drops OSC 8 links, so its rows write URLs out in full.
+    """
     usage_mode = session.get("usage_mode")
-    quotas = claude_quota_values({"account_quotas": stored_provider_quotas()})
-    resets = quota_reset_times("claude")
+    hyperlinks = provider == "claude"
+    # Dashboard links name the provider whose rows these are.
+    linked = {**session, "provider": provider}
+    quotas = plan_quota_values({"account_quotas": stored_provider_quotas()}, provider)
+    resets = quota_reset_times(provider)
     width = statusline_width()
     cells = 13 if width < 62 else 14
     quota_stale = session.get("quota_status") == "stale"
@@ -466,11 +503,18 @@ def claude_statusline_rows(
         color = "1;38;5;245"
     segments = [terminal_style(label, color)]
     if usage_mode in {"api_billed", "exhausted"}:
-        reset = paying_reset_in("claude") if usage_mode == "exhausted" else None
+        reset = paying_reset_in(provider) if usage_mode == "exhausted" else None
         if reset:
             segments.append(terminal_style(f"Limits reset in {reset}", "38;5;245"))
+        # Paying Codex sessions draw on monthly credits, as the text box shows too.
+        if provider == "codex" and "monthly" in quotas:
+            segments.append(compact_status_meter("Credits", quotas["monthly"], cells))
     else:
         for meter_label, period in (("5h", "five_hour"), ("Week", "weekly")):
+            # Claude always has both windows, so a gap there is a fetch gap worth showing;
+            # Codex plans can lack one entirely.
+            if provider != "claude" and period not in quotas:
+                continue
             segments.append(
                 compact_status_meter(
                     meter_label, quotas.get(period), cells, resets.get(period)
@@ -487,7 +531,9 @@ def claude_statusline_rows(
             and raw_window > 0
         ):
             context = raw_context / raw_window * 100
-    rows.append(context_meter(session, context if context is not None else 0.0))
+    rows.append(
+        context_meter(linked, context if context is not None else 0.0, hyperlinks)
+    )
     forecast_row: str | None = None
     if usage_mode in {"api_billed", "exhausted"}:
         paid = session.get("total_cost_usd")
@@ -520,8 +566,12 @@ def claude_statusline_rows(
                 + terminal_style("forecasted in next 10 prompts", "38;5;245")
             )
     elif usage_mode == "included":
-        attribution = quota_window_value(session, "five_hour", "estimated_percent")
-        forecast = quota_window_value(session, "five_hour", "projected_next_10_percent")
+        # Same forecast window as the hook boxes: Codex sessions are bound by the week.
+        period, period_label = (
+            ("weekly", "weekly") if provider == "codex" else ("five_hour", "5h")
+        )
+        attribution = quota_window_value(session, period, "estimated_percent")
+        forecast = quota_window_value(session, period, "projected_next_10_percent")
         if attribution is not None and forecast is not None:
             projected = min(100.0, attribution + forecast)
             forecast_row = (
@@ -529,7 +579,7 @@ def claude_statusline_rows(
                 + " "
                 + terminal_style(f"{attribution:.1f}%", "1;38;5;255")
                 + " "
-                + terminal_style("of 5h limit", "38;5;245")
+                + terminal_style(f"of {period_label} limit", "38;5;245")
                 + " "
                 + terminal_style("━━━▶", "1;38;5;141")
                 + " "
@@ -539,7 +589,7 @@ def claude_statusline_rows(
             )
     if forecast_row is not None:
         rows.append(forecast_row)
-    rows.append(cli_dashboard_line())
+    rows.append(cli_dashboard_line(linked, hyperlinks))
     return rows
 
 
@@ -575,7 +625,7 @@ def statusline() -> None:
         if context_percent is None:
             context_percent = 0.0
     # Claude's context is live, but its rate-limit payload can lag the provider API.
-    rows = claude_statusline_rows(session, context_percent)
+    rows = statusline_rows(session, context_percent)
     for row in rows:
         print(row)
 
@@ -1046,6 +1096,24 @@ def silent_hook(hook: Callable[[], None]) -> Callable[[], None]:
     return guarded
 
 
+def codex_renders_ansi(transcript: Path) -> bool:
+    """Whether this Codex session's TUI shows hook colors instead of raw escape codes.
+
+    Desktop shows the Stop message as plain text in its hook dialog, so it keeps the text box.
+    """
+    version = codex_cli_version(transcript)
+    return (
+        version is not None
+        and version >= CODEX_ANSI_HOOK_VERSION
+        and codex_client_in_file(transcript) != "desktop"
+    )
+
+
+def framed_rows(rows: list[str]) -> list[str]:
+    """Wrap rows in the hook usage box's left border."""
+    return ["╭─", *(f"│ {row}" for row in rows), "╰─"]
+
+
 @silent_hook
 def codex_hook() -> None:
     """Return the boxed Codex usage message at the end of a completed turn."""
@@ -1070,7 +1138,11 @@ def codex_hook() -> None:
     if not isinstance(session, dict):
         print(SUPPRESS_OUTPUT)
         return
-    lines = usage_box_lines(session, recorded_quota_usage_text("codex"), "codex")
+    lines = (
+        framed_rows(statusline_rows(session, None, "codex"))
+        if codex_renders_ansi(transcript)
+        else usage_box_lines(session, recorded_quota_usage_text("codex"), "codex")
+    )
     print(json.dumps({"systemMessage": "\n" + "\n".join(lines)}))
     record_usage_shown("codex", session_id)
 

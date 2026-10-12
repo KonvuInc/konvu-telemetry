@@ -35,6 +35,7 @@ from konvu_telemetry.config import (
 )
 from konvu_telemetry.cli import build_parser, main as cli_main
 from konvu_telemetry.display import (
+    ANSI_ESCAPE,
     _session_tool_calls,
     claude_hook,
     claude_prompt_hook,
@@ -2150,6 +2151,7 @@ class ServiceTests(unittest.TestCase):
         session: dict[str, object] | None,
         turn_tool_calls: int = 1,
         health: object = None,
+        cli_version: tuple[int, ...] | None = None,
     ) -> str:
         """Run a Codex hook against one recorded client and return its stdout."""
         session_id = "00000000-0000-0000-0000-000000000001"
@@ -2175,6 +2177,9 @@ class ServiceTests(unittest.TestCase):
                 return_value=turn_tool_calls,
             ),
             patch("konvu_telemetry.display.codex_client_in_file", return_value=client),
+            patch(
+                "konvu_telemetry.display.codex_cli_version", return_value=cli_version
+            ),
             patch("konvu_telemetry.display.refreshed_session", return_value=session),
             patch(
                 "konvu_telemetry.display.recorded_quota_usage_text",
@@ -2218,6 +2223,74 @@ class ServiceTests(unittest.TestCase):
             json.loads(self.run_codex_hook(codex_hook, "desktop", session)).keys(),
             {"systemMessage"},
         )
+
+    def test_codex_stop_hook_renders_the_status_line_from_codex_0_162(self) -> None:
+        session = {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "provider": "codex",
+            "usage_mode": "included",
+            "context_tokens": 650,
+            "context_window_tokens": 1000,
+        }
+        quotas = {"codex": {"windows": [{"period": "weekly", "used_percent": 3.0}]}}
+        with (
+            patch.dict(os.environ, {"NO_COLOR": "", "TERM": "xterm-256color"}),
+            patch(
+                "konvu_telemetry.display.stored_provider_quotas", return_value=quotas
+            ),
+        ):
+            colored = json.loads(
+                self.run_codex_hook(
+                    codex_hook,
+                    "cli",
+                    session,
+                    health={"status": "healthy"},
+                    cli_version=(0, 162, 0),
+                )
+            )["systemMessage"]
+            older = json.loads(
+                self.run_codex_hook(
+                    codex_hook,
+                    "cli",
+                    session,
+                    health={"status": "healthy"},
+                    cli_version=(0, 161, 9),
+                )
+            )["systemMessage"]
+            desktop = json.loads(
+                self.run_codex_hook(
+                    codex_hook,
+                    "desktop",
+                    session,
+                    health={"status": "healthy"},
+                    cli_version=(0, 162, 0),
+                )
+            )["systemMessage"]
+            unknown = json.loads(
+                self.run_codex_hook(
+                    codex_hook, "cli", session, health={"status": "healthy"}
+                )
+            )["systemMessage"]
+
+        lines = colored.split("\n")
+        self.assertEqual((lines[1], lines[-1]), ("╭─", "╰─"))
+        self.assertTrue(all(line.startswith("│ ") for line in lines[2:-1]))
+        plain = ANSI_ESCAPE.sub("", colored)
+        self.assertIn("● Included", plain)
+        self.assertIn("Week", plain)
+        # Codex reports no five-hour window here, so no empty meter stands in for it.
+        self.assertNotIn("5h", plain)
+        self.assertIn("\x1b[48;5;", colored)
+        # Codex drops OSC 8 links and would swallow the rest of the message after one.
+        self.assertNotIn("\x1b]8", colored)
+        self.assertIn(
+            "🔗 View session in dashboard http://127.0.0.1:7824/"
+            "?session=codex%3A00000000-0000-0000-0000-000000000001",
+            plain,
+        )
+        for fallback in (older, desktop, unknown):
+            self.assertNotIn("\x1b[", fallback)
+            self.assertIn("│ 🟢 Included", fallback)
 
     def test_codex_prompt_hook_injects_context_only_for_the_desktop_originator(
         self,
@@ -2493,8 +2566,11 @@ class ServiceTests(unittest.TestCase):
             self.assertIn(
                 f"│ 🔗 Open live dashboard {link}\n╰─", outputs[surface], surface
             )
+        session_link = f"{link}?session=claude%3A00000000-0000-0000-0000-000000000001"
         self.assertTrue(
-            outputs["statusline"].endswith(f"🔗 Open live dashboard {link}\n")
+            outputs["statusline"].endswith(
+                f"🔗 View session in dashboard {session_link}\n"
+            )
         )
 
     def test_every_usage_surface_points_at_setup_when_the_collector_is_not_healthy(
