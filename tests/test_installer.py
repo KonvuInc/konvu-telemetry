@@ -142,6 +142,65 @@ class InstallerTests(unittest.TestCase):
         self.assertIsInstance(recorded.call_args.args[0], float)
         self.assertTrue(recorded.call_args.kwargs["default_enabled"])
 
+    def test_setup_saves_context_refusal_before_starting_collector(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            preferences = home / ".konvu" / "telemetry" / "preferences.json"
+
+            def start_collector(*_args: object, **_kwargs: object) -> None:
+                stored = json.loads(preferences.read_text())
+                self.assertFalse(stored["context_analysis_enabled"])
+                self.assertEqual(stored["context_analysis_consent"], "disabled")
+
+            with (
+                patch.object(installer.Path, "home", return_value=home),
+                patch.object(installer.sys, "platform", "darwin"),
+                patch.object(installer, "validate_integrations"),
+                patch.object(installer, "install_launcher"),
+                patch.object(installer, "install_claude_statusline", return_value="ok"),
+                patch.object(installer, "remove_claude_stop_hook", return_value=False),
+                patch.object(
+                    installer, "install_claude_prompt_hook", return_value="ok"
+                ),
+                patch.object(installer, "install_codex_hook", return_value="ok"),
+                patch.object(installer, "install_codex_prompt_hook", return_value="ok"),
+                patch.object(
+                    installer, "install_launch_agent", side_effect=start_collector
+                ),
+                patch.object(installer, "record_setup_completed"),
+            ):
+                installer.setup(60, False, context_analysis_enabled=False)
+
+    def test_failed_setup_restores_prior_context_choice(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            preferences = home / ".konvu" / "telemetry" / "preferences.json"
+            preferences.parent.mkdir(parents=True)
+            original = b'{"cadence":"never","context_analysis_consent":"enabled"}'
+            preferences.write_bytes(original)
+            with (
+                patch.object(installer.Path, "home", return_value=home),
+                patch.object(installer.sys, "platform", "darwin"),
+                patch.object(installer, "validate_integrations"),
+                patch.object(installer, "install_launcher"),
+                patch.object(installer, "install_claude_statusline", return_value="ok"),
+                patch.object(installer, "remove_claude_stop_hook", return_value=False),
+                patch.object(
+                    installer, "install_claude_prompt_hook", return_value="ok"
+                ),
+                patch.object(installer, "install_codex_hook", return_value="ok"),
+                patch.object(installer, "install_codex_prompt_hook", return_value="ok"),
+                patch.object(
+                    installer,
+                    "install_launch_agent",
+                    side_effect=OSError("launch failed"),
+                ),
+                patch.object(installer, "stop_launch_agent", return_value=False),
+            ):
+                with self.assertRaisesRegex(OSError, "launch failed"):
+                    installer.setup(60, False, context_analysis_enabled=False)
+            self.assertEqual(preferences.read_bytes(), original)
+
     def test_setup_stores_a_suppression_opt_out_before_the_collector_starts(
         self,
     ) -> None:

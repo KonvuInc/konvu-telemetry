@@ -20,8 +20,9 @@ from pathlib import Path
 from typing import Literal
 
 from .config import package_version
-from .preferences import ensure_preferences_file
+from .preferences import ensure_preferences_file, write_preferences
 from .service import load_health
+from .storage import preferences_path
 from .tracking import record_setup_completed as record_setup_event
 from .tracking import record_setup_failed as record_setup_failure_event
 from .tracking import store_suppression_opt_out
@@ -703,7 +704,10 @@ def wait_for_initial_collection(
 
 
 def setup(
-    interval: int, open_browser: bool, tracking_enabled: bool = True
+    interval: int,
+    open_browser: bool,
+    tracking_enabled: bool = True,
+    context_analysis_enabled: bool | None = None,
 ) -> dict[str, str]:
     if sys.platform != "darwin":
         raise RuntimeError("Konvu setup currently supports macOS only")
@@ -723,6 +727,7 @@ def setup(
         capture_file(claude_statusline_path()),
         capture_file(claude_statusline_original_path()),
         capture_file(claude_statusline_state_path()),
+        capture_file(preferences_path()),
         capture_file(launch_agent_path()),
     ]
     backups = [
@@ -730,7 +735,14 @@ def setup(
     ]
     try:
         install_launcher()
-        ensure_preferences_file()
+        preferences = ensure_preferences_file()
+        if context_analysis_enabled is not None:
+            write_preferences(
+                preferences["cadence"],
+                preferences["custom_rule"],
+                preferences["jump_percent"],
+                context_analysis_enabled=context_analysis_enabled,
+            )
         claude = install_claude_statusline(ensure_launcher=False, create_backup=False)
         # Older versions installed a Claude Stop hook; the status line covers the CLI now.
         claude_stop_removed = remove_claude_stop_hook(create_backup=False)
