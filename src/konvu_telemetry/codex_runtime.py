@@ -127,9 +127,11 @@ def codex_tui_renders_ansi() -> bool:
     if codex is None or not codex.has_terminal:
         return False
     try:
-        modified = codex.executable.stat().st_mtime
+        status = codex.executable.stat()
     except OSError:
         return False
+    # mv and tar keep a file's build-time mtime; ctime still records when it landed here.
+    modified = max(status.st_mtime, status.st_ctime)
     # ps reports whole seconds, so allow the second the process started in.
     if codex.started_at is not None and modified > codex.started_at + 1:
         return False

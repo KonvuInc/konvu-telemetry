@@ -545,6 +545,11 @@ class CodexRuntimeTests(unittest.TestCase):
         self.assertFalse(
             self.renders("codex-cli 0.163.0\n", started_at=self.mtime - 60)
         )
+        # A release extracted or moved into place keeps its old build mtime.
+        os.utime(self.binary, (0, 0))
+        self.assertFalse(
+            self.renders("codex-cli 0.163.0\n", started_at=self.mtime - 60)
+        )
 
     def test_the_nearest_codex_ancestor_is_the_hook_binary(self) -> None:
         codex = AncestorProcess(1, Path("/Users/me/.local/bin/codex"), True, None)
