@@ -3,7 +3,7 @@ from collections.abc import Callable
 from contextlib import nullcontext, redirect_stderr
 from datetime import datetime, timezone
 import errno
-from io import StringIO
+from io import BytesIO, StringIO
 import os
 import subprocess
 import sys
@@ -416,6 +416,10 @@ class ServiceTests(unittest.TestCase):
         prices = load_pricing()
 
         self.assertEqual(claude_context_window("claude-opus-5-5", prices), 1_000_000)
+        self.assertEqual(claude_context_window("claude-sonnet-5-5", prices), 1_000_000)
+        self.assertEqual(prices["claude-sonnet-5-5"]["input"], 0.000002)
+        self.assertEqual(prices["claude-sonnet-5-5"]["output"], 0.00001)
+        self.assertEqual(prices["claude-sonnet-5-5"]["cache_read"], 0.0000001)
         self.assertEqual(prices["claude-opus-5-5"]["input"], 0.000004)
         self.assertEqual(prices["claude-opus-5-5"]["output"], 0.00002)
         for model, input_rate, output_rate in (
@@ -2236,6 +2240,8 @@ class ServiceTests(unittest.TestCase):
         payload_extra: dict[str, object] | None = None,
         quota_text: str = "",
         retained: dict[str, object] | None = None,
+        quotas: dict[str, object] | None = None,
+        transcript: Path | None = Path("session.jsonl"),
     ) -> str:
         """Render the Claude CLI status line against one session and health state."""
         session_id = "00000000-0000-0000-0000-000000000001"
@@ -2246,7 +2252,7 @@ class ServiceTests(unittest.TestCase):
             patch.object(sys, "stdout", stdout),
             patch(
                 "konvu_telemetry.display.claude_hook_transcript",
-                return_value=Path("session.jsonl"),
+                return_value=transcript,
             ),
             patch("konvu_telemetry.display.refreshed_session", return_value=session),
             patch("konvu_telemetry.display.retained_session", return_value=retained),
@@ -2254,7 +2260,10 @@ class ServiceTests(unittest.TestCase):
                 "konvu_telemetry.display.recorded_quota_usage_text",
                 return_value=quota_text,
             ),
-            patch("konvu_telemetry.display.stored_provider_quotas", return_value={}),
+            patch(
+                "konvu_telemetry.display.stored_provider_quotas",
+                return_value=quotas or {},
+            ),
             health_patch(health),
         ):
             statusline()
@@ -2269,6 +2278,47 @@ class ServiceTests(unittest.TestCase):
         )
         self.assertIn("● Included", output)
         self.assertNotIn("collector starting", output)
+
+    def test_new_claude_session_shows_limits_and_zero_context_before_collection(
+        self,
+    ) -> None:
+        quotas = {
+            "claude": {
+                "windows": [
+                    {"period": "five_hour", "used_percent": 0.0, "resets_at": None},
+                    {"period": "weekly", "used_percent": 18.0, "resets_at": None},
+                ]
+            }
+        }
+        with patch.dict(os.environ, {"NO_COLOR": "1"}):
+            output = self.run_statusline(
+                None, {"status": "healthy"}, quotas=quotas, transcript=None
+            )
+        self.assertIn("● Included", output)
+        self.assertIn("5h", output)
+        self.assertIn("Week", output)
+        self.assertIn("Context ──────────────── 0%", output)
+        self.assertNotIn("forecasted", output)
+        self.assertNotIn("collector starting", output)
+        self.assertNotIn("□", output)
+
+        with patch.dict(os.environ, {"NO_COLOR": "1"}):
+            live_context = self.run_statusline(
+                None,
+                {"status": "healthy"},
+                {"context_window": {"used_percentage": 9.0}},
+                quotas=quotas,
+                transcript=None,
+            )
+        self.assertIn("Context ━─────────────── 9%", live_context)
+
+    def test_new_claude_session_keeps_the_hud_without_recorded_limits(self) -> None:
+        with patch.dict(os.environ, {"NO_COLOR": "1"}):
+            output = self.run_statusline(None, {"status": "healthy"}, transcript=None)
+        self.assertIn("5h ────────────── —", output)
+        self.assertIn("Week ────────────── —", output)
+        self.assertIn("Context ──────────────── 0%", output)
+        self.assertNotIn("forecast", output.lower())
 
     def surface_outputs(self, health: object) -> dict[str, str]:
         """Render the text all four usage surfaces show for one collector health state."""
@@ -2402,8 +2452,10 @@ class ServiceTests(unittest.TestCase):
                 {"context_window": {"used_percentage": 50.0}},
             )
         self.assertIn("Subscription limits unavailable · retrying", output)
+        self.assertIn("5h ────────────── —", output)
+        self.assertIn("Week ────────────── —", output)
         self.assertIn("Context ━━━━━━━━────────", output)
-        self.assertIn("📈 Subscription forecast unavailable", output)
+        self.assertNotIn("forecast", output.lower())
         self.assertNotIn("API-equivalent", output)
 
     def test_stale_subscription_marks_the_new_hud_as_retrying(self) -> None:
@@ -2470,10 +2522,12 @@ class ServiceTests(unittest.TestCase):
                 },
                 current_quotas,
             )
-        self.assertIn("● Paying\n", output)
+        self.assertIn("● Paying", output)
+        self.assertNotIn("5h ", output)
+        self.assertNotIn("Week ", output)
         self.assertIn("Context", output)
         self.assertIn("87%", output)
-        self.assertIn("Current spend $25.4 ━━━▶ $30.3", output)
+        self.assertIn("Estimated paid spend $25.4 ━━━▶ $30.3", output)
         self.assertIn("forecasted in next 10 prompts", output)
         self.assertNotIn("11.0% 5-hour limit", output)
         self.assertNotIn("52.0% weekly limit", output)
@@ -2841,6 +2895,32 @@ class ServiceTests(unittest.TestCase):
         handler.refresh_coordinator.request_refresh.assert_called_once_with()
         handler.send_response.assert_called_once_with(200)
         handler._write_payload.assert_called_once_with(b'{"status": "healthy"}')
+
+    def test_manual_context_analysis_endpoint_queues_one_session(self) -> None:
+        handler = object.__new__(DashboardRequestHandler)
+        handler.headers = {
+            "Host": "127.0.0.1:7824",
+            "Origin": "http://localhost:7824",
+            "Content-Length": "53",
+        }
+        body = b'{"provider":"codex","session":"01a041b4-30c4-7e70-a9f6-19df219a6643"}'
+        handler.headers["Content-Length"] = str(len(body))
+        handler.rfile = BytesIO(body)
+        handler.path = "/api/context-analysis"
+        handler.refresh_coordinator = Mock(request_refresh=Mock(return_value=None))
+        handler.context_drift = Mock(
+            request_manual=Mock(return_value=True),
+            manual_result=Mock(return_value="scheduled"),
+        )
+        handler._send_json = Mock()
+
+        DashboardRequestHandler.do_POST(handler)
+
+        handler.context_drift.request_manual.assert_called_once_with(
+            "codex", "01a041b4-30c4-7e70-a9f6-19df219a6643"
+        )
+        handler.refresh_coordinator.request_refresh.assert_called_once_with()
+        handler._send_json.assert_called_once_with({"status": "scheduled"}, 202)
 
     def test_first_snapshot_with_session_data_is_recorded(self) -> None:
         service._DASHBOARD_DATA_AVAILABLE = False

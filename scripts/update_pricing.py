@@ -23,6 +23,21 @@ MAX_PAYLOAD_BYTES = 20 * 1024 * 1024
 
 # Provider-published models newer than the pinned LiteLLM snapshot.
 OFFICIAL_MODEL_OVERRIDES: dict[str, dict[str, object]] = {
+    "claude-sonnet-5-5": {
+        "cache_creation_input_token_cost": 0.0000025,
+        "cache_creation_input_token_cost_above_1hr": 0.000004,
+        "cache_read_input_token_cost": 0.0000001,
+        "input_cost_per_token": 0.000002,
+        "litellm_provider": "anthropic",
+        "max_input_tokens": 1_000_000,
+        "max_output_tokens": 128_000,
+        "mode": "chat",
+        "output_cost_per_token": 0.00001,
+        "search_context_cost_per_query": {
+            "search_context_size_medium": 0.01,
+        },
+        "source": "https://platform.claude.com/docs/en/models/sonnet-5-5/whats-new-sonnet-5-5",
+    },
     "claude-opus-5-5": {
         "cache_creation_input_token_cost": 0.000005,
         "cache_creation_input_token_cost_above_1hr": 0.000008,

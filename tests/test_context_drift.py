@@ -817,6 +817,57 @@ class ContextDriftTests(unittest.TestCase):
         self.assertEqual(stored["analysis"]["state"], "ready")
         self.assertNotIn("limit_usage", stored["analysis"]["summary"])
 
+    def test_manual_pass_resets_ten_prompt_cadence(self) -> None:
+        state = json.loads(context_map_path("codex", SESSION_ID).read_text())
+        state["iteration"] = 4
+        state["epochs"][0]["events"] = self.events[:4]
+        state["summary"]["iteration"] = 4
+        write_private_json(context_map_path("codex", SESSION_ID), state)
+        snapshot = self.snapshot()
+        snapshot["sessions"][0]["context_map"]["iteration"] = 4
+        runner = Mock(side_effect=self.outcome)
+        scheduler = ContextDriftScheduler(runner)
+
+        scheduler.refresh(snapshot, self.quotas(), NOW)
+        runner.assert_not_called()
+        self.assertTrue(scheduler.request_manual("codex", SESSION_ID))
+        scheduler.refresh(snapshot, self.quotas(), NOW + 1)
+        self.assertEqual(scheduler.manual_result("codex", SESSION_ID), "scheduled")
+        self.assertFalse(scheduler.request_manual("codex", SESSION_ID))
+        self.assertTrue(scheduler.wait_for_idle())
+        scheduler.refresh(snapshot, self.quotas(), NOW + 2)
+        stored = json.loads(context_map_path("codex", SESSION_ID).read_text())
+        self.assertEqual(stored["analysis"]["analyzed_iteration"], 4)
+        self.assertTrue(scheduler.request_manual("codex", SESSION_ID))
+        scheduler.refresh(snapshot, self.quotas(), NOW + 3)
+        self.assertEqual(scheduler.manual_result("codex", SESSION_ID), "unavailable")
+        stored["current_epoch"] = 1
+        stored["epochs"].append(
+            {"index": 1, "events": self.events[:4], "categories": {"prompts": 100}}
+        )
+        write_private_json(context_map_path("codex", SESSION_ID), stored)
+        snapshot["sessions"][0]["context_map"]["epoch"] = 1
+        self.assertTrue(scheduler.request_manual("codex", SESSION_ID))
+        scheduler.refresh(snapshot, self.quotas(), NOW + 4)
+        self.assertEqual(scheduler.manual_result("codex", SESSION_ID), "scheduled")
+        self.assertTrue(scheduler.wait_for_idle())
+        scheduler.refresh(snapshot, self.quotas(), NOW + 5)
+        stored = json.loads(context_map_path("codex", SESSION_ID).read_text())
+        self.assertEqual(stored["analysis"]["epoch"], 1)
+        self.assertEqual(stored["analysis"]["summary"]["epoch"], 1)
+        stored["iteration"] = 13
+        self.assertIsNone(scheduler._due(stored))
+        stored["iteration"] = 14
+        self.assertEqual(scheduler._due(stored), "delta")
+        self.assertEqual(runner.call_count, 2)
+
+    def test_manual_pass_still_obeys_plan_reserve(self) -> None:
+        scheduler = ContextDriftScheduler(Mock(side_effect=self.outcome))
+        self.assertTrue(scheduler.request_manual("codex", SESSION_ID))
+        scheduler.refresh(self.snapshot(), self.quotas(95), NOW)
+        self.assertEqual(scheduler.manual_result("codex", SESSION_ID), "unavailable")
+        self.assertTrue(scheduler.wait_for_idle())
+
     def test_pass_records_mode_breakdown_and_api_price(self) -> None:
         scheduler = ContextDriftScheduler(Mock(side_effect=self.outcome))
         scheduler.refresh(self.snapshot(), self.quotas(), NOW)
