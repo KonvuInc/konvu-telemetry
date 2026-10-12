@@ -24,6 +24,8 @@ from .preferences import ensure_preferences_file, write_preferences
 from .service import load_health
 from .storage import preferences_path
 from .tracking import record_setup_completed as record_setup_event
+from .tracking import record_setup_failed as record_setup_failure_event
+from .tracking import store_suppression_opt_out
 
 LABEL = "com.konvu.telemetry"
 PORT = 7824
@@ -40,6 +42,11 @@ INITIAL_COLLECTION_WAIT_SECONDS = 15.0
 def record_setup_completed(duration_seconds: float, *, default_enabled: bool) -> None:
     """Record the completed setup when the user enabled product analytics."""
     record_setup_event(duration_seconds, default_enabled=default_enabled)
+
+
+def record_setup_failed(stage: str, *, default_enabled: bool) -> None:
+    """Record the setup stage that failed when the user enabled product analytics."""
+    record_setup_failure_event(stage, default_enabled=default_enabled)
 
 
 @dataclass(frozen=True)
@@ -705,7 +712,13 @@ def setup(
     if sys.platform != "darwin":
         raise RuntimeError("Konvu setup currently supports macOS only")
     started_at = time.monotonic()
-    validate_integrations()
+    # Before the collector starts, or it sends events the shell asked to suppress.
+    store_suppression_opt_out()
+    try:
+        validate_integrations()
+    except Exception:
+        record_setup_failed("integrations", default_enabled=tracking_enabled)
+        raise
     claude_path, codex_path = integration_paths()
     states = [
         capture_file(claude_path),
@@ -747,6 +760,7 @@ def setup(
         restore_installation(states, states[-1].contents is not None)
         for path in backups:
             path.unlink(missing_ok=True)
+        record_setup_failed("install", default_enabled=tracking_enabled)
         raise
     if open_browser:
         wait_for_initial_collection(collection_started_after)
