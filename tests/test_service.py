@@ -1,8 +1,11 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable
 from contextlib import nullcontext, redirect_stderr
 from datetime import datetime, timezone
 import errno
+from functools import partial
+from http.server import ThreadingHTTPServer
 from io import BytesIO, StringIO
 import os
 import subprocess
@@ -14,6 +17,8 @@ import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -1801,7 +1806,12 @@ class ServiceTests(unittest.TestCase):
 
     def test_dashboard_open_records_whether_visible_data_exists(self) -> None:
         handler = object.__new__(DashboardRequestHandler)
-        handler.headers = {"Host": "127.0.0.1:7824"}
+        handler.server = Mock(server_port=7824)
+        handler.auth_secret = "test-secret"
+        handler.headers = {
+            "Host": "127.0.0.1:7824",
+            "Cookie": "konvu_dashboard=test-secret",
+        }
         handler.path = "/"
         with tempfile.TemporaryDirectory() as directory:
             snapshot = Path(directory) / "live-sessions.json"
@@ -1816,7 +1826,12 @@ class ServiceTests(unittest.TestCase):
 
     def test_dashboard_open_does_not_read_snapshot_for_analytics(self) -> None:
         handler = object.__new__(DashboardRequestHandler)
-        handler.headers = {"Host": "127.0.0.1:7824"}
+        handler.server = Mock(server_port=7824)
+        handler.auth_secret = "test-secret"
+        handler.headers = {
+            "Host": "127.0.0.1:7824",
+            "Cookie": "konvu_dashboard=test-secret",
+        }
         handler.path = "/"
         with (
             patch.object(service, "_DASHBOARD_DATA_AVAILABLE", True, create=True),
@@ -2879,7 +2894,13 @@ class ServiceTests(unittest.TestCase):
 
     def test_dashboard_refresh_endpoint_requests_collection(self) -> None:
         handler = object.__new__(DashboardRequestHandler)
-        handler.headers = {"Host": "127.0.0.1:7824", "Origin": "http://localhost:7824"}
+        handler.server = Mock(server_port=7824)
+        handler.auth_secret = "test-secret"
+        handler.headers = {
+            "Host": "127.0.0.1:7824",
+            "Origin": "http://127.0.0.1:7824",
+            "Cookie": "konvu_dashboard=test-secret",
+        }
         handler.path = "/api/refresh"
         handler.refresh_coordinator = Mock()
         handler.refresh_coordinator.request_refresh.return_value = None
@@ -2898,9 +2919,12 @@ class ServiceTests(unittest.TestCase):
 
     def test_manual_context_analysis_endpoint_queues_one_session(self) -> None:
         handler = object.__new__(DashboardRequestHandler)
+        handler.server = Mock(server_port=7824)
+        handler.auth_secret = "test-secret"
         handler.headers = {
             "Host": "127.0.0.1:7824",
-            "Origin": "http://localhost:7824",
+            "Origin": "http://127.0.0.1:7824",
+            "Cookie": "konvu_dashboard=test-secret",
             "Content-Length": "53",
         }
         body = b'{"provider":"codex","session":"01a041b4-30c4-7e70-a9f6-19df219a6643"}'
@@ -2956,11 +2980,243 @@ class ServiceTests(unittest.TestCase):
         self.assertTrue(
             local_request_allowed("localhost:7824", "http://localhost:7824")
         )
+        self.assertTrue(
+            local_request_allowed(
+                "127.0.0.1:9999", "http://127.0.0.1:9999", 9999, write=True
+            )
+        )
+        self.assertFalse(local_request_allowed("127.0.0.1:7824", None, write=True))
+        for origin in (
+            "http://localhost:7824",
+            "http://127.0.0.1:9999",
+            "https://127.0.0.1:7824",
+            "http://evil@127.0.0.1:7824",
+        ):
+            self.assertFalse(
+                local_request_allowed("127.0.0.1:7824", origin, write=True)
+            )
+        self.assertFalse(local_request_allowed("127.0.0.1:9999", None))
         self.assertFalse(local_request_allowed("evil.example:7824", None))
         self.assertFalse(local_request_allowed("127.0.0.1:7824", "null"))
         self.assertFalse(
             local_request_allowed("127.0.0.1:7824", "file:///tmp/dashboard.html")
         )
+
+    def test_dashboard_http_requires_cookie_and_exact_write_origin(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "live-sessions.json").write_text(
+                '{"sessions":[],"generated_at":"2026-01-01T00:00:00Z"}'
+            )
+            (root / "health.json").write_text(
+                '{"status":"error","last_error":"/private/customer/path",'
+                '"next_poll_at":"2026-01-01T00:00:00Z","interval_seconds":60}'
+            )
+            coordinator = Mock(request_refresh=Mock(return_value=None))
+            handler = partial(
+                DashboardRequestHandler,
+                directory=str(Path(service.__file__).with_name("dashboard")),
+                refresh_coordinator=coordinator,
+                auth_secret="test-secret",
+            )
+            server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            worker = Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            try:
+                with patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}):
+
+                    def status(
+                        path: str,
+                        *,
+                        method: str = "GET",
+                        headers: dict[str, str] | None = None,
+                    ) -> tuple[int, bytes, object]:
+                        request = Request(
+                            base + path, method=method, headers=headers or {}
+                        )
+                        try:
+                            with urlopen(request, timeout=2) as response:
+                                return (
+                                    response.status,
+                                    response.read(),
+                                    response.headers,
+                                )
+                        except HTTPError as error:
+                            with error:
+                                return error.code, error.read(), error.headers
+
+                    self.assertEqual(status("/api/live-sessions")[0], 401)
+                    health_status, public_health, _ = status("/healthz")
+                    self.assertEqual(health_status, 503)
+                    self.assertEqual(json.loads(public_health), {"status": "error"})
+                    self.assertNotIn(b"/private/customer/path", public_health)
+                    self.assertEqual(
+                        status(
+                            "/api/auth",
+                            method="POST",
+                            headers={"Origin": base, "Authorization": "Bearer wrong"},
+                        )[0],
+                        401,
+                    )
+                    self.assertEqual(
+                        status(
+                            "/api/auth",
+                            method="POST",
+                            headers={
+                                "Origin": base,
+                                "Authorization": "Bearer " + "a" * 43,
+                            },
+                        )[0],
+                        401,
+                    )
+                    ticket = service.dashboard_open_url(server.server_port).split(
+                        "#token=", 1
+                    )[1]
+                    code, _, response_headers = status(
+                        "/api/auth",
+                        method="POST",
+                        headers={"Origin": base, "Authorization": f"Bearer {ticket}"},
+                    )
+                    self.assertEqual(code, 204)
+                    self.assertEqual(
+                        status(
+                            "/api/auth",
+                            method="POST",
+                            headers={
+                                "Origin": base,
+                                "Authorization": f"Bearer {ticket}",
+                            },
+                        )[0],
+                        401,
+                    )
+                    cookie = response_headers["Set-Cookie"].split(";", 1)[0]
+                    self.assertIn(
+                        "HttpOnly; SameSite=Strict", response_headers["Set-Cookie"]
+                    )
+                    self.assertEqual(
+                        status("/api/live-sessions", headers={"Cookie": cookie})[0],
+                        200,
+                    )
+                    _, private_health, _ = status(
+                        "/healthz", headers={"Cookie": cookie}
+                    )
+                    self.assertEqual(
+                        json.loads(private_health)["last_error"],
+                        "/private/customer/path",
+                    )
+                    for origin in (
+                        None,
+                        "http://localhost:7824",
+                        "http://127.0.0.1:9999",
+                        "null",
+                    ):
+                        headers = {"Cookie": cookie}
+                        if origin is not None:
+                            headers["Origin"] = origin
+                        self.assertEqual(
+                            status("/api/refresh", method="POST", headers=headers)[0],
+                            403,
+                        )
+                    self.assertEqual(
+                        status(
+                            "/api/refresh",
+                            method="POST",
+                            headers={"Cookie": cookie, "Origin": base},
+                        )[0],
+                        200,
+                    )
+                    coordinator.request_refresh.assert_called_once_with()
+                    expired = service.dashboard_open_url(server.server_port).split(
+                        "#token=", 1
+                    )[1]
+                    service._dashboard_ticket_path(expired).write_text("0")
+                    self.assertEqual(
+                        status(
+                            "/api/auth",
+                            method="POST",
+                            headers={
+                                "Origin": base,
+                                "Authorization": f"Bearer {expired}",
+                            },
+                        )[0],
+                        401,
+                    )
+                    opened = [
+                        service.dashboard_open_url(server.server_port).split(
+                            "#token=", 1
+                        )[1]
+                        for _ in range(2)
+                    ]
+                    with ThreadPoolExecutor(max_workers=2) as pool:
+                        codes = list(
+                            pool.map(
+                                lambda value: status(
+                                    "/api/auth",
+                                    method="POST",
+                                    headers={
+                                        "Origin": base,
+                                        "Authorization": f"Bearer {value}",
+                                    },
+                                )[0],
+                                opened,
+                            )
+                        )
+                    self.assertEqual(codes, [204, 204])
+                    raced = service.dashboard_open_url(server.server_port).split(
+                        "#token=", 1
+                    )[1]
+                    with ThreadPoolExecutor(max_workers=2) as pool:
+                        codes = list(
+                            pool.map(
+                                lambda _: status(
+                                    "/api/auth",
+                                    method="POST",
+                                    headers={
+                                        "Origin": base,
+                                        "Authorization": f"Bearer {raced}",
+                                    },
+                                )[0],
+                                range(2),
+                            )
+                        )
+                    self.assertEqual(sorted(codes), [204, 401])
+            finally:
+                server.shutdown()
+                server.server_close()
+                worker.join(2)
+
+    def test_dashboard_secret_is_private_and_stable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}):
+                first = service.dashboard_secret()
+                self.assertEqual(first, service.dashboard_secret())
+                self.assertGreaterEqual(len(first), 32)
+                secret_path = Path(directory) / "dashboard-secret"
+                self.assertEqual(
+                    secret_path.stat().st_mode & 0o777,
+                    0o600,
+                )
+                url = service.dashboard_open_url(7824)
+                self.assertTrue(url.startswith("http://127.0.0.1:7824/#token="))
+                self.assertNotIn(first, url)
+                ticket = url.split("#token=", 1)[1]
+                ticket_path = service._dashboard_ticket_path(ticket)
+                os.utime(ticket_path, (0, 0))
+                stale = [
+                    ticket_path.parent / f"dashboard-ticket-stale-{index}"
+                    for index in range(40)
+                ]
+                for old in stale:
+                    old.write_text("0")
+                    os.utime(old, (0, 0))
+                service.dashboard_open_url(7824)
+                self.assertFalse(ticket_path.exists())
+                self.assertFalse(any(old.exists() for old in stale))
+                secret_path.rename(Path(directory) / "actual-secret")
+                secret_path.symlink_to("actual-secret")
+                with self.assertRaises(OSError):
+                    service.dashboard_secret()
 
     def test_session_paths_reject_path_traversal(self) -> None:
         for session_id in ("../../outside", "<img src=x onerror=alert(1)>", ""):

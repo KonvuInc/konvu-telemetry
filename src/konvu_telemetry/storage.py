@@ -144,6 +144,10 @@ def health_path() -> Path:
     return home_dir() / "health.json"
 
 
+def dashboard_secret_path() -> Path:
+    return home_dir() / "dashboard-secret"
+
+
 def collector_lock_path() -> Path:
     return home_dir() / "collector.lock"
 

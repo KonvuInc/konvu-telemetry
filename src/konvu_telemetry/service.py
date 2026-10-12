@@ -7,23 +7,30 @@ from datetime import datetime, timezone
 import errno
 import fcntl
 from functools import partial
+import hashlib
+from http.cookies import SimpleCookie
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
 import os
+import re
+import secrets
 from pathlib import Path
 from socket import socket
 from socketserver import BaseServer
 import signal
+import stat
 import subprocess
+import tempfile
 from threading import Condition, Lock, Thread
 import time
-from typing import IO, Callable, Iterator
+from typing import IO, Callable, Iterator, cast
 from urllib.parse import parse_qs, urlparse
 import webbrowser
 
 from .config import (
     ALLOWED_PROVIDERS,
+    DASHBOARD_PORT,
     DEFAULT_HEALTH_STALE_SECONDS,
     LIVE_ACTIVITY_SECONDS,
     package_version,
@@ -47,6 +54,8 @@ from .storage import (
     account_quotas_path,
     collection_lock_path,
     collector_lock_path,
+    dashboard_secret_path,
+    ensure_private_directory,
     health_path,
     parse_timestamp,
     session_path,
@@ -65,6 +74,8 @@ LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost"})
 LOGGER = logging.getLogger(__name__)
 _DASHBOARD_DATA_AVAILABLE = False
 REFRESH_TIMEOUT_SECONDS = 30
+DASHBOARD_TICKET_SECONDS = 60
+_TICKET_PATTERN = re.compile(r"[A-Za-z0-9_-]{43}\Z")
 
 
 # How long a departing collector is given to close its socket and let go.
@@ -283,15 +294,123 @@ def initialize_dashboard_data_available(now: float | None = None) -> None:
     _DASHBOARD_DATA_AVAILABLE = snapshot_has_dashboard_data(snapshot, current_time)
 
 
-def local_request_allowed(host: str, origin: str | None) -> bool:
-    host_name = urlparse(f"//{host}").hostname
-    origin_host = urlparse(origin).hostname if origin is not None else None
-    return host_name in LOCAL_HOSTS and (origin is None or origin_host in LOCAL_HOSTS)
+def local_request_allowed(
+    host: str, origin: str | None, port: int = DASHBOARD_PORT, *, write: bool = False
+) -> bool:
+    try:
+        authority = urlparse(f"//{host}")
+        valid_host = (
+            authority.hostname in LOCAL_HOSTS
+            and authority.port == port
+            and authority.username is None
+            and authority.password is None
+            and authority.path == ""
+            and authority.query == ""
+            and authority.fragment == ""
+            and host == f"{authority.hostname}:{port}"
+        )
+        if not valid_host or (write and origin is None):
+            return False
+        return origin is None or origin == f"http://{host}"
+    except ValueError:
+        return False
+
+
+def dashboard_secret() -> str:
+    """Load or create the owner-only browser credential."""
+    path = dashboard_secret_path()
+    ensure_private_directory(path.parent)
+    if not path.exists():
+        with tempfile.NamedTemporaryFile(
+            mode="w", dir=path.parent, delete=False
+        ) as handle:
+            temporary = Path(handle.name)
+            try:
+                handle.write(secrets.token_urlsafe(32))
+                handle.flush()
+                os.fsync(handle.fileno())
+                try:
+                    os.link(temporary, path)
+                except FileExistsError:
+                    pass
+            finally:
+                temporary.unlink(missing_ok=True)
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(descriptor) as handle:
+        metadata = os.fstat(handle.fileno())
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_mode & 0o077
+        ):
+            raise OSError("Dashboard credential has unsafe permissions")
+        secret = handle.read()
+    if len(secret) < 32:
+        raise OSError("Dashboard credential is invalid")
+    return secret
+
+
+def _dashboard_ticket_path(ticket: str) -> Path:
+    digest = hashlib.sha256(ticket.encode("ascii")).hexdigest()
+    return (
+        dashboard_secret_path().parent
+        / "dashboard-tickets"
+        / f"dashboard-ticket-{digest}"
+    )
+
+
+def dashboard_open_url(port: int) -> str:
+    """Create a short-lived browser bootstrap ticket without exposing the cookie secret."""
+    directory = dashboard_secret_path().parent / "dashboard-tickets"
+    ensure_private_directory(directory)
+    now = time.time()
+    for candidate in directory.iterdir():
+        try:
+            if (
+                candidate.name.startswith("dashboard-ticket-")
+                and candidate.stat().st_mtime < now - DASHBOARD_TICKET_SECONDS
+            ):
+                candidate.unlink()
+        except OSError:
+            pass
+    ticket = secrets.token_urlsafe(32)
+    path = _dashboard_ticket_path(ticket)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w") as handle:
+        handle.write(str(now + DASHBOARD_TICKET_SECONDS))
+        handle.flush()
+        os.fsync(handle.fileno())
+    return f"http://127.0.0.1:{port}/#token={ticket}"
+
+
+def redeem_dashboard_ticket(ticket: str) -> bool:
+    """Consume one valid bootstrap ticket across concurrent server requests."""
+    if _TICKET_PATTERN.fullmatch(ticket) is None:
+        return False
+    path = _dashboard_ticket_path(ticket)
+    if not path.parent.is_dir():
+        return False
+    descriptor, claim_name = tempfile.mkstemp(
+        prefix=".dashboard-claim-", dir=path.parent
+    )
+    os.close(descriptor)
+    claim = Path(claim_name)
+    try:
+        try:
+            os.replace(path, claim)
+        except FileNotFoundError:
+            return False
+        try:
+            return float(claim.read_text()) >= time.time()
+        except (OSError, ValueError):
+            return False
+    finally:
+        claim.unlink(missing_ok=True)
 
 
 def open_dashboard(port: int) -> None:
     """Open the resident local dashboard."""
-    webbrowser.open(f"http://127.0.0.1:{port}/")
+    webbrowser.open(dashboard_open_url(port))
     print("Opening the Konvu dashboard")
 
 
@@ -478,11 +597,26 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
         refresh_coordinator: RefreshCoordinator | None = None,
         snapshot_lock: Lock | None = None,
         context_drift: ContextDriftScheduler | None = None,
+        auth_secret: str | None = None,
     ) -> None:
         self.refresh_coordinator = refresh_coordinator
         self.snapshot_lock = snapshot_lock
         self.context_drift = context_drift
+        self.auth_secret = auth_secret
         super().__init__(request, client_address, server, directory=directory)
+
+    def _authenticated(self) -> bool:
+        secret = getattr(self, "auth_secret", None)
+        if secret is None:
+            return False
+        try:
+            cookies = SimpleCookie(self.headers.get("Cookie", ""))
+            credential = cookies.get("konvu_dashboard")
+        except Exception:
+            return False
+        return credential is not None and secrets.compare_digest(
+            credential.value, secret
+        )
 
     def _write_payload(self, payload: bytes) -> None:
         try:
@@ -512,18 +646,26 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         host = self.headers.get("Host", "")
         origin = self.headers.get("Origin")
-        if not local_request_allowed(host, origin):
+        if not local_request_allowed(
+            host, origin, cast(ThreadingHTTPServer, self.server).server_port
+        ):
             self.send_error(403)
             return
         path = urlparse(self.path).path
-        if path == "/":
+        if path == "/" and self._authenticated():
             record_dashboard_opened(data_available=_DASHBOARD_DATA_AVAILABLE)
         if path == "/healthz":
             health = load_health()
-            payload = json.dumps(health).encode("utf-8")
+            visible_health = (
+                health if self._authenticated() else {"status": health.get("status")}
+            )
+            payload = json.dumps(visible_health).encode("utf-8")
             self.send_response(200 if health.get("status") == "healthy" else 503)
             self._secure_headers("application/json; charset=utf-8", len(payload))
             self._write_payload(payload)
+            return
+        if path.startswith("/api/") and not self._authenticated():
+            self.send_error(401)
             return
         if path == "/api/live-sessions":
             self._serve_live_snapshot()
@@ -615,10 +757,35 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         host = self.headers.get("Host", "")
         origin = self.headers.get("Origin")
-        if not local_request_allowed(host, origin):
+        if not local_request_allowed(
+            host, origin, cast(ThreadingHTTPServer, self.server).server_port, write=True
+        ):
             self.send_error(403)
             return
         path = urlparse(self.path).path
+        if path == "/api/auth":
+            secret = getattr(self, "auth_secret", None)
+            credential = self.headers.get("Authorization", "")
+            ticket = credential.removeprefix("Bearer ")
+            if (
+                secret is None
+                or not credential.startswith("Bearer ")
+                or not redeem_dashboard_ticket(ticket)
+            ):
+                self.send_error(401)
+                return
+            if not self._authenticated():
+                record_dashboard_opened(data_available=_DASHBOARD_DATA_AVAILABLE)
+            self.send_response(204)
+            self.send_header(
+                "Set-Cookie",
+                f"konvu_dashboard={secret}; Path=/; HttpOnly; SameSite=Strict",
+            )
+            self.end_headers()
+            return
+        if not self._authenticated():
+            self.send_error(401)
+            return
         if path == "/api/preferences":
             self._save_preferences()
             return
@@ -781,6 +948,7 @@ def _run_local_service(interval_seconds: int, port: int) -> None:
     handler = partial(
         DashboardRequestHandler,
         directory=str(directory),
+        auth_secret=dashboard_secret(),
         refresh_coordinator=refresh_coordinator,
         snapshot_lock=snapshot_lock,
         context_drift=context_drift,

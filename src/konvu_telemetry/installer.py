@@ -21,7 +21,7 @@ from typing import Literal
 
 from .config import package_version
 from .preferences import ensure_preferences_file
-from .service import load_health
+from .service import dashboard_open_url, load_health
 from .tracking import record_setup_completed as record_setup_event
 
 LABEL = "com.konvu.telemetry"
@@ -738,7 +738,7 @@ def setup(
         raise
     if open_browser:
         wait_for_initial_collection(collection_started_after)
-        webbrowser.open(dashboard)
+        webbrowser.open(dashboard_open_url(PORT))
     record_setup_completed(
         time.monotonic() - started_at,
         default_enabled=tracking_enabled,
