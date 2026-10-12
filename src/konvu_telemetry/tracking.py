@@ -480,8 +480,17 @@ _RETRY_LOCK = Lock()
 _RETRY_TIMER: Timer | None = None
 
 
+def _running_in_ci() -> bool:
+    return os.environ.get("CI", "").strip().lower() not in {"", "0", "false"}
+
+
+def _discard(_payload: bytes) -> None:
+    """Accept a batch without sending it: CI runners are not installs."""
+
+
 def _store() -> TrackingStore:
-    return TrackingStore(tracking_state_path(), tracking_queue_path())
+    sender = _discard if _running_in_ci() else _send_to_posthog
+    return TrackingStore(tracking_state_path(), tracking_queue_path(), sender)
 
 
 def _schedule(event: str, properties: dict[str, object], daily: bool = True) -> None:
