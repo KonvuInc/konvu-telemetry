@@ -1913,9 +1913,12 @@ class ServiceTests(unittest.TestCase):
     def test_track_endpoint_accepts_only_allowlisted_dashboard_actions(self) -> None:
         def post(body: bytes) -> MagicMock:
             handler = object.__new__(DashboardRequestHandler)
+            handler.server = Mock(server_port=7824)
+            handler.auth_secret = "test-secret"
             handler.headers = {
                 "Host": "127.0.0.1:7824",
                 "Origin": "http://127.0.0.1:7824",
+                "Cookie": "konvu_dashboard=test-secret",
                 "Content-Length": str(len(body)),
             }
             handler.path = "/api/track"
@@ -1954,7 +1957,14 @@ class ServiceTests(unittest.TestCase):
         # The request omits analysis, so the stored value is what must be recorded.
         body = json.dumps({"cadence": "every-tool-call"}).encode()
         handler = object.__new__(DashboardRequestHandler)
-        handler.headers = {"Host": "127.0.0.1:7824", "Content-Length": str(len(body))}
+        handler.server = Mock(server_port=7824)
+        handler.auth_secret = "test-secret"
+        handler.headers = {
+            "Host": "127.0.0.1:7824",
+            "Origin": "http://127.0.0.1:7824",
+            "Cookie": "konvu_dashboard=test-secret",
+            "Content-Length": str(len(body)),
+        }
         handler.path = "/api/preferences"
         handler.rfile = Mock(read=Mock(return_value=body))
         handler._send_json = MagicMock()
@@ -1965,7 +1975,7 @@ class ServiceTests(unittest.TestCase):
             "context_analysis_enabled": True,
         }
         with (
-            patch("konvu_telemetry.service.write_preferences", return_value=stored),
+            patch("konvu_telemetry.service.update_preferences", return_value=stored),
             patch("konvu_telemetry.service.record_settings_saved") as recorded,
         ):
             DashboardRequestHandler.do_POST(handler)
@@ -1975,7 +1985,7 @@ class ServiceTests(unittest.TestCase):
         handler.rfile = Mock(read=Mock(return_value=body))
         with (
             patch(
-                "konvu_telemetry.service.write_preferences",
+                "konvu_telemetry.service.update_preferences",
                 return_value={**stored, "context_analysis_enabled": False},
             ),
             patch("konvu_telemetry.service.record_settings_saved") as recorded,
@@ -1986,7 +1996,7 @@ class ServiceTests(unittest.TestCase):
         handler.rfile = Mock(read=Mock(return_value=body))
         with (
             patch(
-                "konvu_telemetry.service.write_preferences",
+                "konvu_telemetry.service.update_preferences",
                 side_effect=OSError("read only"),
             ),
             patch("konvu_telemetry.service.record_settings_saved") as recorded,
@@ -1998,14 +2008,21 @@ class ServiceTests(unittest.TestCase):
         for path in ("/api/track", "/api/preferences"):
             for length, body in (("ten", b"{}"), ("1", b"\x80")):
                 handler = object.__new__(DashboardRequestHandler)
-                handler.headers = {"Host": "127.0.0.1:7824", "Content-Length": length}
+                handler.server = Mock(server_port=7824)
+                handler.auth_secret = "test-secret"
+                handler.headers = {
+                    "Host": "127.0.0.1:7824",
+                    "Origin": "http://127.0.0.1:7824",
+                    "Cookie": "konvu_dashboard=test-secret",
+                    "Content-Length": length,
+                }
                 handler.path = path
                 handler.rfile = Mock(read=Mock(return_value=body))
                 handler.send_error = MagicMock()
                 with (
                     self.subTest(path=path, length=length),
                     patch("konvu_telemetry.service.record_dashboard_action") as tracked,
-                    patch("konvu_telemetry.service.write_preferences") as stored,
+                    patch("konvu_telemetry.service.update_preferences") as stored,
                 ):
                     DashboardRequestHandler.do_POST(handler)
                     handler.send_error.assert_called_once_with(400)
@@ -2014,6 +2031,7 @@ class ServiceTests(unittest.TestCase):
 
     def test_track_endpoint_refuses_foreign_origins(self) -> None:
         handler = object.__new__(DashboardRequestHandler)
+        handler.server = Mock(server_port=7824)
         handler.headers = {"Host": "127.0.0.1:7824", "Origin": "https://evil.example"}
         handler.path = "/api/track"
         handler.send_error = MagicMock()
