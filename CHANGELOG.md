@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Shorten every session link in the status line, the Codex box and the desktop boxes to a
+  local link like `http://127.0.0.1:7824/s/146mw93`, which the dashboard redirects to
+  the session. Nothing leaves your machine.
 - Show the Codex CLI usage box as the same colored meters as the Claude Code status line,
   framed by the usage box border, when the Codex TUI running in your terminal is 0.162.0
   or later. Older Codex releases, `codex exec`, the desktop app and editor extensions keep

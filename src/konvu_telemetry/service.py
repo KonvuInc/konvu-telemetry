@@ -36,6 +36,7 @@ from .provider_limits import (
     stored_provider_quotas,
     write_provider_quotas,
 )
+from .short_links import resolved_dashboard_path
 from .snapshot import build_snapshot, write_snapshot
 from .preferences import (
     CADENCES,
@@ -542,6 +543,9 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
                 }
             )
             return
+        if path.startswith(("/s/", "/c/")):
+            self._redirect_short_link(path)
+            return
         if path == "/api/session":
             query = parse_qs(urlparse(self.path).query)
             provider = query.get("provider", [""])[0]
@@ -552,6 +556,18 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
             self._serve_json_file(session_path(provider, session_id))
             return
         super().do_GET()
+
+    def _redirect_short_link(self, path: str) -> None:
+        """Send a short session link on to the dashboard view it stands for."""
+        target = resolved_dashboard_path(path)
+        if target is None:
+            self.send_error(404)
+            return
+        self.send_response(302)
+        self.send_header("Location", target)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def _serve_live_snapshot(self) -> None:
         """Serve sessions with the independently persisted account quotas."""

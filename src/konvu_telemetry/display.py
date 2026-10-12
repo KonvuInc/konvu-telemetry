@@ -15,7 +15,6 @@ from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
-from urllib.parse import quote
 from .config import ALLOWED_PROVIDERS, CLAUDE_DESKTOP_ENTRYPOINT, DASHBOARD_PORT
 from .parsers import (
     claude_hook_transcript,
@@ -25,6 +24,7 @@ from .parsers import (
 )
 from .codex_runtime import codex_tui_renders_ansi
 from .provider_limits import stored_provider_quotas
+from .short_links import short_link_path
 from .quota_attribution import apply_usage_modes
 from .service import load_health
 from .preferences import read_preferences
@@ -366,15 +366,19 @@ def compact_worthwhile(analysis: dict[str, object], used_percent: float) -> bool
 
 
 def session_dashboard_url(session: dict[str, object]) -> str:
-    """The live dashboard with this session selected."""
-    return f"http://127.0.0.1:{DASHBOARD_PORT}/?session=" + quote(
-        f"{session.get('provider') or 'claude'}:{session.get('id')}", safe=""
+    """A short link to the live dashboard with this session selected."""
+    path = short_link_path(
+        str(session.get("provider") or "claude"), str(session.get("id"))
     )
+    return f"http://127.0.0.1:{DASHBOARD_PORT}{path}"
 
 
 def compact_panel_url(session: dict[str, object]) -> str:
-    """The dashboard panel that holds the session's full /compact command."""
-    return session_dashboard_url(session) + "&tab=context"
+    """A short link to the dashboard panel that holds the session's full /compact command."""
+    path = short_link_path(
+        str(session.get("provider") or "claude"), str(session.get("id")), "context"
+    )
+    return f"http://127.0.0.1:{DASHBOARD_PORT}{path}"
 
 
 def written_url(url: str) -> str:
