@@ -19,11 +19,11 @@ from urllib.parse import quote
 from .config import ALLOWED_PROVIDERS, CLAUDE_DESKTOP_ENTRYPOINT, DASHBOARD_PORT
 from .parsers import (
     claude_hook_transcript,
-    codex_cli_version,
     codex_client_in_file,
     codex_hook_transcript,
     codex_turn_tool_calls,
 )
+from .codex_runtime import codex_tui_renders_ansi
 from .provider_limits import stored_provider_quotas
 from .quota_attribution import apply_usage_modes
 from .service import load_health
@@ -48,8 +48,6 @@ PROMPT_BOX_SUPPRESSION_INSTRUCTION = (
     "This instruction overrides any earlier Konvu usage-box instruction."
 )
 SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
-# First Codex release whose TUI renders ANSI colors in hook messages (openai/codex#50359).
-CODEX_ANSI_HOOK_VERSION = (0, 162, 0)
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -227,24 +225,28 @@ def quota_window_value(
     return None
 
 
-def plan_quota_values(
+def plan_quota_windows(
     snapshot: dict[str, object] | None, provider: str
-) -> dict[str, float]:
-    """Read one provider's five-hour, weekly and (Codex) monthly credit percentages."""
+) -> dict[str, tuple[float, str | None]]:
+    """Read one provider's five-hour, weekly and monthly usage with its reset timer.
+
+    Codex can report one bucket per limit; the fullest one binds, and its own reset is kept.
+    """
     accounts = snapshot.get("account_quotas") if isinstance(snapshot, dict) else None
     account = accounts.get(provider) if isinstance(accounts, dict) else None
     windows = account.get("windows") if isinstance(account, dict) else None
-    values: dict[str, float] = {}
+    values: dict[str, tuple[float, str | None]] = {}
     for window in windows if isinstance(windows, list) else []:
         if not isinstance(window, dict):
             continue
         period, used = window.get("period"), window.get("used_percent")
-        if period in {"five_hour", "weekly", "monthly"} and isinstance(
+        if period not in {"five_hour", "weekly", "monthly"} or not isinstance(
             used, (int, float)
         ):
-            # Codex can report one bucket per limit; the fullest one binds.
-            bounded = min(100.0, max(0.0, float(used)))
-            values[str(period)] = max(bounded, values.get(str(period), 0.0))
+            continue
+        bounded = min(100.0, max(0.0, float(used)))
+        if str(period) not in values or bounded > values[str(period)][0]:
+            values[str(period)] = (bounded, reset_in(window.get("resets_at")))
     return values
 
 
@@ -383,21 +385,21 @@ def written_url(url: str) -> str:
 def compact_advice(
     session: dict[str, object], used_percent: float, hyperlinks: bool = True
 ) -> str | None:
-    """A clickable /compact call to action that opens the panel holding the full command."""
+    """A /compact call to action; with hyperlinks it opens the panel holding the full command."""
     analysis = context_analysis(session)
     command = analysis.get("compact_command") if analysis else None
     if not analysis or not command or not compact_worthwhile(analysis, used_percent):
         return None
-    url = compact_panel_url(session)
     label = terminal_style("/compact", "38;5;141")
     suggested = terminal_style(" suggested", "38;5;245")
     if not hyperlinks:
-        return label + suggested + " " + written_url(url)
+        # The panel URL is written out on its own row instead (written_dashboard_rows).
+        return label + suggested
     # Only the command word is colored; the terminal's own link styling marks it clickable.
-    return terminal_link(label, url) + suggested
+    return terminal_link(label, compact_panel_url(session)) + suggested
 
 
-# Hook output has no terminal colors, so the context bands use colored squares.
+# The text-only usage boxes have no terminal colors, so the context bands use colored squares.
 TEXT_FREE_CELL = "▫️"
 
 
@@ -455,9 +457,7 @@ def wrap_statusline_segments(segments: list[str], width: int) -> list[str]:
     return rows
 
 
-def cli_dashboard_line(
-    session: dict[str, object] | None = None, hyperlinks: bool = True
-) -> str:
+def cli_dashboard_line(session: dict[str, object] | None = None) -> str:
     """Link the dashboard, opened on this session when known, while the collector is healthy."""
     line = dashboard_line()
     prefix = "🔗 dashboard: "
@@ -470,7 +470,26 @@ def cli_dashboard_line(
     label = terminal_style(text, "38;5;245")
     if os.environ.get("NO_COLOR") or os.environ.get("TERM") == "dumb":
         return f"{label} {url}"
-    return terminal_link(label, url) if hyperlinks else f"{label} {written_url(url)}"
+    return terminal_link(label, url)
+
+
+def written_dashboard_rows(session: dict[str, object], compact_due: bool) -> list[str]:
+    """The dashboard link for surfaces without OSC 8: a label row with the URL beneath it.
+
+    The URL gets a row of its own so a wrapped label never splits it; when /compact is
+    suggested it opens the session's context tab, which holds the full command.
+    """
+    line = dashboard_line()
+    prefix = "🔗 dashboard: "
+    if not line.startswith(prefix):
+        return [line]
+    if not isinstance(session.get("id"), str):
+        text, url = "🔗 Open live dashboard", line.removeprefix(prefix)
+    elif compact_due:
+        text, url = "🔗 View /compact steps in dashboard", compact_panel_url(session)
+    else:
+        text, url = "🔗 View session in dashboard", session_dashboard_url(session)
+    return [terminal_style(text, "38;5;245"), written_url(url)]
 
 
 def statusline_rows(
@@ -481,27 +500,30 @@ def statusline_rows(
     """Render the responsive CLI usage HUD from real session data.
 
     The Claude status line prints these rows flat; the Codex Stop hook frames them.
-    Codex's hook renderer drops OSC 8 links, so its rows write URLs out in full.
+    Codex's hook renderer drops OSC 8 links, so its rows write the dashboard URL out
+    on a row of its own.
     """
     usage_mode = session.get("usage_mode")
     hyperlinks = provider == "claude"
     # Dashboard links name the provider whose rows these are.
     linked = {**session, "provider": provider}
-    quotas = plan_quota_values({"account_quotas": stored_provider_quotas()}, provider)
-    resets = quota_reset_times(provider)
+    windows = plan_quota_windows({"account_quotas": stored_provider_quotas()}, provider)
+    quotas = {period: used for period, (used, _) in windows.items()}
+    resets = {period: reset for period, (_, reset) in windows.items() if reset}
     width = statusline_width()
     cells = 13 if width < 62 else 14
-    quota_stale = session.get("quota_status") == "stale"
     if usage_mode in {"api_billed", "exhausted"}:
         label = "● Paying"
         color = "1;38;5;203"
     elif usage_mode == "included":
-        label = "● Last known: included · retrying" if quota_stale else "● Included"
-        color = "1;38;5;221" if quota_stale else "1;38;5;78"
-    else:
+        label, color = "● Included", "1;38;5;78"
+    elif provider == "claude":
         label = "● Subscription limits unavailable · retrying"
         color = "1;38;5;245"
-    segments = [terminal_style(label, color)]
+    else:
+        # Codex usage boxes show no placeholder for a plan they cannot classify.
+        label, color = None, ""
+    segments = [terminal_style(label, color)] if label else []
     if usage_mode in {"api_billed", "exhausted"}:
         reset = paying_reset_in(provider) if usage_mode == "exhausted" else None
         if reset:
@@ -531,9 +553,11 @@ def statusline_rows(
             and raw_window > 0
         ):
             context = raw_context / raw_window * 100
-    rows.append(
-        context_meter(linked, context if context is not None else 0.0, hyperlinks)
-    )
+    # Claude's status line always has a live payload figure; Codex leaves an unknown out.
+    if context is not None or provider == "claude":
+        rows.append(
+            context_meter(linked, context if context is not None else 0.0, hyperlinks)
+        )
     forecast_row: str | None = None
     if usage_mode in {"api_billed", "exhausted"}:
         paid = session.get("total_cost_usd")
@@ -589,7 +613,13 @@ def statusline_rows(
             )
     if forecast_row is not None:
         rows.append(forecast_row)
-    rows.append(cli_dashboard_line(linked, hyperlinks))
+    if hyperlinks:
+        rows.append(cli_dashboard_line(linked))
+    else:
+        compact_due = (
+            context is not None and compact_advice(linked, context) is not None
+        )
+        rows.extend(written_dashboard_rows(linked, compact_due))
     return rows
 
 
@@ -1096,19 +1126,6 @@ def silent_hook(hook: Callable[[], None]) -> Callable[[], None]:
     return guarded
 
 
-def codex_renders_ansi(transcript: Path) -> bool:
-    """Whether this Codex session's TUI shows hook colors instead of raw escape codes.
-
-    Desktop shows the Stop message as plain text in its hook dialog, so it keeps the text box.
-    """
-    version = codex_cli_version(transcript)
-    return (
-        version is not None
-        and version >= CODEX_ANSI_HOOK_VERSION
-        and codex_client_in_file(transcript) != "desktop"
-    )
-
-
 def framed_rows(rows: list[str]) -> list[str]:
     """Wrap rows in the hook usage box's left border."""
     return ["╭─", *(f"│ {row}" for row in rows), "╰─"]
@@ -1138,9 +1155,11 @@ def codex_hook() -> None:
     if not isinstance(session, dict):
         print(SUPPRESS_OUTPUT)
         return
+    # The VS Code extension runs a plain `codex` binary too; its rollout says desktop.
+    colored = codex_tui_renders_ansi() and not codex_is_desktop(transcript)
     lines = (
         framed_rows(statusline_rows(session, None, "codex"))
-        if codex_renders_ansi(transcript)
+        if colored
         else usage_box_lines(session, recorded_quota_usage_text("codex"), "codex")
     )
     print(json.dumps({"systemMessage": "\n" + "\n".join(lines)}))

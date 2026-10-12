@@ -2151,7 +2151,7 @@ class ServiceTests(unittest.TestCase):
         session: dict[str, object] | None,
         turn_tool_calls: int = 1,
         health: object = None,
-        cli_version: tuple[int, ...] | None = None,
+        colored: bool = False,
     ) -> str:
         """Run a Codex hook against one recorded client and return its stdout."""
         session_id = "00000000-0000-0000-0000-000000000001"
@@ -2178,7 +2178,7 @@ class ServiceTests(unittest.TestCase):
             ),
             patch("konvu_telemetry.display.codex_client_in_file", return_value=client),
             patch(
-                "konvu_telemetry.display.codex_cli_version", return_value=cli_version
+                "konvu_telemetry.display.codex_tui_renders_ansi", return_value=colored
             ),
             patch("konvu_telemetry.display.refreshed_session", return_value=session),
             patch(
@@ -2224,7 +2224,9 @@ class ServiceTests(unittest.TestCase):
             {"systemMessage"},
         )
 
-    def test_codex_stop_hook_renders_the_status_line_from_codex_0_162(self) -> None:
+    def test_codex_stop_hook_renders_the_status_line_on_a_color_capable_tui(
+        self,
+    ) -> None:
         session = {
             "id": "00000000-0000-0000-0000-000000000001",
             "provider": "codex",
@@ -2245,16 +2247,12 @@ class ServiceTests(unittest.TestCase):
                     "cli",
                     session,
                     health={"status": "healthy"},
-                    cli_version=(0, 162, 0),
+                    colored=True,
                 )
             )["systemMessage"]
             older = json.loads(
                 self.run_codex_hook(
-                    codex_hook,
-                    "cli",
-                    session,
-                    health={"status": "healthy"},
-                    cli_version=(0, 161, 9),
+                    codex_hook, "cli", session, health={"status": "healthy"}
                 )
             )["systemMessage"]
             desktop = json.loads(
@@ -2263,12 +2261,7 @@ class ServiceTests(unittest.TestCase):
                     "desktop",
                     session,
                     health={"status": "healthy"},
-                    cli_version=(0, 162, 0),
-                )
-            )["systemMessage"]
-            unknown = json.loads(
-                self.run_codex_hook(
-                    codex_hook, "cli", session, health={"status": "healthy"}
+                    colored=True,
                 )
             )["systemMessage"]
 
@@ -2284,11 +2277,12 @@ class ServiceTests(unittest.TestCase):
         # Codex drops OSC 8 links and would swallow the rest of the message after one.
         self.assertNotIn("\x1b]8", colored)
         self.assertIn(
-            "🔗 View session in dashboard http://127.0.0.1:7824/"
-            "?session=codex%3A00000000-0000-0000-0000-000000000001",
+            "│ 🔗 View session in dashboard\n"
+            "│ http://127.0.0.1:7824/?session=codex%3A00000000-0000-0000-0000-000000000001\n"
+            "╰─",
             plain,
         )
-        for fallback in (older, desktop, unknown):
+        for fallback in (older, desktop):
             self.assertNotIn("\x1b[", fallback)
             self.assertIn("│ 🟢 Included", fallback)
 
@@ -2668,7 +2662,7 @@ class ServiceTests(unittest.TestCase):
         self.assertNotIn("forecast", output.lower())
         self.assertNotIn("API-equivalent", output)
 
-    def test_stale_subscription_marks_the_new_hud_as_retrying(self) -> None:
+    def test_stale_subscription_shows_the_hud_without_a_stale_label(self) -> None:
         session = {
             **self.shared_row_session(),
             "usage_mode": "included",
@@ -2679,7 +2673,9 @@ class ServiceTests(unittest.TestCase):
             {"status": "stale"},
             {"context_window": {"used_percentage": 50.0}},
         )
-        self.assertIn("Last known: included · retrying", output)
+        self.assertIn("● Included", output)
+        self.assertNotIn("Last known", output)
+        self.assertNotIn("retrying", output)
         self.assertIn("Context", output)
 
     def test_the_usage_box_is_a_text_only_hud_inside_a_frame(self) -> None:

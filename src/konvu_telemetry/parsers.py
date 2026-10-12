@@ -580,34 +580,6 @@ def codex_title_in_file(file_path: Path) -> str | None:
 
 
 @file_cached
-def codex_cli_version(file_path: Path) -> tuple[int, ...] | None:
-    """Read the Codex CLI version recorded in a rollout's session metadata.
-
-    Pre-releases and unreadable values return None so callers fail closed.
-    """
-    try:
-        with file_path.open("r", encoding="utf-8", errors="replace") as transcript:
-            for line in transcript:
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(record, dict) or record.get("type") != "session_meta":
-                    continue
-                payload = record.get("payload")
-                version = (
-                    payload.get("cli_version") if isinstance(payload, dict) else None
-                )
-                if not isinstance(version, str) or not re.fullmatch(
-                    r"\d+(?:\.\d+)*", version
-                ):
-                    return None
-                return tuple(int(part) for part in version.split("."))
-    except OSError:
-        return None
-    return None
-
-
 def codex_client_in_file(file_path: Path) -> str:
     """Read Codex's origin metadata to distinguish Desktop from the TUI."""
     try:

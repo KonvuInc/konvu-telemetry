@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import os
 import re
-import tempfile
+import subprocess
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -22,7 +21,11 @@ from konvu_telemetry.display import (
     statusline_rows,
     usage_box_lines,
 )
-from konvu_telemetry.parsers import codex_cli_version
+from konvu_telemetry.codex_runtime import (
+    codex_tui_renders_ansi,
+    hook_codex_binary,
+    parent_process,
+)
 
 
 class DisplayTests(unittest.TestCase):
@@ -338,79 +341,203 @@ class ContextRelevanceDisplayTests(unittest.TestCase):
         self.assertTrue(ANSI_ESCAPE.sub("", rows[1]).startswith("Context "))
 
 
-class SessionLinkTests(unittest.TestCase):
-    """The CLI HUD links the dashboard opened on the session it describes."""
+class CliHudTests(unittest.TestCase):
+    """The shared CLI HUD as the Claude status line and the Codex Stop hook draw it."""
 
     session = {
         "id": "abc",
-        "provider": "claude",
         "usage_mode": "included",
         "context_tokens": 100,
         "context_window_tokens": 1000,
     }
+    compactable = {
+        "coverage_percent": 90.0,
+        "relevant_percent": 20.0,
+        "stale_percent": 70.0,
+        "droppable_percent": 60.0,
+        "compact_command": "/compact keep the parser work",
+    }
 
-    def rows(self, provider: str) -> list[str]:
+    def rows(
+        self,
+        provider: str,
+        session: dict[str, object] | None = None,
+        quotas: dict[str, object] | None = None,
+        context_percent: float | None = None,
+    ) -> list[str]:
         with (
             patch.dict(os.environ, {"NO_COLOR": "", "TERM": "xterm-256color"}),
-            patch("konvu_telemetry.display.stored_provider_quotas", return_value={}),
-            patch("konvu_telemetry.display.quota_reset_times", return_value={}),
+            patch("konvu_telemetry.display.time.time", return_value=1_893_456_000),
+            patch(
+                "konvu_telemetry.display.stored_provider_quotas",
+                return_value=quotas or {},
+            ),
             patch(
                 "konvu_telemetry.display.dashboard_line",
                 return_value="🔗 dashboard: http://127.0.0.1:7824/",
             ),
         ):
-            return statusline_rows(self.session, None, provider)
+            return statusline_rows(session or self.session, context_percent, provider)
+
+    def plain(self, rows: list[str]) -> str:
+        return ANSI_ESCAPE.sub("", "\n".join(rows))
 
     def test_claude_hides_the_session_url_behind_the_link_text(self) -> None:
         last = self.rows("claude")[-1]
         self.assertIn("\x1b]8;;http://127.0.0.1:7824/?session=claude%3Aabc\x1b\\", last)
         self.assertIn("🔗 View session in dashboard", last)
 
-    def test_codex_writes_its_session_url_out(self) -> None:
-        last = self.rows("codex")[-1]
-        self.assertNotIn("\x1b]8", last)
+    def test_a_session_without_an_id_links_the_whole_dashboard(self) -> None:
+        anonymous = {"usage_mode": "included"}
+        self.assertIn("🔗 Open live dashboard", self.rows("claude", anonymous)[-1])
         self.assertEqual(
-            ANSI_ESCAPE.sub("", last),
-            "🔗 View session in dashboard http://127.0.0.1:7824/?session=codex%3Aabc",
+            self.plain(self.rows("codex", anonymous)[-2:]),
+            "🔗 Open live dashboard\nhttp://127.0.0.1:7824/",
+        )
+
+    def test_codex_writes_its_session_url_on_its_own_row(self) -> None:
+        rows = self.rows("codex")
+        self.assertNotIn("\x1b]8", "".join(rows))
+        self.assertEqual(
+            self.plain(rows[-2:]),
+            "🔗 View session in dashboard\nhttp://127.0.0.1:7824/?session=codex%3Aabc",
+        )
+        self.assertIn("\x1b[4;38;5;117mhttp://127.0.0.1:7824/", rows[-1])
+
+    def test_codex_compact_advice_points_its_url_at_the_context_tab(self) -> None:
+        session = {**self.session, "context_map": {"analysis": self.compactable}}
+        session["context_tokens"] = 800
+        rows = self.rows("codex", session)
+        self.assertNotIn("\x1b]8", "".join(rows))
+        context = next(row for row in rows if "Context" in ANSI_ESCAPE.sub("", row))
+        self.assertTrue(ANSI_ESCAPE.sub("", context).endswith("/compact suggested"))
+        self.assertEqual(
+            self.plain(rows[-2:]),
+            "🔗 View /compact steps in dashboard\n"
+            "http://127.0.0.1:7824/?session=codex%3Aabc&tab=context",
         )
 
     def test_claude_keeps_its_empty_limit_meters_but_codex_drops_them(self) -> None:
-        self.assertIn("5h", ANSI_ESCAPE.sub("", self.rows("claude")[0]))
-        self.assertNotIn("5h", ANSI_ESCAPE.sub("", self.rows("codex")[0]))
+        self.assertIn("5h", self.plain(self.rows("claude")[:1]))
+        self.assertNotIn("5h", self.plain(self.rows("codex")))
 
-    def test_paying_codex_keeps_its_credit_meter(self) -> None:
-        quotas = {"codex": {"windows": [{"period": "monthly", "used_percent": 23.0}]}}
+    def test_codex_leaves_out_what_it_cannot_measure(self) -> None:
+        unknown = {"id": "abc", "usage_mode": "unknown", "context_tokens": 100}
+        plain = self.plain(self.rows("codex", unknown))
+        self.assertNotIn("Context", plain)
+        self.assertNotIn("unavailable", plain)
+        self.assertIn(
+            "Subscription limits unavailable", self.plain(self.rows("claude", unknown))
+        )
+
+    def test_the_fullest_bucket_binds_with_its_own_reset(self) -> None:
+        quotas = {
+            "codex": {
+                "windows": [
+                    {
+                        "period": "weekly",
+                        "used_percent": 80.0,
+                        "resets_at": "2030-01-03T00:00:00+00:00",
+                    },
+                    {
+                        "period": "weekly",
+                        "used_percent": 10.0,
+                        "resets_at": "2030-01-07T00:00:00+00:00",
+                    },
+                ]
+            }
+        }
+        week = self.plain(self.rows("codex", quotas=quotas)[:1])
+        self.assertIn("80%", week)
+        self.assertIn("reset: 2", week)
+        self.assertNotIn("reset: 6", week)
+
+    def test_codex_forecasts_against_the_weekly_limit(self) -> None:
+        session = {
+            **self.session,
+            "quota_attribution": {
+                "windows": [
+                    {
+                        "period": "weekly",
+                        "estimated_percent": 3.1,
+                        "projected_next_10_percent": 3.5,
+                    }
+                ]
+            },
+        }
+        plain = self.plain(self.rows("codex", session))
+        self.assertIn("This session 3.1% of weekly limit ━━━▶ 6.6%", plain)
+        self.assertNotIn("This session", self.plain(self.rows("claude", session)))
+
+    def test_paying_codex_keeps_its_credit_meter_and_its_own_reset(self) -> None:
+        window = {"period": "monthly", "used_percent": 23.0}
+        quotas = {"codex": {"windows": [window]}, "claude": {"windows": [window]}}
         session = {**self.session, "usage_mode": "exhausted"}
+        with patch(
+            "konvu_telemetry.display.paying_reset_in", return_value="1d"
+        ) as reset:
+            codex = self.rows("codex", session, quotas)
+            reset.assert_called_with("codex")
+            claude = self.rows("claude", session, quotas)
+            reset.assert_called_with("claude")
+
+        self.assertIn("Credits", self.plain(codex[:1]))
+        self.assertIn("23%", self.plain(codex[:1]))
+        self.assertNotIn("Credits", self.plain(claude))
+
+
+class CodexRuntimeTests(unittest.TestCase):
+    """The color gate asks the Codex binary running the hook, and fails closed."""
+
+    def renders(self, binary: str | None, version_output: str) -> bool:
+        result = subprocess.CompletedProcess([], 0, stdout=version_output, stderr="")
         with (
-            patch.dict(os.environ, {"NO_COLOR": "1"}),
             patch(
-                "konvu_telemetry.display.stored_provider_quotas", return_value=quotas
+                "konvu_telemetry.codex_runtime.hook_codex_binary",
+                return_value=Path(binary) if binary else None,
             ),
-            patch("konvu_telemetry.display.paying_reset_in", return_value=None),
-            patch("konvu_telemetry.display.dashboard_line", return_value="dashboard"),
+            patch("konvu_telemetry.codex_runtime.subprocess.run", return_value=result),
         ):
-            codex = statusline_rows(session, None, "codex")
-            claude = statusline_rows(session, None, "claude")
+            return codex_tui_renders_ansi()
 
-        self.assertIn("Credits", codex[0])
-        self.assertIn("23%", codex[0])
-        self.assertNotIn("Credits", "\n".join(claude))
+    def test_release_tuis_from_the_first_ansi_version_render_colors(self) -> None:
+        tui = "/Users/me/.codex/packages/standalone/current/bin/codex"
+        self.assertTrue(self.renders(tui, "codex-cli 0.162.0\n"))
+        self.assertTrue(self.renders(tui, "codex-cli 0.163.4\n"))
+        self.assertFalse(self.renders(tui, "codex-cli 0.161.9\n"))
+        self.assertFalse(self.renders(tui, "codex-cli 0.162\n"))
 
+    def test_prereleases_desktop_and_unknown_binaries_fail_closed(self) -> None:
+        tui = "/usr/local/bin/codex"
+        self.assertFalse(self.renders(tui, "codex-cli 0.162.0-alpha.3\n"))
+        self.assertFalse(self.renders(tui, ""))
+        self.assertFalse(self.renders(None, "codex-cli 0.163.0\n"))
+        desktop = "/Applications/Codex.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
+        self.assertFalse(self.renders(desktop, "codex-cli 0.163.0\n"))
 
-class CodexCliVersionTests(unittest.TestCase):
-    """The Codex version gate reads the rollout's session metadata and fails closed."""
+    def test_the_nearest_codex_ancestor_is_the_hook_binary(self) -> None:
+        chain = {
+            100: (90, Path("/opt/homebrew/bin/python3")),
+            90: (80, Path("/bin/sh")),
+            80: (70, Path("/bin/zsh")),
+            70: (1, Path("/Users/me/.local/bin/codex")),
+        }
+        with (
+            patch("konvu_telemetry.codex_runtime.os.getppid", return_value=100),
+            patch(
+                "konvu_telemetry.codex_runtime.parent_process", side_effect=chain.get
+            ),
+        ):
+            self.assertEqual(hook_codex_binary(), Path("/Users/me/.local/bin/codex"))
 
-    def version_of(self, version: object) -> tuple[int, ...] | None:
-        with tempfile.TemporaryDirectory() as home:
-            path = Path(home) / "rollout.jsonl"
-            meta = {"type": "session_meta", "payload": {"cli_version": version}}
-            path.write_text(json.dumps(meta) + "\n")
-            return codex_cli_version(path)
-
-    def test_release_versions_parse(self) -> None:
-        self.assertEqual(self.version_of("0.162.1"), (0, 162, 1))
-
-    def test_prereleases_missing_and_unreadable_versions_fail_closed(self) -> None:
-        self.assertIsNone(self.version_of("0.162.0-alpha.3"))
-        self.assertIsNone(self.version_of(None))
-        self.assertIsNone(codex_cli_version(Path("/nonexistent/rollout.jsonl")))
+    def test_ps_output_with_spaces_in_the_path_parses(self) -> None:
+        result = subprocess.CompletedProcess(
+            [], 0, stdout="  768 /Applications/My Tools/codex\n", stderr=""
+        )
+        with (
+            patch("konvu_telemetry.codex_runtime.Path.is_dir", return_value=False),
+            patch("konvu_telemetry.codex_runtime.subprocess.run", return_value=result),
+        ):
+            self.assertEqual(
+                parent_process(1234), (768, Path("/Applications/My Tools/codex"))
+            )
