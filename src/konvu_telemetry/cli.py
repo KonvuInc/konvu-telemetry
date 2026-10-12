@@ -288,7 +288,10 @@ def build_parser() -> argparse.ArgumentParser:
         run=run_uninstall
     )
 
-    tracking = register("telemetry", "Control anonymous product analytics.")
+    tracking = register(
+        "telemetry",
+        "Control anonymous product analytics (setup with DO_NOT_TRACK or CI turns it off).",
+    )
     tracking.add_argument("state", choices=["on", "off", "status"])
     tracking.set_defaults(run=run_tracking)
 
