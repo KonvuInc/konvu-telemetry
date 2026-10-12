@@ -25,6 +25,8 @@ from .preferences import (
     Preferences,
     custom_rule_prompt,
     read_preferences,
+    update_preferences,
+    valid_jump_percent,
     write_preferences,
 )
 from .tracking import set_tracking_enabled, tracking_status
@@ -92,10 +94,7 @@ def run_tracking(arguments: argparse.Namespace) -> None:
 def run_context_analysis(arguments: argparse.Namespace) -> None:
     current = read_preferences()
     if arguments.state in {"on", "off"} or arguments.allow_paid is not None:
-        current = write_preferences(
-            current["cadence"],
-            current["custom_rule"],
-            current["jump_percent"],
+        current = update_preferences(
             context_analysis_enabled=arguments.state == "on"
             if arguments.state in {"on", "off"}
             else None,
@@ -230,8 +229,10 @@ def _choose_cadence_from_a_list(
 def run_cadence(arguments: argparse.Namespace) -> None:
     # Validated before either branch, so a bad threshold cannot slip through the
     # interactive path after the non-interactive one has rejected it.
-    if arguments.jump_percent is not None and arguments.jump_percent <= 0:
-        arguments.parser.error("--jump-percent must be greater than zero")
+    if arguments.jump_percent is not None and not valid_jump_percent(
+        arguments.jump_percent
+    ):
+        arguments.parser.error("--jump-percent must be finite and greater than zero")
     if arguments.status:
         if arguments.cadence or arguments.rule or arguments.jump_percent is not None:
             arguments.parser.error(
@@ -324,7 +325,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Percent a limit must move before showing usage, with 'usage-jump'. "
-            "Must be greater than zero."
+            "Must be finite and greater than zero."
         ),
     )
     cadence.add_argument(

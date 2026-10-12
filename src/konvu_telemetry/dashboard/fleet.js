@@ -1642,7 +1642,7 @@ function renderFreshness(stale) {
    Codex desktop and Claude desktop. A custom rule
    needs code, so the dashboard stores the wording and hands back a prompt for
    the user's own agent rather than pretending it took effect. */
-const cadenceState = { options: [], cadence: "", custom_rule: "", context_analysis_enabled: false, context_analysis_consent: "unset", context_analysis_allow_paid: false, loaded: false, request: 0 };
+const cadenceState = { options: [], cadence: "", custom_rule: "", context_analysis_enabled: false, context_analysis_consent: "unset", context_analysis_allow_paid: false, loaded: false, request: 0, saved: null };
 async function loadPreferences() {
   if (previewMode) return;
   const request = ++cadenceState.request;
@@ -1655,6 +1655,12 @@ async function loadPreferences() {
     const value = await response.json();
     if (request !== cadenceState.request) return;
     Object.assign(cadenceState, value, { loaded: true });
+    cadenceState.saved = {
+      cadence: value.cadence,
+      custom_rule: value.custom_rule,
+      context_analysis_enabled: value.context_analysis_enabled,
+      context_analysis_allow_paid: value.context_analysis_allow_paid,
+    };
     renderCadenceOptions();
     renderAnalysisToggles();
     // Context captions say whether context analysis is on, so they follow the loaded settings.
@@ -1758,6 +1764,21 @@ function closePromptModal() {
   document.querySelector("main").inert = false;
   $("#settings-open")?.focus();
 }
+function preferencesPatch() {
+  const saved = cadenceState.saved;
+  if (!saved) return {};
+  const body = {};
+  const rule = $("#cadence-rule")?.value || "";
+  if (cadenceState.cadence !== saved.cadence || (cadenceState.cadence === "custom" && rule !== saved.custom_rule)) {
+    body.cadence = cadenceState.cadence;
+    body.custom_rule = rule;
+  }
+  const enabled = $("#context-analysis-enabled")?.checked === true;
+  const paid = $("#context-analysis-allow-paid")?.checked === true;
+  if (enabled !== saved.context_analysis_enabled) body.context_analysis_enabled = enabled;
+  if (paid !== saved.context_analysis_allow_paid) body.context_analysis_allow_paid = paid;
+  return body;
+}
 async function saveCadence() {
   const status = $("#cadence-status");
   if (cadenceState.cadence === "custom" && !customRuleIsUsable()) {
@@ -1765,12 +1786,11 @@ async function saveCadence() {
     $("#cadence-rule")?.focus();
     return;
   }
-  const body = {
-    cadence: cadenceState.cadence,
-    custom_rule: $("#cadence-rule")?.value || "",
-    context_analysis_enabled: $("#context-analysis-enabled")?.checked === true,
-    context_analysis_allow_paid: $("#context-analysis-allow-paid")?.checked === true,
-  };
+  const body = preferencesPatch();
+  if (!Object.keys(body).length) {
+    closeSettings();
+    return;
+  }
   try {
     const response = await fetch("/api/preferences", {
       method: "POST",
@@ -1780,7 +1800,14 @@ async function saveCadence() {
     if (!response.ok) throw new Error("save failed");
     const saved = await response.json();
     Object.assign(cadenceState, saved);
+    cadenceState.saved = {
+      cadence: saved.cadence,
+      custom_rule: saved.custom_rule,
+      context_analysis_enabled: saved.context_analysis_enabled,
+      context_analysis_allow_paid: saved.context_analysis_allow_paid,
+    };
     renderCadenceOptions();
+    render();
     if (status) status.textContent = "";
     // Saving is done, so the settings dialog has nothing left to say. A custom
     // rule still needs a prompt handed over, which gets its own dialog.

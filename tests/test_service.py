@@ -85,6 +85,11 @@ from konvu_telemetry.pricing import (
     event_cost,
     load_pricing,
 )
+from konvu_telemetry.preferences import (
+    read_preferences,
+    update_preferences,
+    write_preferences,
+)
 from konvu_telemetry.service import (
     DashboardRequestHandler,
     RefreshCoordinator,
@@ -122,6 +127,71 @@ def health_patch(health: object) -> object:
 
 
 class ServiceTests(unittest.TestCase):
+    def test_preferences_endpoint_merges_stale_dashboard_save_with_cli_change(
+        self,
+    ) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+        ):
+            stale = read_preferences()
+            update_preferences(context_analysis_allow_paid=True)
+            body = json.dumps({"cadence": "never"}).encode()
+            handler = object.__new__(DashboardRequestHandler)
+            handler.headers = {
+                "Host": "127.0.0.1:7824",
+                "Origin": "http://127.0.0.1:7824",
+                "Cookie": "konvu_dashboard=test-secret",
+                "Content-Length": str(len(body)),
+            }
+            handler.server = Mock(server_port=7824)
+            handler.auth_secret = "test-secret"
+            handler.path = "/api/preferences"
+            handler.rfile = BytesIO(body)
+            handler._send_json = Mock()
+            handler.send_error = Mock()
+
+            DashboardRequestHandler.do_POST(handler)
+
+            self.assertFalse(stale["context_analysis_allow_paid"])
+            handler.send_error.assert_not_called()
+            self.assertTrue(
+                handler._send_json.call_args.args[0]["context_analysis_allow_paid"]
+            )
+            self.assertEqual(read_preferences()["cadence"], "never")
+            self.assertTrue(read_preferences()["context_analysis_allow_paid"])
+
+    def test_preferences_endpoint_rejects_invalid_partial_value(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+        ):
+            write_preferences("never")
+            for body in (
+                b'{"context_analysis_enabled":null}',
+                b'{"jump_percent":Infinity}',
+                b'{"jump_percent":1e999}',
+            ):
+                handler = object.__new__(DashboardRequestHandler)
+                handler.headers = {
+                    "Host": "127.0.0.1:7824",
+                    "Origin": "http://127.0.0.1:7824",
+                    "Cookie": "konvu_dashboard=test-secret",
+                    "Content-Length": str(len(body)),
+                }
+                handler.server = Mock(server_port=7824)
+                handler.auth_secret = "test-secret"
+                handler.path = "/api/preferences"
+                handler.rfile = BytesIO(body)
+                handler._send_json = Mock()
+                handler.send_error = Mock()
+
+                DashboardRequestHandler.do_POST(handler)
+
+                handler.send_error.assert_called_once_with(400)
+                handler._send_json.assert_not_called()
+            self.assertEqual(read_preferences()["cadence"], "never")
+
     def test_local_service_reports_a_port_collision_without_a_traceback(self) -> None:
         collision = OSError(errno.EADDRINUSE, "Address already in use")
         with patch(
@@ -305,16 +375,20 @@ class ServiceTests(unittest.TestCase):
             patch("konvu_telemetry.service.write_snapshot"),
             patch("konvu_telemetry.service.write_provider_quotas", return_value={}),
         ):
-            collector = Thread(
-                target=lambda: collect_forever(
-                    60,
-                    IncrementalLiveState(),
-                    Lock(),
-                    coordinator,
-                    Mock(refresh=Mock(return_value={})),
-                ),
-                daemon=True,
-            )
+
+            def run_collector() -> None:
+                try:
+                    collect_forever(
+                        60,
+                        IncrementalLiveState(),
+                        Lock(),
+                        coordinator,
+                        Mock(refresh=Mock(return_value={})),
+                    )
+                except StopIteration:
+                    pass
+
+            collector = Thread(target=run_collector, daemon=True)
             with service.collection_lock():
                 collector.start()
                 collector.join(timeout=0.5)

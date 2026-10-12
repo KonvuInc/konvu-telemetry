@@ -27,6 +27,7 @@ jobs:
       - run: python -m mypy src/konvu_telemetry
       - run: python -m compileall -q src
       - run: node --check src/konvu_telemetry/dashboard/fleet.js
+      - run: node tests/test_preferences_ui.js
 
   test:
     runs-on: ubuntu-latest

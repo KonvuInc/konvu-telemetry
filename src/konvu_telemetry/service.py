@@ -41,7 +41,8 @@ from .preferences import (
     CADENCES,
     custom_rule_prompt,
     read_preferences,
-    write_preferences,
+    update_preferences,
+    valid_jump_percent,
 )
 from .storage import (
     account_quotas_path,
@@ -715,21 +716,41 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
         if not isinstance(body, dict):
             self.send_error(400)
             return
+        allowed_fields = {
+            "cadence",
+            "custom_rule",
+            "jump_percent",
+            "context_analysis_enabled",
+            "context_analysis_allow_paid",
+        }
+        if not body or body.keys() - allowed_fields:
+            self.send_error(400)
+            return
         cadence = body.get("cadence")
-        if not isinstance(cadence, str) or cadence not in CADENCES:
+        if "cadence" in body and (
+            not isinstance(cadence, str) or cadence not in CADENCES
+        ):
             self.send_error(400)
             return
         rule = body.get("custom_rule")
+        if "custom_rule" in body and (cadence is None or not isinstance(rule, str)):
+            self.send_error(400)
+            return
         jump = body.get("jump_percent")
         analysis_enabled = body.get("context_analysis_enabled")
         allow_paid = body.get("context_analysis_allow_paid")
-        if (
-            analysis_enabled is not None and not isinstance(analysis_enabled, bool)
-        ) or (allow_paid is not None and not isinstance(allow_paid, bool)):
+        invalid_jump = "jump_percent" in body and not valid_jump_percent(jump)
+        invalid_analysis = "context_analysis_enabled" in body and not isinstance(
+            analysis_enabled, bool
+        )
+        invalid_paid = "context_analysis_allow_paid" in body and not isinstance(
+            allow_paid, bool
+        )
+        if invalid_jump or invalid_analysis or invalid_paid:
             self.send_error(400)
             return
         try:
-            preference = write_preferences(
+            preference = update_preferences(
                 cadence,
                 rule if isinstance(rule, str) else "",
                 jump
