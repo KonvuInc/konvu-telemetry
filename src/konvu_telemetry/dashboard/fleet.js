@@ -655,7 +655,7 @@ function providerQuotaState(provider, account) {
       return {
         kind: "login",
         label: "Sign in to " + providerName(provider),
-        detail: "Run " + command + ". Konvu uses this local login only to fetch subscription limits; credentials never leave your computer." + errorCode,
+        detail: "Run " + command + ". Your provider uses this login to fetch subscription limits; Konvu never sends credentials to its servers." + errorCode,
       };
     }
     return { kind: "error", label: "Couldn’t load " + providerName(provider) + " limits · retrying", detail: "Konvu will retry automatically." + errorCode };

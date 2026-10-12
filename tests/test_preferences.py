@@ -337,8 +337,25 @@ class PreferencesTests(unittest.TestCase):
 
     def run_setup(self, arguments: list[str], answer: str | None, tty: bool) -> dict:
         output = StringIO()
+
+        def fake_setup(
+            _interval: int,
+            _open_browser: bool,
+            *,
+            context_analysis_enabled: bool | None = None,
+        ) -> dict[str, str]:
+            if context_analysis_enabled is not None:
+                current = read_preferences()
+                write_preferences(
+                    current["cadence"],
+                    current["custom_rule"],
+                    current["jump_percent"],
+                    context_analysis_enabled=context_analysis_enabled,
+                )
+            return {"dashboard": "x"}
+
         with (
-            patch("konvu_telemetry.cli.setup", return_value={"dashboard": "x"}),
+            patch("konvu_telemetry.cli.setup", side_effect=fake_setup),
             patch("sys.stdin.isatty", return_value=tty),
             patch("builtins.input", return_value=answer or "") as asked,
             redirect_stdout(output),
