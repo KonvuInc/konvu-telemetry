@@ -53,6 +53,7 @@ from konvu_telemetry.display import (
     usage_box_lines,
 )
 from konvu_telemetry.exporter import normalized_event
+from konvu_telemetry.short_links import resolve_short_code, short_code
 from konvu_telemetry.fleet_telemetry import (
     _CACHE as TELEMETRY_CACHE,
     TranscriptTelemetry,
@@ -1837,6 +1838,55 @@ class ServiceTests(unittest.TestCase):
                 DashboardRequestHandler.do_GET(handler)
         recorded.assert_called_once_with(data_available=False)
 
+    def test_short_links_redirect_to_the_session_they_name(self) -> None:
+        session_id = "00000000-0000-0000-0000-000000000001"
+
+        def get(path: str) -> MagicMock:
+            handler = object.__new__(DashboardRequestHandler)
+            handler.headers = {"Host": "127.0.0.1:7824"}
+            handler.path = path
+            sent = MagicMock()
+            handler.send_response = sent.send_response
+            handler.send_header = sent.send_header
+            handler.end_headers = sent.end_headers
+            handler.send_error = sent.send_error
+            DashboardRequestHandler.do_GET(handler)
+            return sent
+
+        with tempfile.TemporaryDirectory() as home:
+            sessions = Path(home) / "sessions"
+            sessions.mkdir()
+            (sessions / f"codex-{session_id}.json").write_text("{}")
+            code = short_code("codex", session_id)
+            with patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": home}):
+                session = get(f"/s/{code}")
+                context = get(f"/c/{code}")
+                unknown = get("/s/zzzzzzz")
+                malformed = get("/c/../../etc")
+
+        target = f"/?session=codex%3A{session_id}"
+        session.send_header.assert_any_call("Location", target)
+        context.send_header.assert_any_call("Location", target + "&tab=context")
+        session.send_response.assert_called_once_with(302)
+        # A code with no recorded session still lands on the dashboard.
+        unknown.send_header.assert_any_call("Location", "/")
+        malformed.send_header.assert_any_call("Location", "/")
+
+    def test_short_codes_are_stable_and_ambiguity_fails_closed(self) -> None:
+        self.assertEqual(short_code("codex", "abc"), short_code("codex", "abc"))
+        self.assertNotEqual(short_code("codex", "abc"), short_code("claude", "abc"))
+        self.assertEqual(len(short_code("codex", "abc")), 7)
+        with (
+            tempfile.TemporaryDirectory() as home,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": home}),
+            patch("konvu_telemetry.short_links.short_code", return_value="aaaaaaa"),
+        ):
+            sessions = Path(home) / "sessions"
+            sessions.mkdir()
+            for name in ("codex-a1.json", "claude-b2.json"):
+                (sessions / name).write_text("{}")
+            self.assertIsNone(resolve_short_code("aaaaaaa"))
+
     def test_track_endpoint_accepts_only_allowlisted_dashboard_actions(self) -> None:
         def post(body: bytes) -> MagicMock:
             handler = object.__new__(DashboardRequestHandler)
@@ -2298,9 +2348,7 @@ class ServiceTests(unittest.TestCase):
         # Codex drops OSC 8 links and would swallow the rest of the message after one.
         self.assertNotIn("\x1b]8", colored)
         self.assertIn(
-            "│ 🔗 View session in dashboard\n"
-            "│ http://127.0.0.1:7824/?session=codex%3A00000000-0000-0000-0000-000000000001\n"
-            "╰─",
+            "│ 🔗 View session in dashboard\n│ http://127.0.0.1:7824/s/09lictw\n╰─",
             plain,
         )
         self.assertIn("65%", plain)
@@ -2582,7 +2630,7 @@ class ServiceTests(unittest.TestCase):
             self.assertIn(
                 f"│ 🔗 Open live dashboard {link}\n╰─", outputs[surface], surface
             )
-        session_link = f"{link}?session=claude%3A00000000-0000-0000-0000-000000000001"
+        session_link = f"{link}s/3wc34kv"
         self.assertTrue(
             outputs["statusline"].endswith(
                 f"🔗 View session in dashboard {session_link}\n"

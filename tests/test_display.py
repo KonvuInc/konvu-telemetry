@@ -271,7 +271,7 @@ class ContextRelevanceDisplayTests(unittest.TestCase):
 
         self.assertIn(
             "│ 🧠 Context 🟩🟥🟥🟥🟥🟥🟥▫️▫️▫️ 71.0%  ·  ✂️ /compact "
-            "http://127.0.0.1:7824/?session=codex%3Aabc&tab=context",
+            "http://127.0.0.1:7824/c/j1xdh6k",
             rows,
         )
 
@@ -303,7 +303,7 @@ class ContextRelevanceDisplayTests(unittest.TestCase):
         with patch.dict(os.environ, {"TERM": "xterm-256color", "NO_COLOR": ""}):
             line = context_meter(session, 50)
 
-        self.assertIn("?session=claude%3Aabc&tab=context", line)
+        self.assertIn("/c/0faqj6z", line)
         plain = re.sub(r"\x1b\]8;;[^\x1b]*\x1b\\", "", ANSI_ESCAPE.sub("", line))
         self.assertTrue(plain.endswith("·  /compact suggested"))
         self.assertNotIn("drifting or stale", line)
@@ -387,7 +387,7 @@ class CliHudTests(unittest.TestCase):
 
     def test_claude_hides_the_session_url_behind_the_link_text(self) -> None:
         last = self.rows("claude")[-1]
-        self.assertIn("\x1b]8;;http://127.0.0.1:7824/?session=claude%3Aabc\x1b\\", last)
+        self.assertIn("\x1b]8;;http://127.0.0.1:7824/s/0faqj6z\x1b\\", last)
         self.assertIn("🔗 View session in dashboard", last)
 
     def test_a_session_without_an_id_links_the_whole_dashboard(self) -> None:
@@ -403,7 +403,7 @@ class CliHudTests(unittest.TestCase):
         self.assertNotIn("\x1b]8", "".join(rows))
         self.assertEqual(
             self.plain(rows[-2:]),
-            "🔗 View session in dashboard\nhttp://127.0.0.1:7824/?session=codex%3Aabc",
+            "🔗 View session in dashboard\nhttp://127.0.0.1:7824/s/j1xdh6k",
         )
         self.assertIn("\x1b[4;38;5;117mhttp://127.0.0.1:7824/", rows[-1])
 
@@ -416,8 +416,7 @@ class CliHudTests(unittest.TestCase):
         self.assertTrue(ANSI_ESCAPE.sub("", context).endswith("/compact suggested"))
         self.assertEqual(
             self.plain(rows[-2:]),
-            "🔗 View /compact steps in dashboard\n"
-            "http://127.0.0.1:7824/?session=codex%3Aabc&tab=context",
+            "🔗 View /compact steps in dashboard\nhttp://127.0.0.1:7824/c/j1xdh6k",
         )
 
     def test_claude_keeps_its_empty_limit_meters_but_codex_drops_them(self) -> None:
