@@ -5,7 +5,9 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -22,9 +24,12 @@ from konvu_telemetry.display import (
     usage_box_lines,
 )
 from konvu_telemetry.codex_runtime import (
+    AncestorProcess,
     codex_tui_renders_ansi,
-    hook_codex_binary,
-    parent_process,
+    codex_binary_version,
+    hook_codex_process,
+    linux_process,
+    macos_process,
 )
 
 
@@ -487,40 +492,67 @@ class CliHudTests(unittest.TestCase):
 
 
 class CodexRuntimeTests(unittest.TestCase):
-    """The color gate asks the Codex binary running the hook, and fails closed."""
+    """The color gate asks the Codex TUI running the hook, and fails closed."""
 
-    def renders(self, binary: str | None, version_output: str) -> bool:
+    def setUp(self) -> None:
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        self.binary = Path(home.name) / "codex"
+        self.binary.write_text("")
+        self.mtime = self.binary.stat().st_mtime
+
+    def renders(
+        self,
+        version_output: str,
+        has_terminal: bool = True,
+        started_at: float | None = None,
+        found: bool = True,
+    ) -> bool:
+        codex = AncestorProcess(
+            1,
+            self.binary,
+            has_terminal,
+            self.mtime + 60 if started_at is None else started_at,
+        )
         result = subprocess.CompletedProcess([], 0, stdout=version_output, stderr="")
         with (
             patch(
-                "konvu_telemetry.codex_runtime.hook_codex_binary",
-                return_value=Path(binary) if binary else None,
+                "konvu_telemetry.codex_runtime.hook_codex_process",
+                return_value=codex if found else None,
             ),
             patch("konvu_telemetry.codex_runtime.subprocess.run", return_value=result),
         ):
             return codex_tui_renders_ansi()
 
     def test_release_tuis_from_the_first_ansi_version_render_colors(self) -> None:
-        tui = "/Users/me/.codex/packages/standalone/current/bin/codex"
-        self.assertTrue(self.renders(tui, "codex-cli 0.162.0\n"))
-        self.assertTrue(self.renders(tui, "codex-cli 0.163.4\n"))
-        self.assertFalse(self.renders(tui, "codex-cli 0.161.9\n"))
-        self.assertFalse(self.renders(tui, "codex-cli 0.162\n"))
+        self.assertTrue(self.renders("codex-cli 0.162.0\n"))
+        self.assertTrue(self.renders("codex-cli 0.163.4\n"))
+        self.assertFalse(self.renders("codex-cli 0.161.9\n"))
+        self.assertFalse(self.renders("codex-cli 0.162\n"))
 
-    def test_prereleases_desktop_and_unknown_binaries_fail_closed(self) -> None:
-        tui = "/usr/local/bin/codex"
-        self.assertFalse(self.renders(tui, "codex-cli 0.162.0-alpha.3\n"))
-        self.assertFalse(self.renders(tui, ""))
-        self.assertFalse(self.renders(None, "codex-cli 0.163.0\n"))
-        desktop = "/Applications/Codex.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
-        self.assertFalse(self.renders(desktop, "codex-cli 0.163.0\n"))
+    def test_prereleases_and_unknown_binaries_fail_closed(self) -> None:
+        self.assertFalse(self.renders("codex-cli 0.162.0-alpha.3\n"))
+        self.assertFalse(self.renders(""))
+        self.assertFalse(self.renders("codex-cli 0.163.0\n", found=False))
+
+    def test_a_codex_without_a_terminal_is_not_a_tui(self) -> None:
+        # The desktop app and editor extensions run Codex as a background app server.
+        self.assertFalse(self.renders("codex-cli 0.163.0\n", has_terminal=False))
+
+    def test_a_binary_replaced_after_the_tui_started_no_longer_describes_it(
+        self,
+    ) -> None:
+        self.assertFalse(
+            self.renders("codex-cli 0.163.0\n", started_at=self.mtime - 60)
+        )
 
     def test_the_nearest_codex_ancestor_is_the_hook_binary(self) -> None:
+        codex = AncestorProcess(1, Path("/Users/me/.local/bin/codex"), True, None)
         chain = {
-            100: (90, Path("/opt/homebrew/bin/python3")),
-            90: (80, Path("/bin/sh")),
-            80: (70, Path("/bin/zsh")),
-            70: (1, Path("/Users/me/.local/bin/codex")),
+            100: AncestorProcess(90, Path("/opt/homebrew/bin/python3"), False, None),
+            90: AncestorProcess(80, Path("/bin/sh"), False, None),
+            80: AncestorProcess(70, Path("/bin/zsh"), False, None),
+            70: codex,
         }
         with (
             patch("konvu_telemetry.codex_runtime.os.getppid", return_value=100),
@@ -528,16 +560,66 @@ class CodexRuntimeTests(unittest.TestCase):
                 "konvu_telemetry.codex_runtime.parent_process", side_effect=chain.get
             ),
         ):
-            self.assertEqual(hook_codex_binary(), Path("/Users/me/.local/bin/codex"))
+            self.assertEqual(hook_codex_process(), codex)
 
-    def test_ps_output_with_spaces_in_the_path_parses(self) -> None:
-        result = subprocess.CompletedProcess(
-            [], 0, stdout="  768 /Applications/My Tools/codex\n", stderr=""
+    def test_macos_reads_the_real_executable_not_argv0(self) -> None:
+        ps = subprocess.CompletedProcess(
+            [], 0, stdout="  768 ttys003  Mon Oct 12 11:43:01 2026\n", stderr=""
+        )
+        real = Path("/Users/me/.codex/packages/standalone/releases/0.159.3/bin/codex")
+        with (
+            patch("konvu_telemetry.codex_runtime.subprocess.run", return_value=ps),
+            patch("konvu_telemetry.codex_runtime.macos_executable", return_value=real),
+        ):
+            found = macos_process(1234)
+        assert found is not None
+        self.assertEqual(
+            (found.ppid, found.executable, found.has_terminal), (768, real, True)
         )
         with (
-            patch("konvu_telemetry.codex_runtime.Path.is_dir", return_value=False),
-            patch("konvu_telemetry.codex_runtime.subprocess.run", return_value=result),
+            patch("konvu_telemetry.codex_runtime.subprocess.run", return_value=ps),
+            patch("konvu_telemetry.codex_runtime.macos_executable", return_value=None),
         ):
+            self.assertIsNone(macos_process(1234))
+
+    def test_macos_reads_terminal_start_time_and_asks_ps_in_the_c_locale(self) -> None:
+        ps = subprocess.CompletedProcess(
+            [], 0, stdout="  768 ??       Mon Oct 12 11:43:01 2026\n", stderr=""
+        )
+        real = Path("/Applications/Codex.app/Contents/MacOS/codex")
+        with (
+            patch(
+                "konvu_telemetry.codex_runtime.subprocess.run", return_value=ps
+            ) as run,
+            patch("konvu_telemetry.codex_runtime.macos_executable", return_value=real),
+        ):
+            found = macos_process(1234)
+        assert found is not None
+        self.assertFalse(found.has_terminal)
+        self.assertEqual(
+            found.started_at, datetime(2026, 10, 12, 11, 43, 1).timestamp()
+        )
+        self.assertEqual(run.call_args.kwargs["env"]["LC_ALL"], "C")
+
+    def test_linux_reads_parent_terminal_and_real_executable_from_proc(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            proc = Path(root)
+            (proc / "exe").symlink_to("/usr/local/bin/codex")
+            (proc / "stat").write_text("123 (co) de) S 77 77 77 34816 0 0\n")
             self.assertEqual(
-                parent_process(1234), (768, Path("/Applications/My Tools/codex"))
+                linux_process(123, proc),
+                AncestorProcess(77, Path("/usr/local/bin/codex"), True, None),
             )
+            (proc / "stat").write_text("123 (codex) S 77 77 77 0 0 0\n")
+            found = linux_process(123, proc)
+            assert found is not None
+            self.assertFalse(found.has_terminal)
+
+    def test_a_failing_or_missing_binary_fails_closed(self) -> None:
+        failed = subprocess.CompletedProcess(
+            [], 1, stdout="codex-cli 0.163.0\n", stderr=""
+        )
+        with patch("konvu_telemetry.codex_runtime.subprocess.run", return_value=failed):
+            self.assertIsNone(codex_binary_version(self.binary))
+        self.binary.unlink()
+        self.assertFalse(self.renders("codex-cli 0.163.0\n"))

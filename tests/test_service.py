@@ -2264,7 +2264,28 @@ class ServiceTests(unittest.TestCase):
                     colored=True,
                 )
             )["systemMessage"]
+            # `codex exec` and unlisted clients record no TUI originator.
+            exec_run = json.loads(
+                self.run_codex_hook(
+                    codex_hook,
+                    "unknown",
+                    session,
+                    health={"status": "healthy"},
+                    colored=True,
+                )
+            )["systemMessage"]
+            unhealthy = json.loads(
+                self.run_codex_hook(
+                    codex_hook,
+                    "cli",
+                    session,
+                    health={"status": "stale"},
+                    colored=True,
+                )
+            )["systemMessage"]
 
+        self.assertIn("konvu-telemetry setup", unhealthy)
+        self.assertTrue(unhealthy.endswith("\n╰─"))
         lines = colored.split("\n")
         self.assertEqual((lines[1], lines[-1]), ("╭─", "╰─"))
         self.assertTrue(all(line.startswith("│ ") for line in lines[2:-1]))
@@ -2282,7 +2303,8 @@ class ServiceTests(unittest.TestCase):
             "╰─",
             plain,
         )
-        for fallback in (older, desktop):
+        self.assertIn("65%", plain)
+        for fallback in (older, desktop, exec_run):
             self.assertNotIn("\x1b[", fallback)
             self.assertIn("│ 🟢 Included", fallback)
 

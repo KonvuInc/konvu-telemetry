@@ -202,7 +202,7 @@ def percentage_color(value: float) -> str:
 
 
 def statusline_width() -> int:
-    """Read Claude's width hint with a conservative fallback."""
+    """Read the terminal width hint with a conservative fallback."""
     try:
         columns = int(os.environ.get("COLUMNS", "80"))
     except ValueError:
@@ -868,7 +868,7 @@ def usage_box_lines(
     if forecast_row is not None:
         rows.append(forecast_row)
     rows.append(dashboard_line().replace("dashboard:", "Open live dashboard"))
-    return ["╭─", *(f"│ {row}" for row in rows), "╰─"]
+    return framed_rows(rows)
 
 
 def prompt_box_context(provider: str, session_id: str) -> str | None:
@@ -1155,8 +1155,8 @@ def codex_hook() -> None:
     if not isinstance(session, dict):
         print(SUPPRESS_OUTPUT)
         return
-    # The VS Code extension runs a plain `codex` binary too; its rollout says desktop.
-    colored = codex_tui_renders_ansi() and not codex_is_desktop(transcript)
+    # Only TUI rollouts qualify: `codex exec` and unlisted clients may run in a terminal too.
+    colored = codex_tui_renders_ansi() and codex_client_in_file(transcript) == "cli"
     lines = (
         framed_rows(statusline_rows(session, None, "codex"))
         if colored
