@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Show the Codex CLI usage box as the same colored meters as the Claude Code status line,
+  framed by the usage box border, when the Codex TUI running in your terminal is 0.162.0
+  or later. Older Codex releases, `codex exec`, the desktop app and editor extensions keep
+  the text box unchanged.
+- End the Claude Code status line with a "View session in dashboard" link that opens the
+  dashboard on that session. The colored Codex CLI box writes the same URL on its own row,
+  pointing at the session's /compact steps when compacting is suggested.
+- Stop labelling the status line "Last known: included · retrying" while a limit refresh
+  is failing; it shows the last limits it has.
 - Send each recurring anonymous event at most once per day for each value: dashboard opens no
   longer count every page reload, and the active-day event now means the collector
   produced visible data that day.

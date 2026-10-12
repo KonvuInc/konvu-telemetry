@@ -23,6 +23,7 @@ from .parsers import (
     codex_hook_transcript,
     codex_turn_tool_calls,
 )
+from .codex_runtime import codex_tui_renders_ansi
 from .provider_limits import stored_provider_quotas
 from .quota_attribution import apply_usage_modes
 from .service import load_health
@@ -201,7 +202,7 @@ def percentage_color(value: float) -> str:
 
 
 def statusline_width() -> int:
-    """Read Claude's width hint with a conservative fallback."""
+    """Read the terminal width hint with a conservative fallback."""
     try:
         columns = int(os.environ.get("COLUMNS", "80"))
     except ValueError:
@@ -224,18 +225,28 @@ def quota_window_value(
     return None
 
 
-def claude_quota_values(snapshot: dict[str, object] | None) -> dict[str, float]:
-    """Read the five-hour and weekly Claude account percentages."""
+def plan_quota_windows(
+    snapshot: dict[str, object] | None, provider: str
+) -> dict[str, tuple[float, str | None]]:
+    """Read one provider's five-hour, weekly and monthly usage with its reset timer.
+
+    Codex can report one bucket per limit; the fullest one binds, and its own reset is kept.
+    """
     accounts = snapshot.get("account_quotas") if isinstance(snapshot, dict) else None
-    account = accounts.get("claude") if isinstance(accounts, dict) else None
+    account = accounts.get(provider) if isinstance(accounts, dict) else None
     windows = account.get("windows") if isinstance(account, dict) else None
-    values: dict[str, float] = {}
+    values: dict[str, tuple[float, str | None]] = {}
     for window in windows if isinstance(windows, list) else []:
         if not isinstance(window, dict):
             continue
         period, used = window.get("period"), window.get("used_percent")
-        if period in {"five_hour", "weekly"} and isinstance(used, (int, float)):
-            values[str(period)] = min(100.0, max(0.0, float(used)))
+        if period not in {"five_hour", "weekly", "monthly"} or not isinstance(
+            used, (int, float)
+        ):
+            continue
+        bounded = min(100.0, max(0.0, float(used)))
+        if str(period) not in values or bounded > values[str(period)][0]:
+            values[str(period)] = (bounded, reset_in(window.get("resets_at")))
     return values
 
 
@@ -354,29 +365,41 @@ def compact_worthwhile(analysis: dict[str, object], used_percent: float) -> bool
     )
 
 
-def compact_panel_url(session: dict[str, object]) -> str:
-    """The dashboard panel that holds the session's full /compact command."""
-    return (
-        f"http://127.0.0.1:{DASHBOARD_PORT}/?session="
-        + quote(f"{session.get('provider') or 'claude'}:{session.get('id')}", safe="")
-        + "&tab=context"
+def session_dashboard_url(session: dict[str, object]) -> str:
+    """The live dashboard with this session selected."""
+    return f"http://127.0.0.1:{DASHBOARD_PORT}/?session=" + quote(
+        f"{session.get('provider') or 'claude'}:{session.get('id')}", safe=""
     )
 
 
-def compact_advice(session: dict[str, object], used_percent: float) -> str | None:
-    """A clickable /compact call to action that opens the panel holding the full command."""
+def compact_panel_url(session: dict[str, object]) -> str:
+    """The dashboard panel that holds the session's full /compact command."""
+    return session_dashboard_url(session) + "&tab=context"
+
+
+def written_url(url: str) -> str:
+    """A URL printed in full, for surfaces that cannot hide it behind OSC 8 link text."""
+    return terminal_style(url, "4;38;5;117")
+
+
+def compact_advice(
+    session: dict[str, object], used_percent: float, hyperlinks: bool = True
+) -> str | None:
+    """A /compact call to action; with hyperlinks it opens the panel holding the full command."""
     analysis = context_analysis(session)
     command = analysis.get("compact_command") if analysis else None
     if not analysis or not command or not compact_worthwhile(analysis, used_percent):
         return None
-    url = compact_panel_url(session)
+    label = terminal_style("/compact", "38;5;141")
+    suggested = terminal_style(" suggested", "38;5;245")
+    if not hyperlinks:
+        # The panel URL is written out on its own row instead (written_dashboard_rows).
+        return label + suggested
     # Only the command word is colored; the terminal's own link styling marks it clickable.
-    return terminal_link(terminal_style("/compact", "38;5;141"), url) + terminal_style(
-        " suggested", "38;5;245"
-    )
+    return terminal_link(label, compact_panel_url(session)) + suggested
 
 
-# Hook output has no terminal colors, so the context bands use colored squares.
+# The text-only usage boxes have no terminal colors, so the context bands use colored squares.
 TEXT_FREE_CELL = "▫️"
 
 
@@ -407,11 +430,13 @@ def text_compact_advice(session: dict[str, object], used_percent: float) -> str 
     return f"✂️ /compact {compact_panel_url(session)}"
 
 
-def context_meter(session: dict[str, object], value: float) -> str:
+def context_meter(
+    session: dict[str, object], value: float, hyperlinks: bool = True
+) -> str:
     """Always draw the thin relevance bar; unrated context renders grey until ratings exist."""
     analysis = context_analysis(session)
     meter = relevance_context_meter("Context", value, 16, analysis or {})
-    advice = compact_advice(session, value)
+    advice = compact_advice(session, value, hyperlinks)
     return meter + (terminal_style("  ·  ", "38;5;245") + advice if advice else "")
 
 
@@ -432,45 +457,86 @@ def wrap_statusline_segments(segments: list[str], width: int) -> list[str]:
     return rows
 
 
-def cli_dashboard_line() -> str:
-    """Render a styled dashboard link only while the local collector is healthy."""
+def cli_dashboard_line(session: dict[str, object] | None = None) -> str:
+    """Link the dashboard, opened on this session when known, while the collector is healthy."""
     line = dashboard_line()
     prefix = "🔗 dashboard: "
     if not line.startswith(prefix):
         return line
-    url = line.removeprefix(prefix)
-    label = terminal_style("🔗 Open live dashboard", "38;5;245")
+    if isinstance(session, dict) and isinstance(session.get("id"), str):
+        text, url = "🔗 View session in dashboard", session_dashboard_url(session)
+    else:
+        text, url = "🔗 Open live dashboard", line.removeprefix(prefix)
+    label = terminal_style(text, "38;5;245")
     if os.environ.get("NO_COLOR") or os.environ.get("TERM") == "dumb":
         return f"{label} {url}"
     return terminal_link(label, url)
 
 
-def claude_statusline_rows(
-    session: dict[str, object], context_percent: float | None
+def written_dashboard_rows(session: dict[str, object], compact_due: bool) -> list[str]:
+    """The dashboard link for surfaces without OSC 8: a label row with the URL beneath it.
+
+    The URL gets a row of its own so a wrapped label never splits it; when /compact is
+    suggested it opens the session's context tab, which holds the full command.
+    """
+    line = dashboard_line()
+    prefix = "🔗 dashboard: "
+    if not line.startswith(prefix):
+        return [line]
+    if not isinstance(session.get("id"), str):
+        text, url = "🔗 Open live dashboard", line.removeprefix(prefix)
+    elif compact_due:
+        text, url = "🔗 View /compact steps in dashboard", compact_panel_url(session)
+    else:
+        text, url = "🔗 View session in dashboard", session_dashboard_url(session)
+    return [terminal_style(text, "38;5;245"), written_url(url)]
+
+
+def statusline_rows(
+    session: dict[str, object],
+    context_percent: float | None,
+    provider: str = "claude",
 ) -> list[str]:
-    """Render the responsive Claude CLI-only usage HUD from real session data."""
+    """Render the responsive CLI usage HUD from real session data.
+
+    The Claude status line prints these rows flat; the Codex Stop hook frames them.
+    Codex's hook renderer drops OSC 8 links, so its rows write the dashboard URL out
+    on a row of its own.
+    """
     usage_mode = session.get("usage_mode")
-    quotas = claude_quota_values({"account_quotas": stored_provider_quotas()})
-    resets = quota_reset_times("claude")
+    hyperlinks = provider == "claude"
+    # Dashboard links name the provider whose rows these are.
+    linked = {**session, "provider": provider}
+    windows = plan_quota_windows({"account_quotas": stored_provider_quotas()}, provider)
+    quotas = {period: used for period, (used, _) in windows.items()}
+    resets = {period: reset for period, (_, reset) in windows.items() if reset}
     width = statusline_width()
     cells = 13 if width < 62 else 14
-    quota_stale = session.get("quota_status") == "stale"
     if usage_mode in {"api_billed", "exhausted"}:
         label = "● Paying"
         color = "1;38;5;203"
     elif usage_mode == "included":
-        label = "● Last known: included · retrying" if quota_stale else "● Included"
-        color = "1;38;5;221" if quota_stale else "1;38;5;78"
-    else:
+        label, color = "● Included", "1;38;5;78"
+    elif provider == "claude":
         label = "● Subscription limits unavailable · retrying"
         color = "1;38;5;245"
-    segments = [terminal_style(label, color)]
+    else:
+        # Codex usage boxes show no placeholder for a plan they cannot classify.
+        label, color = None, ""
+    segments = [terminal_style(label, color)] if label else []
     if usage_mode in {"api_billed", "exhausted"}:
-        reset = paying_reset_in("claude") if usage_mode == "exhausted" else None
+        reset = paying_reset_in(provider) if usage_mode == "exhausted" else None
         if reset:
             segments.append(terminal_style(f"Limits reset in {reset}", "38;5;245"))
+        # Paying Codex sessions draw on monthly credits, as the text box shows too.
+        if provider == "codex" and "monthly" in quotas:
+            segments.append(compact_status_meter("Credits", quotas["monthly"], cells))
     else:
         for meter_label, period in (("5h", "five_hour"), ("Week", "weekly")):
+            # Claude always has both windows, so a gap there is a fetch gap worth showing;
+            # Codex plans can lack one entirely.
+            if provider != "claude" and period not in quotas:
+                continue
             segments.append(
                 compact_status_meter(
                     meter_label, quotas.get(period), cells, resets.get(period)
@@ -487,7 +553,11 @@ def claude_statusline_rows(
             and raw_window > 0
         ):
             context = raw_context / raw_window * 100
-    rows.append(context_meter(session, context if context is not None else 0.0))
+    # Claude's status line always has a live payload figure; Codex leaves an unknown out.
+    if context is not None or provider == "claude":
+        rows.append(
+            context_meter(linked, context if context is not None else 0.0, hyperlinks)
+        )
     forecast_row: str | None = None
     if usage_mode in {"api_billed", "exhausted"}:
         paid = session.get("total_cost_usd")
@@ -520,8 +590,12 @@ def claude_statusline_rows(
                 + terminal_style("forecasted in next 10 prompts", "38;5;245")
             )
     elif usage_mode == "included":
-        attribution = quota_window_value(session, "five_hour", "estimated_percent")
-        forecast = quota_window_value(session, "five_hour", "projected_next_10_percent")
+        # Same forecast window as the hook boxes: Codex sessions are bound by the week.
+        period, period_label = (
+            ("weekly", "weekly") if provider == "codex" else ("five_hour", "5h")
+        )
+        attribution = quota_window_value(session, period, "estimated_percent")
+        forecast = quota_window_value(session, period, "projected_next_10_percent")
         if attribution is not None and forecast is not None:
             projected = min(100.0, attribution + forecast)
             forecast_row = (
@@ -529,7 +603,7 @@ def claude_statusline_rows(
                 + " "
                 + terminal_style(f"{attribution:.1f}%", "1;38;5;255")
                 + " "
-                + terminal_style("of 5h limit", "38;5;245")
+                + terminal_style(f"of {period_label} limit", "38;5;245")
                 + " "
                 + terminal_style("━━━▶", "1;38;5;141")
                 + " "
@@ -539,7 +613,13 @@ def claude_statusline_rows(
             )
     if forecast_row is not None:
         rows.append(forecast_row)
-    rows.append(cli_dashboard_line())
+    if hyperlinks:
+        rows.append(cli_dashboard_line(linked))
+    else:
+        compact_due = (
+            context is not None and compact_advice(linked, context) is not None
+        )
+        rows.extend(written_dashboard_rows(linked, compact_due))
     return rows
 
 
@@ -575,7 +655,7 @@ def statusline() -> None:
         if context_percent is None:
             context_percent = 0.0
     # Claude's context is live, but its rate-limit payload can lag the provider API.
-    rows = claude_statusline_rows(session, context_percent)
+    rows = statusline_rows(session, context_percent)
     for row in rows:
         print(row)
 
@@ -788,7 +868,7 @@ def usage_box_lines(
     if forecast_row is not None:
         rows.append(forecast_row)
     rows.append(dashboard_line().replace("dashboard:", "Open live dashboard"))
-    return ["╭─", *(f"│ {row}" for row in rows), "╰─"]
+    return framed_rows(rows)
 
 
 def prompt_box_context(provider: str, session_id: str) -> str | None:
@@ -1046,6 +1126,11 @@ def silent_hook(hook: Callable[[], None]) -> Callable[[], None]:
     return guarded
 
 
+def framed_rows(rows: list[str]) -> list[str]:
+    """Wrap rows in the hook usage box's left border."""
+    return ["╭─", *(f"│ {row}" for row in rows), "╰─"]
+
+
 @silent_hook
 def codex_hook() -> None:
     """Return the boxed Codex usage message at the end of a completed turn."""
@@ -1070,7 +1155,13 @@ def codex_hook() -> None:
     if not isinstance(session, dict):
         print(SUPPRESS_OUTPUT)
         return
-    lines = usage_box_lines(session, recorded_quota_usage_text("codex"), "codex")
+    # Only TUI rollouts qualify: `codex exec` and unlisted clients may run in a terminal too.
+    colored = codex_tui_renders_ansi() and codex_client_in_file(transcript) == "cli"
+    lines = (
+        framed_rows(statusline_rows(session, None, "codex"))
+        if colored
+        else usage_box_lines(session, recorded_quota_usage_text("codex"), "codex")
+    )
     print(json.dumps({"systemMessage": "\n" + "\n".join(lines)}))
     record_usage_shown("codex", session_id)
 
