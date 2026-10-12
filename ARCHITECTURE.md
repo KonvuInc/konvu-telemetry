@@ -53,7 +53,7 @@ Konvu Telemetry is one Python package with a single resident process. The proces
 | `~/.konvu/telemetry/tracking-queue.json` | At most 100 pending anonymous analytics events | `0600` |
 | `~/.konvu/telemetry/tracking.lock` | Cross-process lock for analytics state and queue | `0600` |
 | `~/.konvu/telemetry/preferences.json` | Chosen display cadence, custom rule text and jump threshold | `0600` |
-| `~/.konvu/telemetry/preferences.lock` | Cross-process lock so the command and dashboard cannot revert each other | `0600` |
+| `~/.konvu/telemetry/preferences.lock` | Cross-process lock for partial preference updates from the command and dashboard | `0600` |
 | `~/.konvu/telemetry/collector.lock` | Held by the running service so a second collector exits, or hands over after an upgrade | `0600` |
 | `~/.konvu/telemetry/collection.lock` | Cross-process lock so `once` and the service never write one collection at the same time | `0600` |
 | `~/.konvu/telemetry/quota-attribution.json` | Quota-share ledger, read and rewritten whole on every collection | `0600` |

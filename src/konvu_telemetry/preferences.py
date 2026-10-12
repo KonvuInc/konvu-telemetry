@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from typing import Literal, TypedDict
+import math
+from typing import Literal, TypeGuard, TypedDict
 
 from .storage import (
     preferences_path,
@@ -32,6 +33,16 @@ MIN_CUSTOM_RULE_LENGTH = 3
 # Long enough for any rule a person writes by hand. An over-long one is refused
 # rather than cut down, so the stored rule is always the rule that was typed.
 MAX_CUSTOM_RULE_LENGTH = 2000
+
+
+def valid_jump_percent(value: object) -> TypeGuard[int | float]:
+    """Accept only finite positive numeric thresholds."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value) and value > 0
+    except OverflowError:
+        return False
 
 
 class Preferences(TypedDict):
@@ -84,12 +95,15 @@ def read_preferences() -> Preferences:
     if value["cadence"] != "custom":
         value["custom_rule"] = ""
     jump = raw.get("jump_percent")
-    if isinstance(jump, (int, float)) and not isinstance(jump, bool) and jump > 0:
+    if valid_jump_percent(jump):
         value["jump_percent"] = float(jump)
     consent = raw.get("context_analysis_consent")
-    if consent in {"enabled", "disabled"}:
-        value["context_analysis_consent"] = consent
-        value["context_analysis_enabled"] = consent == "enabled"
+    if consent == "enabled":
+        value["context_analysis_consent"] = "enabled"
+        value["context_analysis_enabled"] = True
+    elif consent == "disabled":
+        value["context_analysis_consent"] = "disabled"
+        value["context_analysis_enabled"] = False
     if raw.get("context_analysis_allow_paid") is True:
         value["context_analysis_allow_paid"] = True
     return value
@@ -121,15 +135,17 @@ def ensure_preferences_file() -> Preferences:
     return current
 
 
-def write_preferences(
-    cadence: str,
+def update_preferences(
+    cadence: str | None = None,
     custom_rule: str = "",
     jump_percent: float | None = None,
     context_analysis_enabled: bool | None = None,
     context_analysis_allow_paid: bool | None = None,
 ) -> Preferences:
-    """Store a cadence choice. An unknown cadence is rejected, not coerced."""
-    if cadence not in CADENCES:
+    """Merge explicitly supplied preferences with the current file under a lock."""
+    if jump_percent is not None and not valid_jump_percent(jump_percent):
+        raise ValueError("Jump percent must be finite and greater than zero")
+    if cadence is not None and cadence not in CADENCES:
         raise ValueError("Unknown cadence: " + cadence)
     if cadence == "custom":
         if len(custom_rule.strip()) < MIN_CUSTOM_RULE_LENGTH:
@@ -143,14 +159,21 @@ def write_preferences(
     # read-modify-write that carries jump_percent forward runs under a lock.
     with preferences_write_lock():
         current = read_preferences()
+        selected_cadence = cadence if cadence is not None else current["cadence"]
         value: Preferences = {
-            "cadence": cadence,
+            "cadence": selected_cadence,
             # A custom rule is only meaningful for the custom cadence; keeping a
             # stale one around would misrepresent what is in force.
-            "custom_rule": custom_rule if cadence == "custom" else "",
-            "jump_percent": float(jump_percent)
-            if isinstance(jump_percent, (int, float)) and jump_percent > 0
-            else current["jump_percent"],
+            "custom_rule": (
+                (custom_rule if cadence == "custom" else current["custom_rule"])
+                if selected_cadence == "custom"
+                else ""
+            ),
+            "jump_percent": (
+                float(jump_percent)
+                if jump_percent is not None
+                else current["jump_percent"]
+            ),
             "context_analysis_enabled": (
                 context_analysis_enabled
                 if isinstance(context_analysis_enabled, bool)
@@ -169,6 +192,23 @@ def write_preferences(
         }
         write_private_json(preferences_path(), value)
     return value
+
+
+def write_preferences(
+    cadence: str,
+    custom_rule: str = "",
+    jump_percent: float | None = None,
+    context_analysis_enabled: bool | None = None,
+    context_analysis_allow_paid: bool | None = None,
+) -> Preferences:
+    """Store a cadence choice while preserving settings not explicitly supplied."""
+    return update_preferences(
+        cadence,
+        custom_rule,
+        jump_percent,
+        context_analysis_enabled,
+        context_analysis_allow_paid,
+    )
 
 
 def custom_rule_prompt(rule: str) -> str:

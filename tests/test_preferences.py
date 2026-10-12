@@ -1,4 +1,4 @@
-from contextlib import contextmanager, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from io import StringIO
 import json
 import os
@@ -23,6 +23,7 @@ from konvu_telemetry.preferences import (
     MAX_CUSTOM_RULE_LENGTH,
     custom_rule_prompt,
     read_preferences,
+    update_preferences,
     write_preferences,
 )
 
@@ -41,6 +42,57 @@ class PreferencesTests(unittest.TestCase):
         self.assertTrue(preferences["context_analysis_enabled"])
         self.assertFalse(preferences["context_analysis_allow_paid"])
         self.assertEqual(preferences["context_analysis_consent"], "unset")
+
+    def test_unhashable_stored_consent_falls_back_to_default(self) -> None:
+        for consent in ([], {}):
+            preferences_path().write_text(
+                json.dumps({"context_analysis_consent": consent})
+            )
+            self.assertEqual(read_preferences()["context_analysis_consent"], "unset")
+
+    def test_nonfinite_jump_percent_never_reaches_storage(self) -> None:
+        for jump in (float("inf"), float("-inf"), float("nan")):
+            with self.assertRaises(ValueError):
+                write_preferences("usage-jump", jump_percent=jump)
+            preferences_path().write_text(json.dumps({"jump_percent": jump}))
+            self.assertEqual(read_preferences()["jump_percent"], DEFAULT_JUMP_PERCENT)
+
+    def test_cli_rejects_nonfinite_jump_percent(self) -> None:
+        with self.assertRaises(SystemExit) as exit_code, redirect_stderr(StringIO()):
+            cli_main(["cadence", "usage-jump", "--jump-percent", "inf"])
+        self.assertEqual(exit_code.exception.code, 2)
+        self.assertFalse(preferences_path().exists())
+
+    def test_partial_updates_preserve_other_writers_choices(self) -> None:
+        write_preferences("custom", "only above 80%")
+        update_preferences(context_analysis_allow_paid=True)
+        update_preferences(context_analysis_enabled=False)
+        preference = read_preferences()
+        self.assertEqual(
+            (preference["cadence"], preference["custom_rule"]),
+            ("custom", "only above 80%"),
+        )
+        self.assertTrue(preference["context_analysis_allow_paid"])
+        self.assertEqual(preference["context_analysis_consent"], "disabled")
+
+    def test_cli_analysis_update_does_not_restore_a_stale_cadence(self) -> None:
+        stale = read_preferences()
+
+        def read_before_another_writer() -> dict[str, object]:
+            write_preferences("never")
+            return stale
+
+        with (
+            patch(
+                "konvu_telemetry.cli.read_preferences",
+                side_effect=read_before_another_writer,
+            ),
+            redirect_stdout(StringIO()),
+        ):
+            cli_main(["context-analysis", "status", "--allow-paid"])
+
+        self.assertEqual(read_preferences()["cadence"], "never")
+        self.assertTrue(read_preferences()["context_analysis_allow_paid"])
 
     def test_an_explicit_no_survives_the_new_default(self) -> None:
         preferences_path().write_text(

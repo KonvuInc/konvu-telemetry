@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Literal
 
 from .config import package_version
-from .preferences import ensure_preferences_file, write_preferences
+from .preferences import ensure_preferences_file, update_preferences
 from .service import dashboard_open_url, load_health
 from .storage import preferences_path
 from .tracking import record_setup_completed as record_setup_event
@@ -735,14 +735,9 @@ def setup(
     ]
     try:
         install_launcher()
-        preferences = ensure_preferences_file()
+        ensure_preferences_file()
         if context_analysis_enabled is not None:
-            write_preferences(
-                preferences["cadence"],
-                preferences["custom_rule"],
-                preferences["jump_percent"],
-                context_analysis_enabled=context_analysis_enabled,
-            )
+            update_preferences(context_analysis_enabled=context_analysis_enabled)
         claude = install_claude_statusline(ensure_launcher=False, create_backup=False)
         # Older versions installed a Claude Stop hook; the status line covers the CLI now.
         claude_stop_removed = remove_claude_stop_hook(create_backup=False)
