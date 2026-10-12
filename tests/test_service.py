@@ -1849,9 +1849,12 @@ class ServiceTests(unittest.TestCase):
     def test_track_endpoint_accepts_only_allowlisted_dashboard_actions(self) -> None:
         def post(body: bytes) -> MagicMock:
             handler = object.__new__(DashboardRequestHandler)
+            handler.server = Mock(server_port=7824)
+            handler.auth_secret = "test-secret"
             handler.headers = {
                 "Host": "127.0.0.1:7824",
                 "Origin": "http://127.0.0.1:7824",
+                "Cookie": "konvu_dashboard=test-secret",
                 "Content-Length": str(len(body)),
             }
             handler.path = "/api/track"
@@ -1890,7 +1893,14 @@ class ServiceTests(unittest.TestCase):
         # The request omits analysis, so the stored value is what must be recorded.
         body = json.dumps({"cadence": "every-tool-call"}).encode()
         handler = object.__new__(DashboardRequestHandler)
-        handler.headers = {"Host": "127.0.0.1:7824", "Content-Length": str(len(body))}
+        handler.server = Mock(server_port=7824)
+        handler.auth_secret = "test-secret"
+        handler.headers = {
+            "Host": "127.0.0.1:7824",
+            "Origin": "http://127.0.0.1:7824",
+            "Cookie": "konvu_dashboard=test-secret",
+            "Content-Length": str(len(body)),
+        }
         handler.path = "/api/preferences"
         handler.rfile = Mock(read=Mock(return_value=body))
         handler._send_json = MagicMock()
@@ -1934,7 +1944,14 @@ class ServiceTests(unittest.TestCase):
         for path in ("/api/track", "/api/preferences"):
             for length, body in (("ten", b"{}"), ("1", b"\x80")):
                 handler = object.__new__(DashboardRequestHandler)
-                handler.headers = {"Host": "127.0.0.1:7824", "Content-Length": length}
+                handler.server = Mock(server_port=7824)
+                handler.auth_secret = "test-secret"
+                handler.headers = {
+                    "Host": "127.0.0.1:7824",
+                    "Origin": "http://127.0.0.1:7824",
+                    "Cookie": "konvu_dashboard=test-secret",
+                    "Content-Length": length,
+                }
                 handler.path = path
                 handler.rfile = Mock(read=Mock(return_value=body))
                 handler.send_error = MagicMock()
@@ -1950,6 +1967,7 @@ class ServiceTests(unittest.TestCase):
 
     def test_track_endpoint_refuses_foreign_origins(self) -> None:
         handler = object.__new__(DashboardRequestHandler)
+        handler.server = Mock(server_port=7824)
         handler.headers = {"Host": "127.0.0.1:7824", "Origin": "https://evil.example"}
         handler.path = "/api/track"
         handler.send_error = MagicMock()
