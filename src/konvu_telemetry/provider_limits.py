@@ -556,7 +556,9 @@ def fetch_codex_app_server_limits(now: float | None = None) -> FetchResult:
     pending = bytearray()
     try:
         process = subprocess.Popen(
-            [executable, "app-server", "--stdio"],
+            # Plugins off: startup otherwise clones every marketplace, and killing
+            # the server mid-clone leaks it into ~/.codex/.tmp on Codex < 0.164.
+            [executable, "app-server", "--stdio", "--disable", "plugins"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,

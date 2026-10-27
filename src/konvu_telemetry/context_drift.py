@@ -780,6 +780,7 @@ CODEX_DISABLED_FEATURES = (
     "multi_agent",
     "view_image",
     "skill_search",
+    "plugins",
 )
 
 

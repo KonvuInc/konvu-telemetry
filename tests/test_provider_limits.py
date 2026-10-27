@@ -40,8 +40,8 @@ import json
 import sys
 import time
 
-REPLIES = json.loads(sys.argv[3]) if len(sys.argv) > 3 else {}
-STALL = json.loads(sys.argv[4]) if len(sys.argv) > 4 else None
+REPLIES = json.loads(sys.argv[1])
+STALL = json.loads(sys.argv[2])
 out = sys.stdout.buffer
 for raw in sys.stdin.buffer:
     request_id = str(json.loads(raw).get("id"))
@@ -310,6 +310,22 @@ class ProviderLimitsTests(unittest.TestCase):
             messages,
         )
 
+    @patch("konvu_telemetry.provider_limits._response")
+    @patch("konvu_telemetry.provider_limits.subprocess.Popen")
+    @patch("konvu_telemetry.provider_limits._codex_executable")
+    def test_codex_app_server_starts_without_plugin_marketplace_sync(
+        self, executable: Mock, popen: Mock, response: Mock
+    ) -> None:
+        executable.return_value = "/trusted/codex"
+        popen.return_value.poll.return_value = 0
+        response.return_value = None
+
+        fetch_codex_app_server_limits(1_767_225_600)
+
+        command = popen.call_args.args[0]
+        self.assertEqual(command[:3], ["/trusted/codex", "app-server", "--stdio"])
+        self.assertEqual(command[command.index("--disable") + 1], "plugins")
+
     def fake_app_server(
         self,
         directory: Path,
@@ -325,9 +341,9 @@ class ProviderLimitsTests(unittest.TestCase):
             + " ".join(
                 [
                     f"exec {sys.executable} {script}",
-                    '"$@"',
                     f"'{json.dumps(replies)}'",
-                    f"'{json.dumps(stall)}'" if stall is not None else "",
+                    f"'{json.dumps(stall)}'",
+                    '"$@"',
                 ]
             )
             + "\n"
