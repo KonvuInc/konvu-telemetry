@@ -2052,7 +2052,8 @@ class ContextDriftTests(unittest.TestCase):
             if flag == "--disable"
         }
         self.assertTrue(
-            {"shell_tool", "unified_exec", "apps", "computer_use"} <= disabled
+            {"shell_tool", "unified_exec", "apps", "computer_use", "plugins"}
+            <= disabled
         )
         self.assertIn('web_search="disabled"', command)
         self.assertEqual(outcome["usage"]["input_tokens"], 12)

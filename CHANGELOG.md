@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Start the Codex app-server and the Codex context rater with plugins off, so the
+  two-minute limit poll no longer clones every plugin marketplace into `~/.codex/.tmp`.
+  Codex before 0.164 left each clone behind when the poll stopped the server, which filled
+  tens of gigabytes. Limits are unchanged; existing leftovers are not removed.
 - Shorten every session link in the status line, the Codex box and the desktop boxes to a
   local link like `http://127.0.0.1:7824/s/146mw93`, which the dashboard redirects to
   the session. Nothing leaves your machine.
