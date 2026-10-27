@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.5 - 2026-10-27
 
 - Show the colored Codex CLI usage box when the Codex TUI runs its sessions through the
   shared local app-server daemon. The daemon has no terminal, so the box fell back to
