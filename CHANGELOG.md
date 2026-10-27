@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.4 - 2026-10-27
 
 - Start the Codex app-server and the Codex context rater with plugins off, so the
   two-minute limit poll no longer clones every plugin marketplace into `~/.codex/.tmp`.
