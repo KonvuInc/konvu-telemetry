@@ -28,6 +28,7 @@ from konvu_telemetry.codex_runtime import (
     codex_tui_renders_ansi,
     process_info,
     run_text,
+    terminal_codex_executables,
 )
 
 
@@ -498,6 +499,7 @@ class CodexRuntimeTests(unittest.TestCase):
         version_output: str,
         has_terminal: bool = True,
         codex: Path | None = None,
+        open_tuis: set[Path] | None = None,
     ) -> bool:
         chain = {
             100: (90, Path("/opt/homebrew/bin/python3"), False),
@@ -510,6 +512,10 @@ class CodexRuntimeTests(unittest.TestCase):
             patch(
                 "konvu_telemetry.codex_runtime.run_text", return_value=version_output
             ) as probe,
+            patch(
+                "konvu_telemetry.codex_runtime.terminal_codex_executables",
+                return_value=open_tuis or set(),
+            ),
         ):
             rendered = codex_tui_renders_ansi()
         if has_terminal and (codex or self.tui).name == "codex":
@@ -526,9 +532,27 @@ class CodexRuntimeTests(unittest.TestCase):
         self.assertFalse(self.renders("codex-cli 0.162.0-alpha.3\n"))
         self.assertFalse(self.renders(""))
 
-    def test_a_codex_without_a_terminal_is_not_a_tui(self) -> None:
+    def test_an_app_server_without_open_tuis_fails_closed(self) -> None:
         # The desktop app and editor extensions run Codex as a background app server.
         self.assertFalse(self.renders("codex-cli 0.163.0\n", has_terminal=False))
+
+    def test_the_shared_daemon_asks_every_tui_open_on_the_machine(self) -> None:
+        daemon = Path("/Users/me/.codex/packages/app-server-daemon/0.164.0/bin/codex")
+        old = Path("/usr/local/bin/codex")
+        versions = {self.tui: (0, 162, 1), old: (0, 155, 1)}
+        with patch(
+            "konvu_telemetry.codex_runtime.codex_version", side_effect=versions.get
+        ):
+            # The daemon's own version does not matter: the TUIs render the message.
+            self.assertTrue(
+                self.renders("", has_terminal=False, codex=daemon, open_tuis={self.tui})
+            )
+            # An attached TUI from before ANSI support would print raw escapes.
+            self.assertFalse(
+                self.renders(
+                    "", has_terminal=False, codex=daemon, open_tuis={self.tui, old}
+                )
+            )
 
     def test_no_codex_ancestor_fails_closed(self) -> None:
         self.assertFalse(
@@ -583,3 +607,53 @@ class CodexRuntimeTests(unittest.TestCase):
             self.assertIsNone(run_text(["codex", "--version"]))
         with patch("konvu_telemetry.codex_runtime.subprocess.run", side_effect=OSError):
             self.assertIsNone(run_text(["codex", "--version"]))
+
+    def test_linux_finds_codex_processes_that_own_a_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            for pid, exe, tty in (
+                (10, "/usr/local/bin/codex", 34816),
+                (11, "/opt/codex/bin/codex", 0),
+                (12, "/usr/bin/bash", 34817),
+            ):
+                proc = Path(root) / str(pid)
+                proc.mkdir()
+                (proc / "exe").symlink_to(exe)
+                (proc / "stat").write_text(f"{pid} (x) S 1 1 1 {tty} 0 0\n")
+            (Path(root) / "self").mkdir()
+
+            self.assertEqual(
+                terminal_codex_executables(Path(root)), {Path("/usr/local/bin/codex")}
+            )
+
+    def test_macos_only_resolves_processes_that_own_a_terminal(self) -> None:
+        paths = {
+            501: b"/Users/me/.codex/bin/codex",
+            502: b"/bin/zsh",
+            503: b"/Users/me/.codex/daemon/bin/codex",
+        }
+        looked_up: list[int] = []
+
+        def proc_pidpath(
+            pid: int, buffer: ctypes.Array[ctypes.c_char], size: int
+        ) -> int:
+            looked_up.append(pid)
+            buffer.value = paths[pid]
+            return len(paths[pid])
+
+        def ps(command: list[str]) -> str:
+            if command[1] == "-axo":
+                return "  501 ttys003\n  502 ttys003\n  503 ??\n"
+            return {"501": "  1 ttys003\n", "502": "  1 ttys003\n"}[command[-1]]
+
+        with (
+            tempfile.TemporaryDirectory() as root,
+            patch("konvu_telemetry.codex_runtime.run_text", side_effect=ps),
+            patch(
+                "konvu_telemetry.codex_runtime.ctypes.CDLL",
+                return_value=SimpleNamespace(proc_pidpath=proc_pidpath),
+            ),
+        ):
+            found = terminal_codex_executables(Path(root) / "missing")
+
+        self.assertEqual(found, {Path("/Users/me/.codex/bin/codex")})
+        self.assertEqual(sorted(looked_up), [501, 502])

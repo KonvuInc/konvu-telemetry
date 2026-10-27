@@ -50,12 +50,43 @@ def process_info(
     return int(fields[0]), Path(os.fsdecode(buffer.value)), fields[1] != "??"
 
 
+def codex_version(executable: Path) -> tuple[int, ...]:
+    """A Codex binary's release version, or an empty tuple when it cannot be read."""
+    match = VERSION_OUTPUT.fullmatch(run_text([str(executable), "--version"]) or "")
+    return tuple(int(part) for part in match[1].split(".")) if match else ()
+
+
+def terminal_codex_executables(proc_root: Path = Path("/proc")) -> set[Path]:
+    """Every Codex binary running with a terminal on this machine: its open TUIs."""
+    if proc_root.is_dir():
+        pids = [
+            int(entry.name) for entry in proc_root.iterdir() if entry.name.isdigit()
+        ]
+    else:
+        # macOS: one ps call finds terminal processes; only those need a libproc lookup.
+        rows = (run_text(["ps", "-axo", "pid=,tty="]) or "").splitlines()
+        pids = [
+            int(fields[0])
+            for fields in (row.split() for row in rows)
+            if len(fields) == 2 and fields[0].isdigit() and fields[1] != "??"
+        ]
+    executables: set[Path] = set()
+    for pid in pids:
+        info = process_info(pid, proc_root)
+        if info is not None and info[2] and info[1].name == "codex":
+            executables.add(info[1])
+    return executables
+
+
 def codex_tui_renders_ansi() -> bool:
     """Whether the Codex TUI running this hook shows ANSI colors instead of raw escapes.
 
     The running binary decides, since a resumed session may run on another install than
-    the one that created it. Only a Codex with a terminal is a TUI: the desktop app and
-    editor extensions show the Stop message as plain text. Unknown fails closed.
+    the one that created it. A Codex with a terminal is the TUI itself. A Codex without
+    one is an app server: the shared daemon runs hooks for every TUI attached to it, so
+    each TUI open on this machine must render colors. Callers still require a TUI
+    session, which keeps the desktop app and editor extensions on plain text. Unknown
+    fails closed.
     """
     pid = os.getppid()
     for _ in range(MAX_ANCESTOR_HOPS):
@@ -64,8 +95,8 @@ def codex_tui_renders_ansi() -> bool:
             return False
         pid, executable, has_terminal = info
         if executable.name == "codex":
-            output = run_text([str(executable), "--version"]) if has_terminal else None
-            match = VERSION_OUTPUT.fullmatch(output or "")
-            version = tuple(int(part) for part in match[1].split(".")) if match else ()
-            return version >= CODEX_ANSI_HOOK_VERSION
+            if has_terminal:
+                return codex_version(executable) >= CODEX_ANSI_HOOK_VERSION
+            versions = [codex_version(tui) for tui in terminal_codex_executables()]
+            return bool(versions) and min(versions) >= CODEX_ANSI_HOOK_VERSION
     return False

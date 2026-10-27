@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Show the colored Codex CLI usage box when the Codex TUI runs its sessions through the
+  shared local app-server daemon. The daemon has no terminal, so the box fell back to
+  plain text; it now checks the Codex TUIs open on the machine and stays plain if any
+  of them predates 0.162.0.
+
 ## 1.0.4 - 2026-10-27
 
 - Start the Codex app-server and the Codex context rater with plugins off, so the
