@@ -10,10 +10,10 @@ const source = fs.readFileSync(path.join(__dirname, "../src/konvu_telemetry/dash
 const browser = { location: { search: "" }, URLSearchParams };
 vm.runInNewContext(
   source.slice(0, source.lastIndexOf("\ninitialUrl();")) +
-    "\nglobalThis.helpers = { state, cost, money, planGroups, groupHeading, promptCostGraph, sessionGraph, analysisUsageText };",
+    "\nglobalThis.helpers = { state, cost, money, planGroups, groupHeading, promptCostGraph, sessionGraph, fleetGraph, analysisUsageText };",
   browser,
 );
-const { state, cost, money, planGroups, groupHeading, promptCostGraph, sessionGraph, analysisUsageText } = browser.helpers;
+const { state, cost, money, planGroups, groupHeading, promptCostGraph, sessionGraph, fleetGraph, analysisUsageText } = browser.helpers;
 
 test("stale quota groups sessions under unknown plan status", () => {
   const session = { id: "one", provider: "claude", usage_mode: "unknown" };
@@ -51,6 +51,16 @@ test("incomplete costs stay out of money and both spending charts", () => {
   session.out_of_plan_spend_status = "incomplete_baseline";
   assert.equal(cost(session), null);
   assert.match(sessionGraph(session), /Spend estimate incomplete/);
+});
+
+test("fleet graph explains incomplete paying spend and unknown plan state", () => {
+  const paying = { id: "paid", provider: "claude", usage_mode: "exhausted", cost_status: "partial", total_cost_usd: 2, task_count: 1 };
+  assert.match(fleetGraph([paying]), /Spend estimate incomplete/);
+  assert.doesNotMatch(fleetGraph([paying]), /Subscription usage is included/);
+  const apiBilled = { ...paying, usage_mode: "api_billed" };
+  assert.match(fleetGraph([apiBilled]), /Spend estimate incomplete/);
+  const unknown = { id: "unknown", provider: "claude", usage_mode: "unknown", task_count: 1 };
+  assert.match(fleetGraph([unknown]), /Plan status unavailable/);
 });
 
 test("unpriced analysis is marked incomplete and tiny amounts remain visible", () => {

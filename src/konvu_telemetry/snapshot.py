@@ -749,7 +749,7 @@ def build_snapshot(
         now,
         provider_quotas,
     )
-    apply_quota_attribution(snapshot)
+    apply_quota_attribution(snapshot, prices)
     apply_usage_modes(snapshot)
     apply_out_of_plan_accounting(snapshot, prices)
     for session in sessions:

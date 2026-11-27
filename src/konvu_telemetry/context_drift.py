@@ -2688,6 +2688,11 @@ class ContextDriftScheduler:
                             job["provider"], outcome["model"], token_usage
                         )
                     ),
+                    cost_source=(
+                        "reported"
+                        if "reported_cost_microusd" in outcome["usage"]
+                        else "estimated"
+                    ),
                     calls=max(1, _integer(outcome.get("calls"), 1)),
                 )
             except OSError:
@@ -3084,6 +3089,9 @@ class ContextDriftScheduler:
                             int,
                         )
                         else _analysis_cost(provider, model, token_usage)
+                    ),
+                    cost_source=(
+                        "reported" if isinstance(reported, int) else "estimated"
                     ),
                     calls=max(1, _integer(run.get("calls"), 1)),
                 )

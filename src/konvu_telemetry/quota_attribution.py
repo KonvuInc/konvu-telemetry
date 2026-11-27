@@ -11,7 +11,8 @@ import time
 from typing import TypedDict
 
 from .config import FORECAST_WINDOW
-from .pricing import load_pricing
+from .models import Usage, UsageEvent
+from .pricing import event_cost, load_pricing
 from .storage import (
     analysis_usage_path,
     out_of_plan_spend_path,
@@ -60,6 +61,7 @@ def record_analysis_usage(
     token_usage: dict[str, int] | None = None,
     cost_usd: float | None = None,
     calls: int | None = None,
+    cost_source: str | None = None,
 ) -> None:
     """Queue one ephemeral analysis pass for normal quota attribution."""
     if (
@@ -99,6 +101,8 @@ def record_analysis_usage(
             details["token_usage"] = dict(token_usage)
         if cost_usd is not None and math.isfinite(cost_usd) and cost_usd >= 0:
             details["cost_usd"] = round(cost_usd, 6)
+        if cost_source in {"estimated", "reported"}:
+            details["cost_source"] = cost_source
         # A pass makes one model call per batch; the hourly call cap reads this back.
         if calls is not None and calls > 0:
             details["calls"] = calls
@@ -108,6 +112,20 @@ def record_analysis_usage(
             missing = {
                 key: value for key, value in details.items() if key not in existing
             }
+            prior_source = existing.get("cost_source")
+            if "cost_usd" in details and cost_source in {"estimated", "reported"}:
+                if prior_source != "reported" or cost_source == "reported":
+                    missing["cost_usd"] = details["cost_usd"]
+                    missing["cost_source"] = cost_source
+                    if cost_source == "reported":
+                        missing["pricing_fingerprint"] = "reported"
+                    else:
+                        existing.pop("pricing_fingerprint", None)
+                        for key in ("model", "token_usage"):
+                            if key in details:
+                                missing[key] = details[key]
+            elif prior_source == "reported":
+                missing.pop("cost_source", None)
             if not missing:
                 return
             existing.update(missing)
@@ -124,8 +142,60 @@ def record_analysis_usage(
         write_private_json(analysis_usage_path(), raw)
 
 
+def _pricing_fingerprint(prices: dict[str, dict[str, float]]) -> str:
+    return hashlib.sha256(json.dumps(prices, sort_keys=True).encode()).hexdigest()
+
+
+def _priced_analysis_event(
+    event: dict[str, object], prices: dict[str, dict[str, float]]
+) -> float | None:
+    """Reprice a recorded analysis run from its model and token usage."""
+    provider = event.get("provider")
+    model = event.get("model")
+    raw_usage = event.get("token_usage")
+    if (
+        not isinstance(provider, str)
+        or provider not in {"claude", "codex"}
+        or not isinstance(model, str)
+        or not isinstance(raw_usage, dict)
+    ):
+        return None
+    usage: dict[str, int] = {}
+    for bucket in ANALYSIS_TOKEN_BUCKETS:
+        value = raw_usage.get(bucket)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        usage[bucket] = value
+    priced = event_cost(
+        UsageEvent(
+            provider=provider,
+            session_id="",
+            message_id=None,
+            timestamp=_number(event.get("completed_at")) or 0.0,
+            model=model,
+            usage=Usage(
+                input_tokens=usage["input"],
+                output_tokens=usage["output"],
+                cache_write_tokens=usage["cache_write"],
+                cache_write_one_hour_tokens=0,
+                cache_read_tokens=usage["cache_read"],
+                web_search_requests=0,
+                speed="standard",
+                reasoning_output_tokens=usage["reasoning_output"],
+            ),
+            tool_calls=0,
+            is_subagent=False,
+            agent_id=None,
+            effort="low",
+        ),
+        prices,
+    )
+    return round(priced, 6) if priced is not None else None
+
+
 def _analysis_usage_events(
     reference_time: float | None = None,
+    prices: dict[str, dict[str, float]] | None = None,
 ) -> dict[str, dict[str, object]]:
     with _ANALYSIS_USAGE_LOCK:
         try:
@@ -140,6 +210,7 @@ def _analysis_usage_events(
             for event_id, event in events.items()
             if isinstance(event_id, str) and isinstance(event, dict)
         }
+        changed = len(valid) != len(events)
         if reference_time is not None:
             cutoff = reference_time - ANALYSIS_USAGE_RETENTION_SECONDS
             valid = {
@@ -147,9 +218,27 @@ def _analysis_usage_events(
                 for event_id, event in valid.items()
                 if (_number(event.get("completed_at")) or reference_time) >= cutoff
             }
-            if len(valid) != len(events):
-                raw["events"] = valid
-                write_private_json(analysis_usage_path(), raw)
+            changed = changed or len(valid) != len(events)
+        if prices is not None:
+            fingerprint = _pricing_fingerprint(prices)
+            for event in valid.values():
+                source = event.get("cost_source")
+                if source not in {"estimated", "reported"}:
+                    continue
+                marker = "reported" if source == "reported" else fingerprint
+                if event.get("pricing_fingerprint") == marker:
+                    continue
+                if source == "estimated":
+                    cost = _priced_analysis_event(event, prices)
+                    if cost is None:
+                        event.pop("cost_usd", None)
+                    else:
+                        event["cost_usd"] = cost
+                event["pricing_fingerprint"] = marker
+                changed = True
+        if changed:
+            raw["events"] = valid
+            write_private_json(analysis_usage_path(), raw)
         return valid
 
 
@@ -595,7 +684,9 @@ def _observation_reason(
     return "waiting_for_activity"
 
 
-def apply_quota_attribution(snapshot: dict[str, object]) -> None:
+def apply_quota_attribution(
+    snapshot: dict[str, object], prices: dict[str, dict[str, float]] | None = None
+) -> None:
     """Attach forward-only quota-share estimates and persist their small local ledger."""
     sessions = snapshot.get("sessions")
     quotas = snapshot.get("account_quotas")
@@ -620,7 +711,9 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
             ),
             default=None,
         )
-    analysis_events = _analysis_usage_events(retention_time)
+    analysis_events = _analysis_usage_events(
+        retention_time, prices if prices is not None else load_pricing()
+    )
     retained_event_ids = set(analysis_events)
     applied_events = {
         event_id: value
@@ -1115,7 +1208,7 @@ def _analysis_spend(runs: dict[str, object], fingerprint: str) -> tuple[float, b
         cost = _number(run.get("cost_usd"))
         if mode == "exhausted" and cost is not None:
             total += cost
-            if run.get("pricing") != fingerprint:
+            if run.get("pricing") not in {fingerprint, "reported"}:
                 complete = False
         else:
             complete = False
@@ -1152,19 +1245,24 @@ def _record_analysis_spend(
             runs.pop(run_id, None)
             continue
         cost = _number(event.get("cost_usd"))
+        marker = event.get("pricing_fingerprint")
+        if not isinstance(marker, str):
+            previous = runs.get(run_id)
+            marker = previous.get("pricing") if isinstance(previous, dict) else None
+            if not isinstance(marker, str):
+                marker = "unknown"
         previous = runs.get(run_id)
         if not isinstance(previous, dict):
             runs[run_id] = {
                 "usage_mode": mode,
                 "cost_usd": cost,
-                "pricing": fingerprint,
+                "pricing": marker,
             }
             continue
         if mode == "exhausted":
             previous["usage_mode"] = mode
-        if cost is not None and _number(previous.get("cost_usd")) != cost:
-            previous["cost_usd"] = cost
-            previous["pricing"] = fingerprint
+        previous["cost_usd"] = cost
+        previous["pricing"] = marker
 
 
 def _excluded_intervals(billing: dict[str, object]) -> list[tuple[float, float]]:
@@ -1200,12 +1298,9 @@ def apply_out_of_plan_accounting(
     summary: dict[str, object] = {"version": 1, "providers": summary_providers}
     quotas = snapshot.get("account_quotas")
     observed_at = _snapshot_time(snapshot)
-    analysis_events = _analysis_usage_events(observed_at)
-    pricing_fingerprint = hashlib.sha256(
-        json.dumps(
-            prices if prices is not None else load_pricing(), sort_keys=True
-        ).encode()
-    ).hexdigest()
+    pricing_table = prices if prices is not None else load_pricing()
+    analysis_events = _analysis_usage_events(observed_at, pricing_table)
+    pricing_fingerprint = _pricing_fingerprint(pricing_table)
     for provider in ("claude", "codex"):
         rows = [
             session

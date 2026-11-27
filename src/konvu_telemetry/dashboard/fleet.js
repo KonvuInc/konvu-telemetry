@@ -1519,8 +1519,15 @@ function graphLegend(baselines, hasForecast) {
 
 function fleetGraph(rows) {
   const measurable = rows.filter((s) => cost(s) !== null && count(s) > 0);
-  if (!measurable.length)
+  if (!measurable.length) {
+    if (rows.some((s) => showsMoney(s) && cost(s) === null))
+      return '<div class="empty"><h3>Spend estimate incomplete</h3><p>Recorded costs are incomplete for these paying sessions.</p></div>';
+    if (rows.some((s) => showsMoney(s)))
+      return '<div class="empty"><h3>Prompt history unavailable</h3><p>Recorded spend needs prompt history to appear in this graph.</p></div>';
+    if (rows.some((s) => s.usage_mode === "unknown"))
+      return '<div class="empty"><h3>Plan status unavailable</h3><p>Spend and allowance are unavailable while limits refresh.</p></div>';
     return '<div class="empty"><h3>Subscription usage is included</h3><p>Money is hidden while these sessions remain within their provider allowance.</p></div>';
+  }
   const
     W = 1100,
     H = 450,
