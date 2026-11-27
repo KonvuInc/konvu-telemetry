@@ -249,7 +249,7 @@ def _session_tokens(session: dict[str, object]) -> float:
     if not isinstance(usage, dict):
         return 0.0
     total = 0.0
-    for bucket in ("input", "output", "reasoning_output", "cache_write", "cache_read"):
+    for bucket in ("input", "output", "cache_write", "cache_read"):
         total += _number(usage.get(bucket)) or 0.0
     return total
 
@@ -1045,6 +1045,13 @@ def _session_started_after_cutoff(
     )
 
 
+def _spend_complete(spend: dict[str, object], complete: dict[str, object]) -> bool:
+    return all(value is True for value in complete.values()) and all(
+        session_id in complete and _number(value) is not None
+        for session_id, value in spend.items()
+    )
+
+
 def apply_out_of_plan_accounting(snapshot: dict[str, object]) -> None:
     """Count exhausted-plan session and subagent spend after the observed cutoff."""
     sessions = snapshot.get("sessions")
@@ -1082,6 +1089,9 @@ def apply_out_of_plan_accounting(snapshot: dict[str, object]) -> None:
                     if cost is not None and offset is not None:
                         spend[session_id] = round(max(0.0, cost - offset), 6)
             billing["session_spend"] = spend
+        complete = billing.get("session_complete")
+        if not isinstance(complete, dict):
+            billing["session_complete"] = complete = {}
         account = quotas.get(provider) if isinstance(quotas, dict) else None
         exhaustion = _account_exhausted(account)
         if not isinstance(account, dict) and rows:
@@ -1110,6 +1120,9 @@ def apply_out_of_plan_accounting(snapshot: dict[str, object]) -> None:
                 )
                 if mode == "exhausted"
                 else 0.0,
+                "complete": (
+                    _spend_complete(spend, complete) if mode == "exhausted" else False
+                ),
             }
             continue
         if not exhaustion:
@@ -1118,8 +1131,13 @@ def apply_out_of_plan_accounting(snapshot: dict[str, object]) -> None:
             billing["subagent_offsets"] = {}
             billing["unpriced_baselines"] = {}
             billing["session_spend"] = {}
+            billing["session_complete"] = {}
             billing.pop("cutoff_at", None)
-            summary_providers[provider] = {"status": "included", "spend_usd": 0.0}
+            summary_providers[provider] = {
+                "status": "included",
+                "spend_usd": 0.0,
+                "complete": True,
+            }
             continue
         previously_exhausted = billing.get("mode") == "exhausted"
         offsets_were_recorded = isinstance(billing.get("offsets"), dict)
@@ -1140,6 +1158,7 @@ def apply_out_of_plan_accounting(snapshot: dict[str, object]) -> None:
             offsets.clear()
             baselines.clear()
             spend.clear()
+            complete.clear()
             cutoff_at = _snapshot_time(snapshot)
             if cutoff_at is None:
                 billing.pop("cutoff_at", None)
@@ -1177,7 +1196,10 @@ def apply_out_of_plan_accounting(snapshot: dict[str, object]) -> None:
         for session in rows:
             session_id = session.get("id")
             total = _number(session.get("total_cost_usd"))
-            if not isinstance(session_id, str) or total is None:
+            if not isinstance(session_id, str):
+                continue
+            complete[session_id] = session.get("cost_status") == "complete"
+            if total is None:
                 continue
             if session_id not in offsets:
                 cutoff_at = _number(billing.get("cutoff_at"))
@@ -1258,6 +1280,7 @@ def apply_out_of_plan_accounting(snapshot: dict[str, object]) -> None:
             "spend_usd": round(
                 sum(_number(value) or 0.0 for value in spend.values()), 6
             ),
+            "complete": _spend_complete(spend, complete),
         }
     write_private_json(quota_attribution_path(), state)
     write_private_json_if_changed(out_of_plan_spend_path(), summary)

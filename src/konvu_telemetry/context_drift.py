@@ -417,7 +417,7 @@ def _claude_usage(raw: object) -> dict[str, int]:
 
 
 def _attribution_tokens(provider: str, usage: dict[str, int]) -> int:
-    keys = ["input_tokens", "output_tokens", "reasoning_output_tokens"]
+    keys = ["input_tokens", "output_tokens"]
     if provider == "claude":
         keys.extend(("cache_creation_input_tokens", "cache_read_input_tokens"))
     return sum(usage.get(key, 0) for key in keys)

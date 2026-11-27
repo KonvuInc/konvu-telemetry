@@ -222,8 +222,7 @@ def event_cost(event: UsageEvent, prices: dict[str, dict[str, float]]) -> float 
     )
     return (
         event.usage.input_tokens * input_rate
-        + (event.usage.output_tokens + event.usage.reasoning_output_tokens)
-        * output_rate
+        + event.usage.output_tokens * output_rate
         + five_minute_cache_write * cache_write_rate
         + event.usage.cache_write_one_hour_tokens * cache_write_rate * 1.6
         + event.usage.cache_read_tokens * cache_read_rate

@@ -1072,6 +1072,7 @@ class QuotaAttributionTests(unittest.TestCase):
                         "provider": "claude",
                         "usage_mode": "exhausted",
                         "total_cost_usd": 15.0,
+                        "cost_status": "complete",
                         "subagents": [{"id": "old", "cost_usd": 4.0}],
                         "iterations": [
                             billing_iteration("2026-10-09T11:00:00Z", 12.0),
@@ -1086,7 +1087,7 @@ class QuotaAttributionTests(unittest.TestCase):
             self.assertNotIn("out_of_plan_subagent_cost_usd", late["sessions"][0])
             self.assertEqual(
                 json.loads(out_of_plan_spend_path().read_text())["providers"]["claude"],
-                {"status": "exhausted", "spend_usd": 3.0},
+                {"status": "exhausted", "spend_usd": 3.0, "complete": True},
             )
             late_row = late["sessions"][0]
             late_row["total_cost_usd"] = 25.0
@@ -1132,6 +1133,7 @@ class QuotaAttributionTests(unittest.TestCase):
                                 "provider": "codex",
                                 "usage_mode": "exhausted",
                                 "total_cost_usd": codex_cost,
+                                "cost_status": "complete",
                             },
                         ]
                     }
@@ -1153,10 +1155,12 @@ class QuotaAttributionTests(unittest.TestCase):
             )
             providers = json.loads(out_of_plan_spend_path().read_text())["providers"]
             self.assertEqual(
-                providers["claude"], {"status": "included", "spend_usd": 0.0}
+                providers["claude"],
+                {"status": "included", "spend_usd": 0.0, "complete": True},
             )
             self.assertEqual(
-                providers["codex"], {"status": "exhausted", "spend_usd": 4.0}
+                providers["codex"],
+                {"status": "exhausted", "spend_usd": 4.0, "complete": True},
             )
 
     def test_quota_outage_preserves_exhaustion_spend_and_offsets(self) -> None:
@@ -1190,7 +1194,7 @@ class QuotaAttributionTests(unittest.TestCase):
                     json.loads(out_of_plan_spend_path().read_text())["providers"][
                         "claude"
                     ],
-                    {"status": "exhausted", "spend_usd": 7.0},
+                    {"status": "exhausted", "spend_usd": 7.0, "complete": True},
                 )
             apply_out_of_plan_accounting(snapshot(100, []))
             recovered = snapshot(100, [session("late", 22.0)])
@@ -1229,14 +1233,38 @@ class QuotaAttributionTests(unittest.TestCase):
             apply_out_of_plan_accounting({"sessions": []})
             self.assertEqual(
                 json.loads(out_of_plan_spend_path().read_text())["providers"]["claude"],
-                {"status": "exhausted", "spend_usd": 5.0},
+                {"status": "exhausted", "spend_usd": 5.0, "complete": False},
             )
             apply_out_of_plan_accounting(
                 {"sessions": [session("late", 20.0) | {"usage_mode": "exhausted"}]}
             )
             self.assertEqual(
                 json.loads(out_of_plan_spend_path().read_text())["providers"]["claude"],
-                {"status": "exhausted", "spend_usd": 5.0},
+                {"status": "exhausted", "spend_usd": 5.0, "complete": False},
+            )
+
+    def test_unpriced_session_stays_incomplete_after_disappearing(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+        ):
+            apply_out_of_plan_accounting(snapshot(100, [session("unknown", 0.0)]))
+            unpriced = session("unknown", 0.0)
+            unpriced["cost_status"] = "unavailable"
+            apply_out_of_plan_accounting(snapshot(100, [unpriced]))
+            for rows in ([session("priced", 2.0)], []):
+                apply_out_of_plan_accounting(snapshot(100, rows))
+                provider = json.loads(out_of_plan_spend_path().read_text())["providers"][
+                    "claude"
+                ]
+                self.assertEqual(provider["status"], "exhausted")
+                self.assertFalse(provider["complete"])
+            apply_out_of_plan_accounting(snapshot(0, []))
+            provider = json.loads(out_of_plan_spend_path().read_text())["providers"][
+                "claude"
+            ]
+            self.assertEqual(
+                provider, {"status": "included", "spend_usd": 0.0, "complete": True}
             )
 
     def test_new_pricing_does_not_count_old_unpriced_prompts_as_paid(self) -> None:

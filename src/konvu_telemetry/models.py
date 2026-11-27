@@ -22,7 +22,6 @@ class Usage:
         return (
             self.input_tokens
             + self.output_tokens
-            + self.reasoning_output_tokens
             + self.cache_write_tokens
             + self.cache_read_tokens
         )

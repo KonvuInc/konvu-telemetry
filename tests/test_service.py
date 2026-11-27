@@ -661,11 +661,11 @@ class ServiceTests(unittest.TestCase):
             transcript.write_text(
                 "\n".join(
                     json.dumps(record)
-                    for record in [checkpoint(15, 10, 2, 3), checkpoint(34, 12, 3, 4)]
+                    for record in [checkpoint(15, 10, 5, 3), checkpoint(34, 12, 7, 4)]
                 )
             )
             events = list(codex_events_in_file(transcript))
-        self.assertEqual([event.usage.output_tokens for event in events], [2, 3])
+        self.assertEqual([event.usage.output_tokens for event in events], [5, 7])
         self.assertEqual(
             [event.usage.reasoning_output_tokens for event in events], [3, 4]
         )
@@ -738,7 +738,7 @@ class ServiceTests(unittest.TestCase):
             message_id="message",
             timestamp=0,
             model="gpt-test",
-            usage=Usage(0, 2, 0, 0, 0, 0, "standard", 3),
+            usage=Usage(0, 5, 0, 0, 0, 0, "standard", 3),
             tool_calls=0,
             is_subagent=False,
             agent_id=None,
