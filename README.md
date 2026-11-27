@@ -82,7 +82,7 @@ What it costs and when it runs:
 ## Privacy
 
 - Your transcripts stay on your Mac and are never changed. Konvu stores only derived numbers in `~/.konvu/telemetry`.
-- `~/.konvu/telemetry/out-of-plan-spend.json` stores `providers.{claude,codex}.{status,spend_usd,complete}`; spend is the local sessions' API-price equivalent for the current observed exhaustion episode. `complete` is false when pricing or the cutoff cannot be verified for an observed session. These estimates reset only when fresh quota confirms included use; they do not include charges from other devices.
+- `~/.konvu/telemetry/out-of-plan-spend.json` stores `providers.{claude,codex}.{status,spend_usd,complete,cutoff_at}`; spend combines local session calls and paid context-analysis runs in the current observed exhaustion episode. `cutoff_at` is present when known. `complete` is false when pricing or the cutoff cannot be verified, including a gap in quota observations. These estimates reset only when fresh quota confirms included use; they do not include charges from other devices.
 - To show plan limits, the collector calls Anthropic with your Claude login and asks the Codex app-server to contact OpenAI with your Codex login. Konvu does not copy credentials into its files or logs.
 - Context analysis sends short excerpts of a session only to that session's own provider, with no tools. It saves derived topic summaries and usage locally for up to eight days, as described in the security policy.
 - Setup turns on a small amount of anonymous product analytics (like "setup finished"), never prompts, code, paths or account details. Turn it off with `konvu-telemetry telemetry off`, or run setup with `DO_NOT_TRACK=1`.
