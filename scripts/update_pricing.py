@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from decimal import Decimal
 from hashlib import sha256
 import json
 import math
@@ -21,8 +22,38 @@ SOURCE = (
 )
 MAX_PAYLOAD_BYTES = 20 * 1024 * 1024
 
+
+def gpt62_override(model: str, input_usd: float) -> dict[str, object]:
+    """Return the published Standard rates for a GPT-6.2 model."""
+    token_rate = Decimal(str(input_usd)) / 1_000_000
+
+    def rate(multiplier: str) -> float:
+        return float(token_rate * Decimal(multiplier))
+
+    return {
+        "cache_creation_input_token_cost": rate("1.25"),
+        "cache_creation_input_token_cost_above_1hr": rate("2.5"),
+        "cache_creation_input_token_cost_above_1hr_above_272k_tokens": rate("5"),
+        "cache_creation_input_token_cost_above_272k_tokens": rate("2.5"),
+        "cache_read_input_token_cost": rate("0.05"),
+        "cache_read_input_token_cost_above_272k_tokens": rate("0.1"),
+        "fastMultiplier": 2.0,
+        "input_cost_per_token": rate("1"),
+        "input_cost_per_token_above_272k_tokens": rate("2"),
+        "litellm_provider": "openai",
+        "max_input_tokens": 922_000,
+        "max_output_tokens": 128_000,
+        "mode": "chat",
+        "output_cost_per_token": rate("5"),
+        "output_cost_per_token_above_272k_tokens": rate("7.5"),
+        "source": f"https://developers.openai.com/api/docs/models/{model}",
+    }
+
+
 # Provider-published models newer than the pinned LiteLLM snapshot.
 OFFICIAL_MODEL_OVERRIDES: dict[str, dict[str, object]] = {
+    "gpt-6.2-sol": gpt62_override("gpt-6.2-sol", 2.0),
+    "gpt-6.2-astra": gpt62_override("gpt-6.2-astra", 8.0),
     "claude-sonnet-5-5": {
         "cache_creation_input_token_cost": 0.0000025,
         "cache_creation_input_token_cost_above_1hr": 0.000004,

@@ -417,7 +417,7 @@ def _claude_usage(raw: object) -> dict[str, int]:
 
 
 def _attribution_tokens(provider: str, usage: dict[str, int]) -> int:
-    keys = ["input_tokens", "output_tokens", "reasoning_output_tokens"]
+    keys = ["input_tokens", "output_tokens"]
     if provider == "claude":
         keys.extend(("cache_creation_input_tokens", "cache_read_input_tokens"))
     return sum(usage.get(key, 0) for key in keys)
@@ -2688,6 +2688,11 @@ class ContextDriftScheduler:
                             job["provider"], outcome["model"], token_usage
                         )
                     ),
+                    cost_source=(
+                        "reported"
+                        if "reported_cost_microusd" in outcome["usage"]
+                        else "estimated"
+                    ),
                     calls=max(1, _integer(outcome.get("calls"), 1)),
                 )
             except OSError:
@@ -3084,6 +3089,9 @@ class ContextDriftScheduler:
                             int,
                         )
                         else _analysis_cost(provider, model, token_usage)
+                    ),
+                    cost_source=(
+                        "reported" if isinstance(reported, int) else "estimated"
                     ),
                     calls=max(1, _integer(run.get("calls"), 1)),
                 )

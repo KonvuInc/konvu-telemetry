@@ -906,7 +906,7 @@ class ContextDriftTests(unittest.TestCase):
             "reasoning_output_tokens": 5,
         }
 
-        self.assertEqual(context_drift._attribution_tokens("codex", usage), 125)
+        self.assertEqual(context_drift._attribution_tokens("codex", usage), 120)
 
     def test_attribution_tokens_include_claude_cache_buckets(self) -> None:
         usage = {

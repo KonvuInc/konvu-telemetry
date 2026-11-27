@@ -4,7 +4,7 @@ Konvu Telemetry reports local estimates from provider-recorded usage. It is not 
 
 ## Cost
 
-Each recorded model call is priced from the bundled LiteLLM snapshot using new input, output, cache-write, cache-read, web-search, service-tier, and long-context fields. Anthropic one-hour cache writes use the documented two-times input rate. Unknown billable models make the session partial or unavailable; Konvu never presents a known subtotal as complete.
+Each recorded model call is priced from the bundled LiteLLM snapshot using new input, output, cache-write, cache-read, web-search, service-tier, and long-context fields. One-hour cache writes use the model's published rate when available. Unknown billable models make the session partial or unavailable; Konvu never presents a known subtotal as complete.
 
 The snapshot source and SHA-256 are recorded in `NOTICE`. The scheduled pricing workflow validates required models, updates the snapshot and checksum together, and opens a reviewable pull request.
 

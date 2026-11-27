@@ -57,6 +57,13 @@ def one_decimal(value: int | float) -> str:
 
 
 def money(value: object) -> str:
+    if (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and 0 < value < 0.05
+    ):
+        return "<$0.1"
     return (
         f"${one_decimal(value)}"
         if isinstance(value, (int, float))
@@ -569,16 +576,19 @@ def statusline_rows(
         if usage_mode == "exhausted" and isinstance(out_of_plan, (int, float)):
             paid = out_of_plan
         paid_forecast = session.get("projected_next_10_tasks_usd")
-        if session.get("cost_status") != "unavailable" and isinstance(
-            paid, (int, float)
-        ):
+        spend_complete = session.get("cost_status") == "complete" and (
+            usage_mode != "exhausted"
+            or session.get("out_of_plan_spend_status")
+            in {"complete", "since_observed_plan_exit"}
+        )
+        if spend_complete and isinstance(paid, (int, float)):
             forecast_row = (
                 terminal_style("Estimated paid spend", "38;5;245")
                 + " "
                 + terminal_style(money(paid), "1;38;5;255")
             )
         if (
-            session.get("cost_status") != "unavailable"
+            spend_complete
             and isinstance(paid, (int, float))
             and isinstance(paid_forecast, (int, float))
         ):
@@ -799,8 +809,14 @@ def hook_forecast_row(session: dict[str, object]) -> str | None:
         if usage_mode == "exhausted" and isinstance(out_of_plan, (int, float)):
             current = out_of_plan
         forecast = session.get("projected_next_10_tasks_usd")
-        if session.get("cost_status") == "unavailable" or not isinstance(
-            current, (int, float)
+        if (
+            session.get("cost_status") != "complete"
+            or (
+                usage_mode == "exhausted"
+                and session.get("out_of_plan_spend_status")
+                not in {"complete", "since_observed_plan_exit"}
+            )
+            or not isinstance(current, (int, float))
         ):
             return None
         if isinstance(current, (int, float)) and isinstance(forecast, (int, float)):

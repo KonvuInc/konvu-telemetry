@@ -40,7 +40,7 @@ const finite = (value) => typeof value === "number" && Number.isFinite(value);
 const nonnegative = (value) => finite(value) && value >= 0;
 const oneDecimal = (value) => Math.round((value + Number.EPSILON) * 10) / 10;
 const percentage = (value) => (finite(value) ? oneDecimal(value).toFixed(1) + "%" : "—");
-const money = (value) => (nonnegative(value) ? "$" + oneDecimal(value).toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 }) : "—");
+const money = (value) => (nonnegative(value) ? value > 0 && value < 0.05 ? "<$0.1" : "$" + oneDecimal(value).toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 }) : "—");
 const additional = (value) => (nonnegative(value) ? "+" + money(value) : "—");
 const compactMoney = (value) =>
   nonnegative(value) ? "$" + (value >= 1000 ? oneDecimal(value / 1000).toFixed(1) + "k" : oneDecimal(value).toFixed(1)) : "—";
@@ -87,9 +87,9 @@ const series = (s) =>
     : [];
 const showsMoney = (s) => s.usage_mode === "exhausted" || s.usage_mode === "api_billed";
 const cost = (s) => {
-  if (!showsMoney(s) || s.cost_status === "unavailable") return null;
+  if (!showsMoney(s) || s.cost_status !== "complete") return null;
   if (s.usage_mode === "api_billed") return nonnegative(s.total_cost_usd) ? s.total_cost_usd : null;
-  if (s.out_of_plan_spend_status === undefined) return null;
+  if (!["complete", "since_observed_plan_exit"].includes(s.out_of_plan_spend_status)) return null;
   return nonnegative(s.out_of_plan_spend_usd) ? s.out_of_plan_spend_usd : null;
 };
 function planExitCostOffset(s) {
@@ -825,7 +825,7 @@ function responsibilityCell(s) {
     // Nothing has been billed yet, so no session owns a share of zero.
     if (total <= 0) return '<span class="tiny" title="Nothing has been billed beyond the plan yet.">Nothing spent yet</span>';
     const share = (mine / total) * 100;
-    return shareBar(share, "of all money spent", money(mine) + " of " + money(total) + " spent beyond plan");
+    return shareBar(share, "of recorded session spend", money(mine) + " of " + money(total) + " among recorded sessions");
   }
   const share = shareOf(s);
   if (!finite(share)) return dataStateMarkup(sessionDataState(s, "share"));
@@ -856,22 +856,26 @@ function subagentCell(s) {
    one table is shown. */
 function providerExhausted(provider, rows) {
   const quota = state.payload?.account_quotas?.[provider];
+  if (["stale", "fetching", "unavailable"].includes(quota?.status)) return false;
   if (quota?.ordinary_usage_allowed === false) return true;
   if (quota?.windows?.some((w) => ["five_hour", "weekly"].includes(w?.period) && finite(w.used_percent) && w.used_percent >= 100)) return true;
   return rows.some((s) => s.provider === provider && showsMoney(s));
 }
 function providerState(provider, rows) {
-  return providerExhausted(provider, rows);
+  const quotaStatus = state.payload?.account_quotas?.[provider]?.status;
+  if (["stale", "fetching", "unavailable"].includes(quotaStatus)) return "unknown";
+  if (providerExhausted(provider, rows)) return "paying";
+  return rows.some((s) => s.provider === provider && s.usage_mode === "unknown") ? "unknown" : "included";
 }
 function planGroups(rows) {
   const providers = [...new Set(rows.map((s) => s.provider))];
-  const paying = new Set(providers.filter((p) => providerState(p, rows)));
-  const groups = [
-    { paying: false, rows: rows.filter((s) => !paying.has(s.provider)), providers: providers.filter((p) => !paying.has(p)) },
-    { paying: true, rows: rows.filter((s) => paying.has(s.provider)), providers: providers.filter((p) => paying.has(p)) },
-  ]
-    .filter((g) => g.rows.length)
-    .sort((a, b) => (b.paying ? 1 : 0) - (a.paying ? 1 : 0));
+  const modes = new Map(providers.map((provider) => [provider, providerState(provider, rows)]));
+  const groups = ["paying", "unknown", "included"].map((mode) => ({
+    mode,
+    paying: mode === "paying",
+    rows: rows.filter((s) => modes.get(s.provider) === mode),
+    providers: providers.filter((provider) => modes.get(provider) === mode),
+  })).filter((group) => group.rows.length);
   for (const g of groups) {
     g.spend = g.rows.reduce((sum, s) => sum + (cost(s) ?? 0), 0);
     g.next = g.rows.reduce((sum, s) => sum + (forecast(s) ?? 0), 0);
@@ -880,9 +884,10 @@ function planGroups(rows) {
 }
 function groupHeading(group) {
   const n = group.rows.length;
+  const heading = group.mode === "unknown" ? "Plan status unavailable" : group.paying ? "Paying" : "Within your plan";
   return (
-    '<div class="group-heading ' + (group.paying ? "paying" : "included") + '">' +
-    "<h2>" + (group.paying ? "Paying" : "Within your plan") + "</h2>" +
+    '<div class="group-heading ' + group.mode + '">' +
+    "<h2>" + heading + "</h2>" +
     '<span class="head-count">' + n + " session" + (n === 1 ? "" : "s") + "</span>" +
     ('<div class="heading-controls"><div class="quota-inline">' + quotaInline(
       group.providers,
@@ -891,6 +896,8 @@ function groupHeading(group) {
         '<label class="sort-control">Sort<select class="sort-select" aria-label="Sort sessions">' +
         (group.paying
           ? [["spent", "Most spent"], ["forecast", "Highest forecast"], ["share", "Share of spend"], ["context", "Context used"], ["activity", "Last activity"]]
+          : group.mode === "unknown"
+          ? [["activity", "Last activity"], ["context", "Context used"]]
           : [["share", "Share of limit"], ["forecast", "Highest forecast"], ["context", "Context used"], ["activity", "Last activity"]])
           .map(([v, t]) => '<option value="' + v + '"' + (state.sort === v ? " selected" : "") + ">" + t + "</option>")
           .join("") +
@@ -905,7 +912,7 @@ function groupHeading(group) {
 const avg = (values) => (values.length ? values.reduce((a, b) => a + b, 0) / values.length : null);
 const shareOf = (s) => quotaShare(s, s.provider === "codex" ? "weekly" : "five_hour");
 function subagentUsesDollars(s) {
-  return providerState(s.provider, allRows());
+  return providerState(s.provider, allRows()) === "paying";
 }
 function subagentContextShare(s, costValue) {
   const sessionContext = context(s);
@@ -995,7 +1002,7 @@ function moneyTiles(rows) {
     .filter((s) => nonnegative(subagentSpend(s, s)))
     .sort((a, b) => subagentSpend(b, b) - subagentSpend(a, a))[0];
   return [
-    recorded ? kpiTile("Estimated spend beyond plan", money(spend), spend > 0 ? "bad" : "good", kpiFootnote("across " + rows.length + " billing sessions"), true) : "",
+    recorded ? kpiTile("Estimated spend in live sessions", money(spend), spend > 0 ? "bad" : "good", kpiFootnote("priced sessions shown; incomplete costs excluded"), true) : "",
     priciest ? kpiTile("Most expensive session", money(cost(priciest)), band((cost(priciest) / (spend || 1)) * 100, 25, 45, 65), kpiSession(priciest)) : "",
     hottest ? kpiTile("Biggest forecast", additional(forecast(hottest)), band(forecast(hottest), 5, 12, 20), kpiSession(hottest)) : "",
     finite(avgContext) ? kpiTile("Average context used", percentage(avgContext), band(avgContext, 50, 70, 88), kpiFootnote("across " + rows.length + " billing sessions")) : "",
@@ -1005,8 +1012,10 @@ function moneyTiles(rows) {
 /* Reuses planGroups so the banner and the tables can never disagree about
    which sessions are paying. */
 function kpiBanner(rows) {
-  const paying = planGroups(rows).find((g) => g.paying);
-  const tiles = paying ? moneyTiles(paying.rows) : planTiles(rows);
+  const groups = planGroups(rows);
+  const paying = groups.find((group) => group.paying);
+  const included = groups.find((group) => group.mode === "included");
+  const tiles = paying ? moneyTiles(paying.rows) : included ? planTiles(included.rows) : [];
   return tiles.length ? '<div class="kpi-grid">' + tiles.join("") + "</div>" : "";
 }
 /* Light meters, one bordered pill per provider, logo as the only label. */
@@ -1051,11 +1060,11 @@ function ledgerRow(s, scale) {
   );
 }
 function ledgerTable(group, scale) {
-  const hasForecast = group.rows.some((s) => finite(group.paying ? forecast(s) : shareAhead(s)));
-  const spendHead = (group.paying ? "Spend" : "Plan") + (hasForecast ? " <span>/ next 10 prompts</span>" : "");
+  const hasForecast = group.mode !== "unknown" && group.rows.some((s) => finite(group.paying ? forecast(s) : shareAhead(s)));
+  const spendHead = (group.mode === "unknown" ? "Plan status" : group.paying ? "Spend" : "Plan") + (hasForecast ? " <span>/ next 10 prompts</span>" : "");
   const shareHead = group.paying ? "Responsible for" : "Responsible for";
   return (
-    '<section class="ledger-block ' + (group.paying ? "paying" : "included") + '">' + groupHeading(group) +
+    '<section class="ledger-block ' + group.mode + '">' + groupHeading(group) +
     '<div class="table-shell"><table class="session-ledger compact-ledger layout-1"><thead><tr><th>Session</th><th>' +
     spendHead + "</th><th>" + shareHead + "</th><th>Context</th><th>Subagents</th><th>Activity <span>/ age</span></th></tr></thead><tbody>" +
     group.rows.map((s) => ledgerRow(s, scale)).join("") +
@@ -1510,8 +1519,15 @@ function graphLegend(baselines, hasForecast) {
 
 function fleetGraph(rows) {
   const measurable = rows.filter((s) => cost(s) !== null && count(s) > 0);
-  if (!measurable.length)
+  if (!measurable.length) {
+    if (rows.some((s) => showsMoney(s) && cost(s) === null))
+      return '<div class="empty"><h3>Spend estimate incomplete</h3><p>Recorded costs are incomplete for these paying sessions.</p></div>';
+    if (rows.some((s) => showsMoney(s)))
+      return '<div class="empty"><h3>Prompt history unavailable</h3><p>Recorded spend needs prompt history to appear in this graph.</p></div>';
+    if (rows.some((s) => s.usage_mode === "unknown"))
+      return '<div class="empty"><h3>Plan status unavailable</h3><p>Spend and allowance are unavailable while limits refresh.</p></div>';
     return '<div class="empty"><h3>Subscription usage is included</h3><p>Money is hidden while these sessions remain within their provider allowance.</p></div>';
+  }
   const
     W = 1100,
     H = 450,
@@ -2098,6 +2114,7 @@ function compactionMarkers(marks, x, T, bottom, value, spendLabel) {
     .join("");
 }
 function promptCostGraph(s) {
+  if (cost(s) === null) return '<div class="empty"><p>Spend estimate incomplete.</p></div>';
   const rawRows = series(s);
   const rows = rawRows.map((row, index) => {
     const prior = index > 0 ? chartSpend(s, rawRows[index - 1].cumulative_cost_usd) : 0;
@@ -2183,6 +2200,7 @@ function promptCostGraph(s) {
   );
 }
 function sessionGraph(s) {
+  if (cost(s) === null) return '<div class="empty"><p>Spend estimate incomplete.</p></div>';
   if (state.chart === "prompt") return promptCostGraph(s);
   const marks = contextCompactions(s),
     history = Array.isArray(s.context_history) ? s.context_history : [];
@@ -2452,6 +2470,7 @@ function analysisUsageText(session) {
   if (!usage || !Number.isInteger(usage.run_count) || usage.run_count < 1) return '';
   const prefix = 'AI analysis of this session: ' + usage.run_count + (usage.run_count === 1 ? ' run' : ' runs');
   const dollars = (value) => value < 0.0001 ? '<$0.0001' : '$' + value.toFixed(value < 0.01 ? 4 : 2);
+  if (usage.unpriced_run_count > 0) return prefix + ' · dollar estimate incomplete';
   if (showsMoney(session)) {
     if (nonnegative(usage.spending_usd) && usage.spending_usd > 0 && usage.unknown_mode_run_count === 0) {
       return prefix + ' · ~' + dollars(usage.spending_usd) + ' paid';
@@ -2792,7 +2811,7 @@ function bindNotificationPanel() {
 function browserAlerts(payload) {
   if (notificationPermission() !== "granted") return;
   for (const [provider, quotas] of Object.entries(payload.account_quotas || {})) {
-    if (quotas?.status === "stale") continue;
+    if (["stale", "fetching", "unavailable"].includes(quotas?.status)) continue;
     for (const window of Array.isArray(quotas?.windows) ? quotas.windows : []) {
       if (
         provider === "codex" &&

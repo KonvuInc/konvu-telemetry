@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from datetime import datetime
@@ -10,6 +11,8 @@ import time
 from typing import TypedDict
 
 from .config import FORECAST_WINDOW
+from .models import Usage, UsageEvent
+from .pricing import event_cost, load_pricing
 from .storage import (
     analysis_usage_path,
     out_of_plan_spend_path,
@@ -58,6 +61,7 @@ def record_analysis_usage(
     token_usage: dict[str, int] | None = None,
     cost_usd: float | None = None,
     calls: int | None = None,
+    cost_source: str | None = None,
 ) -> None:
     """Queue one ephemeral analysis pass for normal quota attribution."""
     if (
@@ -97,6 +101,8 @@ def record_analysis_usage(
             details["token_usage"] = dict(token_usage)
         if cost_usd is not None and math.isfinite(cost_usd) and cost_usd >= 0:
             details["cost_usd"] = round(cost_usd, 6)
+        if cost_source in {"estimated", "reported"}:
+            details["cost_source"] = cost_source
         # A pass makes one model call per batch; the hourly call cap reads this back.
         if calls is not None and calls > 0:
             details["calls"] = calls
@@ -106,6 +112,20 @@ def record_analysis_usage(
             missing = {
                 key: value for key, value in details.items() if key not in existing
             }
+            prior_source = existing.get("cost_source")
+            if "cost_usd" in details and cost_source in {"estimated", "reported"}:
+                if prior_source != "reported" or cost_source == "reported":
+                    missing["cost_usd"] = details["cost_usd"]
+                    missing["cost_source"] = cost_source
+                    if cost_source == "reported":
+                        missing["pricing_fingerprint"] = "reported"
+                    else:
+                        existing.pop("pricing_fingerprint", None)
+                        for key in ("model", "token_usage"):
+                            if key in details:
+                                missing[key] = details[key]
+            elif prior_source == "reported":
+                missing.pop("cost_source", None)
             if not missing:
                 return
             existing.update(missing)
@@ -122,8 +142,60 @@ def record_analysis_usage(
         write_private_json(analysis_usage_path(), raw)
 
 
+def _pricing_fingerprint(prices: dict[str, dict[str, float]]) -> str:
+    return hashlib.sha256(json.dumps(prices, sort_keys=True).encode()).hexdigest()
+
+
+def _priced_analysis_event(
+    event: dict[str, object], prices: dict[str, dict[str, float]]
+) -> float | None:
+    """Reprice a recorded analysis run from its model and token usage."""
+    provider = event.get("provider")
+    model = event.get("model")
+    raw_usage = event.get("token_usage")
+    if (
+        not isinstance(provider, str)
+        or provider not in {"claude", "codex"}
+        or not isinstance(model, str)
+        or not isinstance(raw_usage, dict)
+    ):
+        return None
+    usage: dict[str, int] = {}
+    for bucket in ANALYSIS_TOKEN_BUCKETS:
+        value = raw_usage.get(bucket)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        usage[bucket] = value
+    priced = event_cost(
+        UsageEvent(
+            provider=provider,
+            session_id="",
+            message_id=None,
+            timestamp=_number(event.get("completed_at")) or 0.0,
+            model=model,
+            usage=Usage(
+                input_tokens=usage["input"],
+                output_tokens=usage["output"],
+                cache_write_tokens=usage["cache_write"],
+                cache_write_one_hour_tokens=0,
+                cache_read_tokens=usage["cache_read"],
+                web_search_requests=0,
+                speed="standard",
+                reasoning_output_tokens=usage["reasoning_output"],
+            ),
+            tool_calls=0,
+            is_subagent=False,
+            agent_id=None,
+            effort="low",
+        ),
+        prices,
+    )
+    return round(priced, 6) if priced is not None else None
+
+
 def _analysis_usage_events(
     reference_time: float | None = None,
+    prices: dict[str, dict[str, float]] | None = None,
 ) -> dict[str, dict[str, object]]:
     with _ANALYSIS_USAGE_LOCK:
         try:
@@ -138,6 +210,7 @@ def _analysis_usage_events(
             for event_id, event in events.items()
             if isinstance(event_id, str) and isinstance(event, dict)
         }
+        changed = len(valid) != len(events)
         if reference_time is not None:
             cutoff = reference_time - ANALYSIS_USAGE_RETENTION_SECONDS
             valid = {
@@ -145,10 +218,47 @@ def _analysis_usage_events(
                 for event_id, event in valid.items()
                 if (_number(event.get("completed_at")) or reference_time) >= cutoff
             }
-            if len(valid) != len(events):
-                raw["events"] = valid
-                write_private_json(analysis_usage_path(), raw)
+            changed = changed or len(valid) != len(events)
+        if prices is not None:
+            fingerprint = _pricing_fingerprint(prices)
+            for event in valid.values():
+                source = event.get("cost_source")
+                if source not in {"estimated", "reported"}:
+                    continue
+                marker = "reported" if source == "reported" else fingerprint
+                if event.get("pricing_fingerprint") == marker:
+                    continue
+                if source == "estimated":
+                    cost = _priced_analysis_event(event, prices)
+                    if cost is None:
+                        event.pop("cost_usd", None)
+                    else:
+                        event["cost_usd"] = cost
+                event["pricing_fingerprint"] = marker
+                changed = True
+        if changed:
+            raw["events"] = valid
+            write_private_json(analysis_usage_path(), raw)
         return valid
+
+
+def _analysis_log_covers(cutoff_at: float | None, observed_at: float | None) -> bool:
+    """Check whether the retained run log still covers an older cutoff."""
+    if (
+        cutoff_at is None
+        or observed_at is None
+        or observed_at - cutoff_at > ANALYSIS_USAGE_RETENTION_SECONDS
+    ):
+        return False
+    try:
+        raw = json.loads(analysis_usage_path().read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(raw, dict)
+        and raw.get("version") == ANALYSIS_USAGE_VERSION
+        and isinstance(raw.get("events"), dict)
+    )
 
 
 ANALYSIS_TOKEN_BUCKETS = (
@@ -249,7 +359,7 @@ def _session_tokens(session: dict[str, object]) -> float:
     if not isinstance(usage, dict):
         return 0.0
     total = 0.0
-    for bucket in ("input", "output", "reasoning_output", "cache_write", "cache_read"):
+    for bucket in ("input", "output", "cache_write", "cache_read"):
         total += _number(usage.get(bucket)) or 0.0
     return total
 
@@ -574,7 +684,9 @@ def _observation_reason(
     return "waiting_for_activity"
 
 
-def apply_quota_attribution(snapshot: dict[str, object]) -> None:
+def apply_quota_attribution(
+    snapshot: dict[str, object], prices: dict[str, dict[str, float]] | None = None
+) -> None:
     """Attach forward-only quota-share estimates and persist their small local ledger."""
     sessions = snapshot.get("sessions")
     quotas = snapshot.get("account_quotas")
@@ -599,7 +711,9 @@ def apply_quota_attribution(snapshot: dict[str, object]) -> None:
             ),
             default=None,
         )
-    analysis_events = _analysis_usage_events(retention_time)
+    analysis_events = _analysis_usage_events(
+        retention_time, prices if prices is not None else load_pricing()
+    )
     retained_event_ids = set(analysis_events)
     applied_events = {
         event_id: value
@@ -1028,24 +1142,151 @@ def _late_session_offset(session: dict[str, object], cutoff_at: float | None) ->
     return round(historical, 6) if abs(all_cost - total) <= 0.00001 else total
 
 
-def _session_started_after_cutoff(
-    session: dict[str, object], cutoff_at: float | None
-) -> bool:
-    iterations = session.get("iterations")
+def _event_spend_since_cutoff(
+    session: dict[str, object],
+    cutoff_at: float | None,
+    total: float,
+    excluded: list[tuple[float, float]],
+) -> tuple[float, dict[str, float] | None] | None:
+    """Price observed events by their own timestamps, including active iterations."""
+    events = session.get("_billing_events")
+    if cutoff_at is None or not isinstance(events, list):
+        return None
+    all_cost = 0.0
+    paid_cost = 0.0
+    agent_costs: dict[str, float] | None = {}
+    for event in events:
+        if not isinstance(event, dict):
+            return None
+        timestamp = _number(event.get("timestamp"))
+        cost = _number(event.get("cost_usd"))
+        if timestamp is None or cost is None:
+            return None
+        all_cost += cost
+        if timestamp >= cutoff_at and not any(
+            start <= timestamp < end for start, end in excluded
+        ):
+            paid_cost += cost
+            agent_id = event.get("agent_id")
+            if event.get("is_subagent") is True and not isinstance(agent_id, str):
+                agent_costs = None
+            elif isinstance(agent_id, str) and agent_costs is not None:
+                agent_costs[agent_id] = round(agent_costs.get(agent_id, 0.0) + cost, 6)
     return (
-        cutoff_at is not None
-        and isinstance(iterations, list)
-        and bool(iterations)
+        (round(paid_cost, 6), agent_costs) if abs(all_cost - total) <= 0.00001 else None
+    )
+
+
+def _spend_complete(
+    spend: dict[str, object],
+    complete: dict[str, object],
+    analysis_runs: dict[str, object],
+    analysis_complete: bool,
+    history_complete: bool,
+) -> bool:
+    return (
+        (bool(spend) or bool(analysis_runs))
+        and analysis_complete
+        and history_complete
+        and all(value is True for value in complete.values())
         and all(
-            isinstance(row, dict)
-            and (started_at := _timestamp(row.get("started_at"))) is not None
-            and started_at >= cutoff_at
-            for row in iterations
+            session_id in complete and _number(value) is not None
+            for session_id, value in spend.items()
         )
     )
 
 
-def apply_out_of_plan_accounting(snapshot: dict[str, object]) -> None:
+def _analysis_spend(runs: dict[str, object], fingerprint: str) -> tuple[float, bool]:
+    """Sum deduplicated paid analysis runs, including runs past log retention."""
+    total = 0.0
+    complete = True
+    for run in runs.values():
+        if not isinstance(run, dict):
+            complete = False
+            continue
+        mode = run.get("usage_mode")
+        cost = _number(run.get("cost_usd"))
+        if mode == "exhausted" and cost is not None:
+            total += cost
+            if run.get("pricing") not in {fingerprint, "reported"}:
+                complete = False
+        else:
+            complete = False
+    return round(total, 6), complete
+
+
+def _record_analysis_spend(
+    runs: dict[str, object],
+    events: dict[str, dict[str, object]],
+    provider: str,
+    cutoff_at: float | None,
+    excluded: list[tuple[float, float]],
+    fingerprint: str,
+) -> None:
+    """Keep one billing record per eligible run until the quota episode resets."""
+    for run_id, event in events.items():
+        if event.get("provider") != provider:
+            continue
+        completed_at = _number(event.get("completed_at"))
+        if completed_at is None or cutoff_at is None or completed_at < cutoff_at:
+            continue
+        if any(start <= completed_at < end for start, end in excluded):
+            continue
+        started_at = _number(event.get("started_at"))
+        if started_at is None or started_at < cutoff_at:
+            runs[run_id] = {
+                "usage_mode": "unknown",
+                "cost_usd": _number(event.get("cost_usd")),
+                "pricing": fingerprint,
+            }
+            continue
+        mode = event.get("usage_mode")
+        if mode == "included":
+            runs.pop(run_id, None)
+            continue
+        cost = _number(event.get("cost_usd"))
+        marker = event.get("pricing_fingerprint")
+        if not isinstance(marker, str):
+            previous = runs.get(run_id)
+            marker = previous.get("pricing") if isinstance(previous, dict) else None
+            if not isinstance(marker, str):
+                marker = "unknown"
+        previous = runs.get(run_id)
+        if not isinstance(previous, dict):
+            runs[run_id] = {
+                "usage_mode": mode,
+                "cost_usd": cost,
+                "pricing": marker,
+            }
+            continue
+        if mode == "exhausted":
+            previous["usage_mode"] = mode
+        previous["cost_usd"] = cost
+        previous["pricing"] = marker
+
+
+def _excluded_intervals(billing: dict[str, object]) -> list[tuple[float, float]]:
+    """Return intervals where quota state could have reset without observation."""
+    raw_intervals = billing.get("uncertain_intervals")
+    excluded: list[tuple[float, float]] = []
+    if raw_intervals is None:
+        return excluded
+    if not isinstance(raw_intervals, list):
+        billing["history_uncertain"] = True
+        return excluded
+    for interval in raw_intervals:
+        if isinstance(interval, list) and len(interval) == 2:
+            start, end = (_number(value) for value in interval)
+            if start is not None and end is not None and end >= start:
+                excluded.append((start, end))
+                continue
+        billing["history_uncertain"] = True
+    return excluded
+
+
+def apply_out_of_plan_accounting(
+    snapshot: dict[str, object], prices: dict[str, dict[str, float]] | None = None
+) -> None:
     """Count exhausted-plan session and subagent spend after the observed cutoff."""
     sessions = snapshot.get("sessions")
     if not isinstance(sessions, list):
@@ -1056,6 +1297,10 @@ def apply_out_of_plan_accounting(snapshot: dict[str, object]) -> None:
     summary_providers: dict[str, dict[str, object]] = {}
     summary: dict[str, object] = {"version": 1, "providers": summary_providers}
     quotas = snapshot.get("account_quotas")
+    observed_at = _snapshot_time(snapshot)
+    pricing_table = prices if prices is not None else load_pricing()
+    analysis_events = _analysis_usage_events(observed_at, pricing_table)
+    pricing_fingerprint = _pricing_fingerprint(pricing_table)
     for provider in ("claude", "codex"):
         rows = [
             session
@@ -1068,6 +1313,16 @@ def apply_out_of_plan_accounting(snapshot: dict[str, object]) -> None:
         billing = provider_state.setdefault("billing", {})
         if not isinstance(billing, dict):
             provider_state["billing"] = billing = {}
+        billing.pop("subagent_offsets", None)
+        prior_analysis_runs = billing.get("analysis_runs")
+        if not isinstance(prior_analysis_runs, dict):
+            billing["analysis_runs"] = analysis_runs = {}
+            if billing.get("mode") == "exhausted" and not _analysis_log_covers(
+                _number(billing.get("cutoff_at")), observed_at
+            ):
+                billing["history_uncertain"] = True
+        else:
+            analysis_runs = prior_analysis_runs
         spend = billing.get("session_spend")
         if not isinstance(spend, dict):
             spend = {}
@@ -1082,6 +1337,16 @@ def apply_out_of_plan_accounting(snapshot: dict[str, object]) -> None:
                     if cost is not None and offset is not None:
                         spend[session_id] = round(max(0.0, cost - offset), 6)
             billing["session_spend"] = spend
+        complete = billing.get("session_complete")
+        if not isinstance(complete, dict):
+            billing["session_complete"] = complete = {}
+        raw_pricing = billing.setdefault("session_pricing", {})
+        session_pricing = raw_pricing if isinstance(raw_pricing, dict) else {}
+        if session_pricing is not raw_pricing:
+            billing["session_pricing"] = session_pricing
+        for session_id in spend:
+            if session_pricing.get(session_id) != pricing_fingerprint:
+                complete[session_id] = False
         account = quotas.get(provider) if isinstance(quotas, dict) else None
         exhaustion = _account_exhausted(account)
         if not isinstance(account, dict) and rows:
@@ -1093,33 +1358,51 @@ def apply_out_of_plan_accounting(snapshot: dict[str, object]) -> None:
                 if modes == {"included"}
                 else None
             )
-        unknown_quota = exhaustion is None
-        if (
-            unknown_quota
-            and rows
-            and billing.get("mode") == "exhausted"
-            and isinstance(billing.get("offsets"), dict)
-        ):
-            exhaustion = True
         if exhaustion is None:
             mode = billing.get("mode")
+            analysis_total, _ = _analysis_spend(analysis_runs, pricing_fingerprint)
+            if mode == "exhausted":
+                billing["history_uncertain"] = True
+                if "uncertain_since" not in billing:
+                    billing["uncertain_since"] = (
+                        _number(billing.get("last_fresh_at"))
+                        or _number(billing.get("cutoff_at"))
+                        or observed_at
+                    )
             summary_providers[provider] = {
                 "status": mode if mode in {"included", "exhausted"} else "unknown",
                 "spend_usd": round(
-                    sum(_number(value) or 0.0 for value in spend.values()), 6
+                    sum(_number(value) or 0.0 for value in spend.values())
+                    + analysis_total,
+                    6,
                 )
                 if mode == "exhausted"
                 else 0.0,
+                "complete": False,
             }
+            cutoff_at = _number(billing.get("cutoff_at"))
+            if mode == "exhausted" and cutoff_at is not None:
+                summary_providers[provider]["cutoff_at"] = cutoff_at
             continue
         if not exhaustion:
             billing["mode"] = "included"
             billing["offsets"] = {}
-            billing["subagent_offsets"] = {}
             billing["unpriced_baselines"] = {}
             billing["session_spend"] = {}
+            billing["session_complete"] = {}
+            billing["session_pricing"] = {}
+            billing["analysis_runs"] = {}
+            billing.pop("analysis_last_scan_at", None)
+            billing.pop("history_uncertain", None)
+            billing.pop("uncertain_since", None)
+            billing.pop("uncertain_intervals", None)
+            billing.pop("last_fresh_at", None)
             billing.pop("cutoff_at", None)
-            summary_providers[provider] = {"status": "included", "spend_usd": 0.0}
+            summary_providers[provider] = {
+                "status": "included",
+                "spend_usd": 0.0,
+                "complete": True,
+            }
             continue
         previously_exhausted = billing.get("mode") == "exhausted"
         offsets_were_recorded = isinstance(billing.get("offsets"), dict)
@@ -1130,17 +1413,37 @@ def apply_out_of_plan_accounting(snapshot: dict[str, object]) -> None:
         baselines = raw_baselines if isinstance(raw_baselines, dict) else {}
         if baselines is not raw_baselines:
             billing["unpriced_baselines"] = baselines
-        subagent_offsets_were_recorded = isinstance(
-            billing.get("subagent_offsets"), dict
-        )
-        subagent_offsets = billing.setdefault("subagent_offsets", {})
-        if not isinstance(subagent_offsets, dict):
-            billing["subagent_offsets"] = subagent_offsets = {}
+        if (
+            previously_exhausted
+            and billing.get("uncertain_since") is not None
+            and observed_at is None
+        ):
+            analysis_total, _ = _analysis_spend(analysis_runs, pricing_fingerprint)
+            summary_providers[provider] = {
+                "status": "exhausted",
+                "spend_usd": round(
+                    sum(_number(value) or 0.0 for value in spend.values())
+                    + analysis_total,
+                    6,
+                ),
+                "complete": False,
+            }
+            cutoff_at = _number(billing.get("cutoff_at"))
+            if cutoff_at is not None:
+                summary_providers[provider]["cutoff_at"] = cutoff_at
+            continue
         if not previously_exhausted or not offsets_were_recorded:
             offsets.clear()
             baselines.clear()
             spend.clear()
-            cutoff_at = _snapshot_time(snapshot)
+            complete.clear()
+            session_pricing.clear()
+            analysis_runs.clear()
+            billing.pop("history_uncertain", None)
+            billing.pop("uncertain_since", None)
+            billing.pop("uncertain_intervals", None)
+            billing["analysis_last_scan_at"] = observed_at
+            cutoff_at = observed_at
             if cutoff_at is None:
                 billing.pop("cutoff_at", None)
             else:
@@ -1158,26 +1461,29 @@ def apply_out_of_plan_accounting(snapshot: dict[str, object]) -> None:
                         and row.get("priced") is False
                         and isinstance(row.get("started_at"), str)
                     ]
-        if not previously_exhausted or not subagent_offsets_were_recorded:
-            subagent_offsets.clear()
-            for session in rows:
-                session_id = session.get("id")
-                agents = session.get("subagents")
-                if not isinstance(session_id, str) or not isinstance(agents, list):
-                    continue
-                agent_offsets: dict[str, float] = {}
-                for agent in agents:
-                    if not isinstance(agent, dict):
-                        continue
-                    agent_id = agent.get("id")
-                    agent_cost = _number(agent.get("cost_usd"))
-                    if isinstance(agent_id, str) and agent_cost is not None:
-                        agent_offsets[agent_id] = agent_cost
-                subagent_offsets[session_id] = agent_offsets
+        else:
+            uncertain_since = _number(billing.pop("uncertain_since", None))
+            if uncertain_since is not None and observed_at is not None:
+                intervals = billing.setdefault("uncertain_intervals", [])
+                if not isinstance(intervals, list):
+                    billing["uncertain_intervals"] = intervals = []
+                if observed_at > uncertain_since:
+                    intervals.append([uncertain_since, observed_at])
+            last_scan = _number(billing.get("analysis_last_scan_at"))
+            if (
+                observed_at is not None
+                and last_scan is not None
+                and observed_at - last_scan > ANALYSIS_USAGE_RETENTION_SECONDS
+            ):
+                billing["history_uncertain"] = True
+        excluded = _excluded_intervals(billing)
         for session in rows:
             session_id = session.get("id")
             total = _number(session.get("total_cost_usd"))
-            if not isinstance(session_id, str) or total is None:
+            if not isinstance(session_id, str):
+                continue
+            if total is None:
+                complete[session_id] = False
                 continue
             if session_id not in offsets:
                 cutoff_at = _number(billing.get("cutoff_at"))
@@ -1195,15 +1501,8 @@ def apply_out_of_plan_accounting(snapshot: dict[str, object]) -> None:
                         or started_at < cutoff_at
                     )
                 ]
-                # Mixed-history subagent costs cannot be split without agent timestamps.
-                subagent_offsets[session_id] = (
-                    {}
-                    if offsets[session_id] == 0
-                    and _session_started_after_cutoff(session, cutoff_at)
-                    else None
-                )
-            pending = baselines.get(session_id)
             iterations = session.get("iterations")
+            pending = baselines.get(session_id)
             if isinstance(pending, list) and isinstance(iterations, list):
                 pending_ids = {value for value in pending if isinstance(value, str)}
                 for row in iterations:
@@ -1219,45 +1518,81 @@ def apply_out_of_plan_accounting(snapshot: dict[str, object]) -> None:
                         )
                         pending_ids.remove(row["started_at"])
                 baselines[session_id] = sorted(pending_ids)
-            prior = _number(offsets.get(session_id)) or 0.0
-            session["out_of_plan_spend_usd"] = round(max(0.0, total - prior), 6)
-            session["out_of_plan_spend_status"] = "since_observed_plan_exit"
-            spend[session_id] = max(
-                _number(spend.get(session_id)) or 0.0,
-                session["out_of_plan_spend_usd"],
+            observed = _event_spend_since_cutoff(
+                session, _number(billing.get("cutoff_at")), total, excluded
             )
+            baseline_complete = (
+                observed is not None and billing.get("history_uncertain") is not True
+            )
+            complete[session_id] = (
+                session.get("cost_status") == "complete" and baseline_complete
+            )
+            session_pricing[session_id] = pricing_fingerprint
+            prior = _number(offsets.get(session_id)) or 0.0
+            session["out_of_plan_spend_usd"] = (
+                observed[0]
+                if observed is not None
+                else round(max(0.0, total - prior), 6)
+            )
+            session["out_of_plan_spend_status"] = (
+                "since_observed_plan_exit"
+                if baseline_complete
+                else "incomplete_baseline"
+            )
+            spend[session_id] = session["out_of_plan_spend_usd"]
             agents = session.get("subagents")
             if not isinstance(agents, list):
                 continue
-            if session_id in subagent_offsets and subagent_offsets[session_id] is None:
+            agent_spend = observed[1] if observed is not None else None
+            if agent_spend is None:
+                session.pop("out_of_plan_subagent_cost_usd", None)
+                for agent in agents:
+                    if isinstance(agent, dict):
+                        agent.pop("out_of_plan_cost_usd", None)
                 continue
-            raw_agent_offsets = subagent_offsets.setdefault(session_id, {})
-            agent_offsets = (
-                raw_agent_offsets if isinstance(raw_agent_offsets, dict) else {}
-            )
-            if agent_offsets is not raw_agent_offsets:
-                subagent_offsets[session_id] = agent_offsets
             out_of_plan_subagent_cost = 0.0
             for agent in agents:
                 if not isinstance(agent, dict):
                     continue
                 agent_id = agent.get("id")
-                agent_cost = _number(agent.get("cost_usd"))
-                if not isinstance(agent_id, str) or agent_cost is None:
+                if not isinstance(agent_id, str):
                     continue
-                agent_prior = _number(agent_offsets.get(agent_id)) or 0.0
-                out_of_plan_cost = round(max(0.0, agent_cost - agent_prior), 6)
+                out_of_plan_cost = agent_spend.get(agent_id, 0.0)
                 agent["out_of_plan_cost_usd"] = out_of_plan_cost
                 out_of_plan_subagent_cost += out_of_plan_cost
             session["out_of_plan_subagent_cost_usd"] = round(
                 out_of_plan_subagent_cost, 6
             )
         billing["mode"] = "exhausted"
+        billing["last_fresh_at"] = observed_at
+        billing["analysis_last_scan_at"] = observed_at
+        _record_analysis_spend(
+            analysis_runs,
+            analysis_events,
+            provider,
+            _number(billing.get("cutoff_at")),
+            excluded,
+            pricing_fingerprint,
+        )
+        analysis_total, analysis_complete = _analysis_spend(
+            analysis_runs, pricing_fingerprint
+        )
         summary_providers[provider] = {
             "status": "exhausted",
             "spend_usd": round(
-                sum(_number(value) or 0.0 for value in spend.values()), 6
+                sum(_number(value) or 0.0 for value in spend.values()) + analysis_total,
+                6,
+            ),
+            "complete": _spend_complete(
+                spend,
+                complete,
+                analysis_runs,
+                analysis_complete,
+                billing.get("history_uncertain") is not True,
             ),
         }
+        cutoff_at = _number(billing.get("cutoff_at"))
+        if cutoff_at is not None:
+            summary_providers[provider]["cutoff_at"] = cutoff_at
     write_private_json(quota_attribution_path(), state)
     write_private_json_if_changed(out_of_plan_spend_path(), summary)
