@@ -156,6 +156,10 @@ def quota_attribution_path() -> Path:
     return home_dir() / "quota-attribution.json"
 
 
+def out_of_plan_spend_path() -> Path:
+    return home_dir() / "out-of-plan-spend.json"
+
+
 def analysis_usage_path() -> Path:
     return home_dir() / "analysis-usage.json"
 
