@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from datetime import datetime
@@ -10,6 +11,7 @@ import time
 from typing import TypedDict
 
 from .config import FORECAST_WINDOW
+from .pricing import load_pricing
 from .storage import (
     analysis_usage_path,
     out_of_plan_spend_path,
@@ -1028,31 +1030,50 @@ def _late_session_offset(session: dict[str, object], cutoff_at: float | None) ->
     return round(historical, 6) if abs(all_cost - total) <= 0.00001 else total
 
 
-def _session_started_after_cutoff(
-    session: dict[str, object], cutoff_at: float | None
-) -> bool:
-    iterations = session.get("iterations")
+def _event_spend_since_cutoff(
+    session: dict[str, object], cutoff_at: float | None, total: float
+) -> tuple[float, dict[str, float] | None] | None:
+    """Price observed events by their own timestamps, including active iterations."""
+    events = session.get("_billing_events")
+    if cutoff_at is None or not isinstance(events, list):
+        return None
+    all_cost = 0.0
+    paid_cost = 0.0
+    agent_costs: dict[str, float] | None = {}
+    for event in events:
+        if not isinstance(event, dict):
+            return None
+        timestamp = _number(event.get("timestamp"))
+        cost = _number(event.get("cost_usd"))
+        if timestamp is None or cost is None:
+            return None
+        all_cost += cost
+        if timestamp >= cutoff_at:
+            paid_cost += cost
+            agent_id = event.get("agent_id")
+            if event.get("is_subagent") is True and not isinstance(agent_id, str):
+                agent_costs = None
+            elif isinstance(agent_id, str) and agent_costs is not None:
+                agent_costs[agent_id] = round(agent_costs.get(agent_id, 0.0) + cost, 6)
     return (
-        cutoff_at is not None
-        and isinstance(iterations, list)
-        and bool(iterations)
-        and all(
-            isinstance(row, dict)
-            and (started_at := _timestamp(row.get("started_at"))) is not None
-            and started_at >= cutoff_at
-            for row in iterations
-        )
+        (round(paid_cost, 6), agent_costs) if abs(all_cost - total) <= 0.00001 else None
     )
 
 
 def _spend_complete(spend: dict[str, object], complete: dict[str, object]) -> bool:
-    return all(value is True for value in complete.values()) and all(
-        session_id in complete and _number(value) is not None
-        for session_id, value in spend.items()
+    return (
+        bool(spend)
+        and all(value is True for value in complete.values())
+        and all(
+            session_id in complete and _number(value) is not None
+            for session_id, value in spend.items()
+        )
     )
 
 
-def apply_out_of_plan_accounting(snapshot: dict[str, object]) -> None:
+def apply_out_of_plan_accounting(
+    snapshot: dict[str, object], prices: dict[str, dict[str, float]] | None = None
+) -> None:
     """Count exhausted-plan session and subagent spend after the observed cutoff."""
     sessions = snapshot.get("sessions")
     if not isinstance(sessions, list):
@@ -1063,6 +1084,11 @@ def apply_out_of_plan_accounting(snapshot: dict[str, object]) -> None:
     summary_providers: dict[str, dict[str, object]] = {}
     summary: dict[str, object] = {"version": 1, "providers": summary_providers}
     quotas = snapshot.get("account_quotas")
+    pricing_fingerprint = hashlib.sha256(
+        json.dumps(
+            prices if prices is not None else load_pricing(), sort_keys=True
+        ).encode()
+    ).hexdigest()
     for provider in ("claude", "codex"):
         rows = [
             session
@@ -1075,6 +1101,7 @@ def apply_out_of_plan_accounting(snapshot: dict[str, object]) -> None:
         billing = provider_state.setdefault("billing", {})
         if not isinstance(billing, dict):
             provider_state["billing"] = billing = {}
+        billing.pop("subagent_offsets", None)
         spend = billing.get("session_spend")
         if not isinstance(spend, dict):
             spend = {}
@@ -1092,6 +1119,13 @@ def apply_out_of_plan_accounting(snapshot: dict[str, object]) -> None:
         complete = billing.get("session_complete")
         if not isinstance(complete, dict):
             billing["session_complete"] = complete = {}
+        raw_pricing = billing.setdefault("session_pricing", {})
+        session_pricing = raw_pricing if isinstance(raw_pricing, dict) else {}
+        if session_pricing is not raw_pricing:
+            billing["session_pricing"] = session_pricing
+        for session_id in spend:
+            if session_pricing.get(session_id) != pricing_fingerprint:
+                complete[session_id] = False
         account = quotas.get(provider) if isinstance(quotas, dict) else None
         exhaustion = _account_exhausted(account)
         if not isinstance(account, dict) and rows:
@@ -1128,10 +1162,10 @@ def apply_out_of_plan_accounting(snapshot: dict[str, object]) -> None:
         if not exhaustion:
             billing["mode"] = "included"
             billing["offsets"] = {}
-            billing["subagent_offsets"] = {}
             billing["unpriced_baselines"] = {}
             billing["session_spend"] = {}
             billing["session_complete"] = {}
+            billing["session_pricing"] = {}
             billing.pop("cutoff_at", None)
             summary_providers[provider] = {
                 "status": "included",
@@ -1148,17 +1182,12 @@ def apply_out_of_plan_accounting(snapshot: dict[str, object]) -> None:
         baselines = raw_baselines if isinstance(raw_baselines, dict) else {}
         if baselines is not raw_baselines:
             billing["unpriced_baselines"] = baselines
-        subagent_offsets_were_recorded = isinstance(
-            billing.get("subagent_offsets"), dict
-        )
-        subagent_offsets = billing.setdefault("subagent_offsets", {})
-        if not isinstance(subagent_offsets, dict):
-            billing["subagent_offsets"] = subagent_offsets = {}
         if not previously_exhausted or not offsets_were_recorded:
             offsets.clear()
             baselines.clear()
             spend.clear()
             complete.clear()
+            session_pricing.clear()
             cutoff_at = _snapshot_time(snapshot)
             if cutoff_at is None:
                 billing.pop("cutoff_at", None)
@@ -1177,29 +1206,13 @@ def apply_out_of_plan_accounting(snapshot: dict[str, object]) -> None:
                         and row.get("priced") is False
                         and isinstance(row.get("started_at"), str)
                     ]
-        if not previously_exhausted or not subagent_offsets_were_recorded:
-            subagent_offsets.clear()
-            for session in rows:
-                session_id = session.get("id")
-                agents = session.get("subagents")
-                if not isinstance(session_id, str) or not isinstance(agents, list):
-                    continue
-                agent_offsets: dict[str, float] = {}
-                for agent in agents:
-                    if not isinstance(agent, dict):
-                        continue
-                    agent_id = agent.get("id")
-                    agent_cost = _number(agent.get("cost_usd"))
-                    if isinstance(agent_id, str) and agent_cost is not None:
-                        agent_offsets[agent_id] = agent_cost
-                subagent_offsets[session_id] = agent_offsets
         for session in rows:
             session_id = session.get("id")
             total = _number(session.get("total_cost_usd"))
             if not isinstance(session_id, str):
                 continue
-            complete[session_id] = session.get("cost_status") == "complete"
             if total is None:
+                complete[session_id] = False
                 continue
             if session_id not in offsets:
                 cutoff_at = _number(billing.get("cutoff_at"))
@@ -1217,15 +1230,8 @@ def apply_out_of_plan_accounting(snapshot: dict[str, object]) -> None:
                         or started_at < cutoff_at
                     )
                 ]
-                # Mixed-history subagent costs cannot be split without agent timestamps.
-                subagent_offsets[session_id] = (
-                    {}
-                    if offsets[session_id] == 0
-                    and _session_started_after_cutoff(session, cutoff_at)
-                    else None
-                )
-            pending = baselines.get(session_id)
             iterations = session.get("iterations")
+            pending = baselines.get(session_id)
             if isinstance(pending, list) and isinstance(iterations, list):
                 pending_ids = {value for value in pending if isinstance(value, str)}
                 for row in iterations:
@@ -1241,34 +1247,44 @@ def apply_out_of_plan_accounting(snapshot: dict[str, object]) -> None:
                         )
                         pending_ids.remove(row["started_at"])
                 baselines[session_id] = sorted(pending_ids)
-            prior = _number(offsets.get(session_id)) or 0.0
-            session["out_of_plan_spend_usd"] = round(max(0.0, total - prior), 6)
-            session["out_of_plan_spend_status"] = "since_observed_plan_exit"
-            spend[session_id] = max(
-                _number(spend.get(session_id)) or 0.0,
-                session["out_of_plan_spend_usd"],
+            observed = _event_spend_since_cutoff(
+                session, _number(billing.get("cutoff_at")), total
             )
+            baseline_complete = observed is not None
+            complete[session_id] = (
+                session.get("cost_status") == "complete" and baseline_complete
+            )
+            session_pricing[session_id] = pricing_fingerprint
+            prior = _number(offsets.get(session_id)) or 0.0
+            session["out_of_plan_spend_usd"] = (
+                observed[0]
+                if observed is not None
+                else round(max(0.0, total - prior), 6)
+            )
+            session["out_of_plan_spend_status"] = (
+                "since_observed_plan_exit"
+                if baseline_complete
+                else "incomplete_baseline"
+            )
+            spend[session_id] = session["out_of_plan_spend_usd"]
             agents = session.get("subagents")
             if not isinstance(agents, list):
                 continue
-            if session_id in subagent_offsets and subagent_offsets[session_id] is None:
+            agent_spend = observed[1] if observed is not None else None
+            if agent_spend is None:
+                session.pop("out_of_plan_subagent_cost_usd", None)
+                for agent in agents:
+                    if isinstance(agent, dict):
+                        agent.pop("out_of_plan_cost_usd", None)
                 continue
-            raw_agent_offsets = subagent_offsets.setdefault(session_id, {})
-            agent_offsets = (
-                raw_agent_offsets if isinstance(raw_agent_offsets, dict) else {}
-            )
-            if agent_offsets is not raw_agent_offsets:
-                subagent_offsets[session_id] = agent_offsets
             out_of_plan_subagent_cost = 0.0
             for agent in agents:
                 if not isinstance(agent, dict):
                     continue
                 agent_id = agent.get("id")
-                agent_cost = _number(agent.get("cost_usd"))
-                if not isinstance(agent_id, str) or agent_cost is None:
+                if not isinstance(agent_id, str):
                     continue
-                agent_prior = _number(agent_offsets.get(agent_id)) or 0.0
-                out_of_plan_cost = round(max(0.0, agent_cost - agent_prior), 6)
+                out_of_plan_cost = agent_spend.get(agent_id, 0.0)
                 agent["out_of_plan_cost_usd"] = out_of_plan_cost
                 out_of_plan_subagent_cost += out_of_plan_cost
             session["out_of_plan_subagent_cost_usd"] = round(

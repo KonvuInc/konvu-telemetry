@@ -40,7 +40,7 @@ const finite = (value) => typeof value === "number" && Number.isFinite(value);
 const nonnegative = (value) => finite(value) && value >= 0;
 const oneDecimal = (value) => Math.round((value + Number.EPSILON) * 10) / 10;
 const percentage = (value) => (finite(value) ? oneDecimal(value).toFixed(1) + "%" : "—");
-const money = (value) => (nonnegative(value) ? "$" + oneDecimal(value).toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 }) : "—");
+const money = (value) => (nonnegative(value) ? value > 0 && value < 0.05 ? "<$0.1" : "$" + oneDecimal(value).toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 }) : "—");
 const additional = (value) => (nonnegative(value) ? "+" + money(value) : "—");
 const compactMoney = (value) =>
   nonnegative(value) ? "$" + (value >= 1000 ? oneDecimal(value / 1000).toFixed(1) + "k" : oneDecimal(value).toFixed(1)) : "—";
@@ -87,9 +87,9 @@ const series = (s) =>
     : [];
 const showsMoney = (s) => s.usage_mode === "exhausted" || s.usage_mode === "api_billed";
 const cost = (s) => {
-  if (!showsMoney(s) || s.cost_status === "unavailable") return null;
+  if (!showsMoney(s) || s.cost_status !== "complete") return null;
   if (s.usage_mode === "api_billed") return nonnegative(s.total_cost_usd) ? s.total_cost_usd : null;
-  if (s.out_of_plan_spend_status === undefined) return null;
+  if (!["complete", "since_observed_plan_exit"].includes(s.out_of_plan_spend_status)) return null;
   return nonnegative(s.out_of_plan_spend_usd) ? s.out_of_plan_spend_usd : null;
 };
 function planExitCostOffset(s) {
@@ -825,7 +825,7 @@ function responsibilityCell(s) {
     // Nothing has been billed yet, so no session owns a share of zero.
     if (total <= 0) return '<span class="tiny" title="Nothing has been billed beyond the plan yet.">Nothing spent yet</span>';
     const share = (mine / total) * 100;
-    return shareBar(share, "of all money spent", money(mine) + " of " + money(total) + " spent beyond plan");
+    return shareBar(share, "of recorded session spend", money(mine) + " of " + money(total) + " among recorded sessions");
   }
   const share = shareOf(s);
   if (!finite(share)) return dataStateMarkup(sessionDataState(s, "share"));
@@ -995,7 +995,7 @@ function moneyTiles(rows) {
     .filter((s) => nonnegative(subagentSpend(s, s)))
     .sort((a, b) => subagentSpend(b, b) - subagentSpend(a, a))[0];
   return [
-    recorded ? kpiTile("Estimated spend beyond plan", money(spend), spend > 0 ? "bad" : "good", kpiFootnote("across " + rows.length + " billing sessions"), true) : "",
+    recorded ? kpiTile("Estimated spend in live sessions", money(spend), spend > 0 ? "bad" : "good", kpiFootnote("priced sessions shown; incomplete costs excluded"), true) : "",
     priciest ? kpiTile("Most expensive session", money(cost(priciest)), band((cost(priciest) / (spend || 1)) * 100, 25, 45, 65), kpiSession(priciest)) : "",
     hottest ? kpiTile("Biggest forecast", additional(forecast(hottest)), band(forecast(hottest), 5, 12, 20), kpiSession(hottest)) : "",
     finite(avgContext) ? kpiTile("Average context used", percentage(avgContext), band(avgContext, 50, 70, 88), kpiFootnote("across " + rows.length + " billing sessions")) : "",
@@ -2452,6 +2452,7 @@ function analysisUsageText(session) {
   if (!usage || !Number.isInteger(usage.run_count) || usage.run_count < 1) return '';
   const prefix = 'AI analysis of this session: ' + usage.run_count + (usage.run_count === 1 ? ' run' : ' runs');
   const dollars = (value) => value < 0.0001 ? '<$0.0001' : '$' + value.toFixed(value < 0.01 ? 4 : 2);
+  if (usage.unpriced_run_count > 0) return prefix + ' · dollar estimate incomplete';
   if (showsMoney(session)) {
     if (nonnegative(usage.spending_usd) && usage.spending_usd > 0 && usage.unknown_mode_run_count === 0) {
       return prefix + ' · ~' + dollars(usage.spending_usd) + ' paid';

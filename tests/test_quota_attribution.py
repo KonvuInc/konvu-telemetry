@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 from konvu_telemetry.quota_attribution import (
@@ -1073,6 +1074,28 @@ class QuotaAttributionTests(unittest.TestCase):
                         "usage_mode": "exhausted",
                         "total_cost_usd": 15.0,
                         "cost_status": "complete",
+                        "_billing_events": [
+                            {
+                                "timestamp": datetime(
+                                    2026, 10, 9, 11, 0, tzinfo=timezone.utc
+                                ).timestamp(),
+                                "cost_usd": 8.0,
+                            },
+                            {
+                                "timestamp": datetime(
+                                    2026, 10, 9, 11, 0, tzinfo=timezone.utc
+                                ).timestamp(),
+                                "cost_usd": 4.0,
+                                "is_subagent": True,
+                                "agent_id": "old",
+                            },
+                            {
+                                "timestamp": datetime(
+                                    2026, 10, 9, 12, 10, tzinfo=timezone.utc
+                                ).timestamp(),
+                                "cost_usd": 3.0,
+                            },
+                        ],
                         "subagents": [{"id": "old", "cost_usd": 4.0}],
                         "iterations": [
                             billing_iteration("2026-10-09T11:00:00Z", 12.0),
@@ -1084,7 +1107,7 @@ class QuotaAttributionTests(unittest.TestCase):
             }
             apply_out_of_plan_accounting(late)
             self.assertEqual(late["sessions"][0]["out_of_plan_spend_usd"], 3.0)
-            self.assertNotIn("out_of_plan_subagent_cost_usd", late["sessions"][0])
+            self.assertEqual(late["sessions"][0]["out_of_plan_subagent_cost_usd"], 0.0)
             self.assertEqual(
                 json.loads(out_of_plan_spend_path().read_text())["providers"]["claude"],
                 {"status": "exhausted", "spend_usd": 3.0, "complete": True},
@@ -1092,12 +1115,31 @@ class QuotaAttributionTests(unittest.TestCase):
             late_row = late["sessions"][0]
             late_row["total_cost_usd"] = 25.0
             late_row["iterations"][1].update({"cost_usd": 10.0, "priced": True})
+            late_row["_billing_events"].insert(
+                1,
+                {
+                    "timestamp": datetime(
+                        2026, 10, 9, 11, 5, tzinfo=timezone.utc
+                    ).timestamp(),
+                    "cost_usd": 10.0,
+                },
+            )
             apply_out_of_plan_accounting(late)
             self.assertEqual(late_row["out_of_plan_spend_usd"], 3.0)
             post_cutoff = session("post-cutoff", 2.0) | {
                 "usage_mode": "exhausted",
                 "iterations": [billing_iteration("2026-10-09T12:20:00Z", 2.0)],
                 "subagents": [{"id": "new", "cost_usd": 2.0}],
+                "_billing_events": [
+                    {
+                        "timestamp": datetime(
+                            2026, 10, 9, 12, 20, tzinfo=timezone.utc
+                        ).timestamp(),
+                        "cost_usd": 2.0,
+                        "is_subagent": True,
+                        "agent_id": "new",
+                    }
+                ],
             }
             apply_out_of_plan_accounting({"sessions": [post_cutoff]})
             self.assertEqual(post_cutoff["out_of_plan_subagent_cost_usd"], 2.0)
@@ -1160,7 +1202,88 @@ class QuotaAttributionTests(unittest.TestCase):
             )
             self.assertEqual(
                 providers["codex"],
+                {"status": "exhausted", "spend_usd": 4.0, "complete": False},
+            )
+
+    def test_active_iteration_growth_and_repricing_use_event_timestamps(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+        ):
+            cutoff = datetime(2026, 10, 9, 12, tzinfo=timezone.utc).timestamp()
+            before = {"timestamp": cutoff - 30, "cost_usd": 5.0}
+            row = session("active", 5.0) | {
+                "usage_mode": "exhausted",
+                "iterations": [billing_iteration("2026-10-09T11:55:00Z", 5.0)],
+                "_billing_events": [before],
+            }
+            first = {
+                "generated_at": "2026-10-09T12:00:00Z",
+                "sessions": [row],
+            }
+            apply_out_of_plan_accounting(first, {"model": {"input": 5.0}})
+            self.assertEqual(row["out_of_plan_spend_usd"], 0.0)
+            row["total_cost_usd"] = 10.0
+            row["iterations"][0]["cost_usd"] = 10.0
+            row["_billing_events"] = [
+                before,
+                {"timestamp": cutoff + 30, "cost_usd": 5.0},
+            ]
+            apply_out_of_plan_accounting(first, {"model": {"input": 5.0}})
+            self.assertEqual(row["out_of_plan_spend_usd"], 5.0)
+            self.assertEqual(
+                row["out_of_plan_spend_status"], "since_observed_plan_exit"
+            )
+            row["total_cost_usd"] = 8.0
+            row["iterations"][0]["cost_usd"] = 8.0
+            row["_billing_events"] = [
+                {"timestamp": cutoff - 30, "cost_usd": 4.0},
+                {"timestamp": cutoff + 30, "cost_usd": 4.0},
+            ]
+            apply_out_of_plan_accounting(first, {"model": {"input": 4.0}})
+            self.assertEqual(row["out_of_plan_spend_usd"], 4.0)
+            self.assertEqual(
+                json.loads(out_of_plan_spend_path().read_text())["providers"]["claude"],
                 {"status": "exhausted", "spend_usd": 4.0, "complete": True},
+            )
+            apply_out_of_plan_accounting({"sessions": []}, {"model": {"input": 4.0}})
+            self.assertEqual(
+                json.loads(out_of_plan_spend_path().read_text())["providers"]["claude"][
+                    "spend_usd"
+                ],
+                4.0,
+            )
+            apply_out_of_plan_accounting({"sessions": []}, {"model": {"input": 3.0}})
+            self.assertFalse(
+                json.loads(out_of_plan_spend_path().read_text())["providers"]["claude"][
+                    "complete"
+                ]
+            )
+            row["total_cost_usd"] = 6.0
+            row["_billing_events"] = [
+                {"timestamp": cutoff - 30, "cost_usd": 3.0},
+                {"timestamp": cutoff + 30, "cost_usd": 3.0},
+            ]
+            apply_out_of_plan_accounting({"sessions": [row]}, {"model": {"input": 3.0}})
+            self.assertEqual(
+                json.loads(out_of_plan_spend_path().read_text())["providers"]["claude"],
+                {"status": "exhausted", "spend_usd": 3.0, "complete": True},
+            )
+
+    def test_exhausted_provider_without_local_sessions_is_unverified(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
+        ):
+            apply_out_of_plan_accounting(
+                {
+                    "sessions": [],
+                    "account_quotas": {"claude": {"ordinary_usage_allowed": False}},
+                }
+            )
+            self.assertEqual(
+                json.loads(out_of_plan_spend_path().read_text())["providers"]["claude"],
+                {"status": "exhausted", "spend_usd": 0.0, "complete": False},
             )
 
     def test_quota_outage_preserves_exhaustion_spend_and_offsets(self) -> None:
@@ -1194,7 +1317,7 @@ class QuotaAttributionTests(unittest.TestCase):
                     json.loads(out_of_plan_spend_path().read_text())["providers"][
                         "claude"
                     ],
-                    {"status": "exhausted", "spend_usd": 7.0, "complete": True},
+                    {"status": "exhausted", "spend_usd": 7.0, "complete": False},
                 )
             apply_out_of_plan_accounting(snapshot(100, []))
             recovered = snapshot(100, [session("late", 22.0)])
@@ -1327,18 +1450,31 @@ class QuotaAttributionTests(unittest.TestCase):
             tempfile.TemporaryDirectory() as directory,
             patch.dict(os.environ, {"KONVU_LIVE_USAGE_HOME": directory}),
         ):
+            cutoff = datetime(2026, 10, 9, 12, tzinfo=timezone.utc).timestamp()
+            earlier = [
+                {"timestamp": cutoff - 60, "cost_usd": 2.0},
+                {
+                    "timestamp": cutoff - 30,
+                    "cost_usd": 10.0,
+                    "is_subagent": True,
+                    "agent_id": "old",
+                },
+            ]
             first = {
+                "generated_at": "2026-10-09T12:00:00Z",
                 "sessions": [
                     {
                         "id": "a",
                         "provider": "claude",
                         "usage_mode": "exhausted",
                         "total_cost_usd": 12.0,
+                        "cost_status": "complete",
+                        "_billing_events": earlier,
                         "subagents": [
                             {"id": "old", "cost_usd": 10.0},
                         ],
                     }
-                ]
+                ],
             }
             apply_out_of_plan_accounting(first)
             self.assertEqual(first["sessions"][0]["out_of_plan_subagent_cost_usd"], 0.0)
@@ -1350,6 +1486,22 @@ class QuotaAttributionTests(unittest.TestCase):
                         "provider": "claude",
                         "usage_mode": "exhausted",
                         "total_cost_usd": 17.5,
+                        "cost_status": "complete",
+                        "_billing_events": [
+                            *earlier,
+                            {
+                                "timestamp": cutoff + 30,
+                                "cost_usd": 2.0,
+                                "is_subagent": True,
+                                "agent_id": "old",
+                            },
+                            {
+                                "timestamp": cutoff + 40,
+                                "cost_usd": 3.5,
+                                "is_subagent": True,
+                                "agent_id": "new",
+                            },
+                        ],
                         "subagents": [
                             {"id": "old", "cost_usd": 12.0},
                             {"id": "new", "cost_usd": 3.5},

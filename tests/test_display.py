@@ -20,6 +20,7 @@ from konvu_telemetry.display import (
     compact_status_meter,
     hook_forecast_row,
     hook_quota_meters,
+    money,
     relevance_context_meter,
     statusline_rows,
     usage_box_lines,
@@ -103,6 +104,8 @@ class DisplayTests(unittest.TestCase):
         }
         session = {
             "usage_mode": "exhausted",
+            "cost_status": "complete",
+            "out_of_plan_spend_status": "since_observed_plan_exit",
             "out_of_plan_spend_usd": 1.3,
             "projected_next_10_tasks_usd": 0.8,
         }
@@ -129,6 +132,8 @@ class DisplayTests(unittest.TestCase):
     def test_paid_claude_hud_shows_spend_before_forecast_is_ready(self) -> None:
         session = {
             "usage_mode": "exhausted",
+            "cost_status": "complete",
+            "out_of_plan_spend_status": "since_observed_plan_exit",
             "out_of_plan_spend_usd": 0.4,
             "projected_next_10_tasks_usd": None,
         }
@@ -173,12 +178,44 @@ class DisplayTests(unittest.TestCase):
                 row = {
                     "provider": provider,
                     "usage_mode": "exhausted",
+                    "cost_status": "complete",
+                    "out_of_plan_spend_status": "since_observed_plan_exit",
                     "out_of_plan_spend_usd": 0.4,
                     "projected_next_10_tasks_usd": None,
                 }
                 self.assertEqual(hook_forecast_row(row), "💸 Current spend $0.4")
                 row["cost_status"] = "unavailable"
                 self.assertIsNone(hook_forecast_row(row))
+
+    def test_partial_and_unknown_paid_costs_are_not_shown_as_exact(self) -> None:
+        row = {
+            "provider": "claude",
+            "usage_mode": "exhausted",
+            "out_of_plan_spend_status": "since_observed_plan_exit",
+            "out_of_plan_spend_usd": 0.02,
+        }
+        for status in (None, "partial", "unavailable"):
+            with self.subTest(status=status):
+                row["cost_status"] = status
+                self.assertIsNone(hook_forecast_row(row))
+                with (
+                    patch(
+                        "konvu_telemetry.display.stored_provider_quotas",
+                        return_value={},
+                    ),
+                    patch(
+                        "konvu_telemetry.display.dashboard_line",
+                        return_value="dashboard",
+                    ),
+                ):
+                    self.assertNotIn(
+                        "Estimated paid spend", "\n".join(statusline_rows(row, 10.0))
+                    )
+        row["cost_status"] = "complete"
+        self.assertEqual(hook_forecast_row(row), "💸 Current spend <$0.1")
+        self.assertEqual(money(0.02), "<$0.1")
+        row["out_of_plan_spend_status"] = "incomplete_baseline"
+        self.assertIsNone(hook_forecast_row(row))
 
     def test_included_hook_omits_forecast_without_attribution(self) -> None:
         row = {"provider": "codex", "usage_mode": "included"}

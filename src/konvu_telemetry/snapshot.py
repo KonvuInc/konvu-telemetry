@@ -385,6 +385,16 @@ def build_snapshot(
                     last_event.timestamp, timezone.utc
                 ).isoformat(),
                 "total_cost_usd": round(sum(known_costs), 6),
+                "_billing_events": [
+                    {
+                        "timestamp": event.timestamp,
+                        "cost_usd": claude_costs[id(event)],
+                        "agent_id": event.agent_id if event.is_subagent else None,
+                        "is_subagent": event.is_subagent,
+                    }
+                    for event in events
+                    if claude_costs[id(event)] is not None or requires_pricing(event)
+                ],
                 "cost_status": total_cost_status,
                 "projected_next_10_tasks_usd": round(next_10_forecast, 6)
                 if isinstance(next_10_forecast, (int, float))
@@ -651,6 +661,16 @@ def build_snapshot(
                     last_event.timestamp, timezone.utc
                 ).isoformat(),
                 "total_cost_usd": round(sum(known_costs) + sum(known_child_costs), 6),
+                "_billing_events": [
+                    {
+                        "timestamp": event.timestamp,
+                        "cost_usd": cost,
+                        "agent_id": event.agent_id if event.is_subagent else None,
+                        "is_subagent": event.is_subagent,
+                    }
+                    for event, cost in zip(all_events, [*codex_costs, *child_costs])
+                    if cost is not None or requires_pricing(event)
+                ],
                 "cost_status": total_cost_status,
                 "total_credit_equivalent": round(
                     sum(known_credit_equivalents) + sum(known_child_credit_equivalents),
@@ -731,9 +751,10 @@ def build_snapshot(
     )
     apply_quota_attribution(snapshot)
     apply_usage_modes(snapshot)
-    apply_out_of_plan_accounting(snapshot)
+    apply_out_of_plan_accounting(snapshot, prices)
     for session in sessions:
         session.pop("total_credit_equivalent", None)
+        session.pop("_billing_events", None)
     locate_compactions(snapshot)
     for session in sessions:
         for internal_field in (

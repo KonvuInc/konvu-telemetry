@@ -102,6 +102,12 @@ def load_pricing() -> dict[str, dict[str, float]]:
             else 0.0,
             "long_context_threshold": 0.0,
         }
+        one_hour_write = nonnegative_number(
+            values.get("cache_creation_input_token_cost_above_1hr")
+        )
+        price["cache_write_one_hour"] = (
+            one_hour_write if one_hour_write is not None else price["cache_write"] * 1.6
+        )
         if web_search_number is not None:
             price["web_search"] = web_search_number
         for field, key in (
@@ -136,6 +142,20 @@ def load_pricing() -> dict[str, dict[str, float]]:
                     elif "above_272k" in suffix and not price["long_context_threshold"]:
                         price["long_context_threshold"] = 272_000.0
                     break
+        for suffix, threshold in (
+            ("above_200k_tokens", 200_000.0),
+            ("above_272k_tokens", 272_000.0),
+        ):
+            long_one_hour_write = nonnegative_number(
+                values.get(f"cache_creation_input_token_cost_above_1hr_{suffix}")
+            )
+            if long_one_hour_write is not None:
+                price["cache_write_one_hour_long"] = long_one_hour_write
+                if not price["long_context_threshold"]:
+                    price["long_context_threshold"] = threshold
+                break
+        if "cache_write_long" in price and "cache_write_one_hour_long" not in price:
+            price["cache_write_one_hour_long"] = price["cache_write_long"] * 1.6
         prices[normalised_model(model)] = price
     with _PRICING_CACHE_LOCK:
         _PRICING_CACHE = (*cache_key, prices)
@@ -211,6 +231,11 @@ def event_cost(event: UsageEvent, prices: dict[str, dict[str, float]]) -> float 
     input_rate = rate_for("input")
     output_rate = rate_for("output")
     cache_write_rate = rate_for("cache_write")
+    one_hour_cache_write_rate = (
+        rate_for("cache_write_one_hour")
+        if "cache_write_one_hour" in rates
+        else cache_write_rate * 1.6
+    )
     cache_read_rate = rate_for("cache_read")
     web_search_rate = rates.get("web_search")
     if event.usage.web_search_requests and not isinstance(
@@ -224,7 +249,7 @@ def event_cost(event: UsageEvent, prices: dict[str, dict[str, float]]) -> float 
         event.usage.input_tokens * input_rate
         + event.usage.output_tokens * output_rate
         + five_minute_cache_write * cache_write_rate
-        + event.usage.cache_write_one_hour_tokens * cache_write_rate * 1.6
+        + event.usage.cache_write_one_hour_tokens * one_hour_cache_write_rate
         + event.usage.cache_read_tokens * cache_read_rate
         + event.usage.web_search_requests * float(web_search_rate or 0)
     )

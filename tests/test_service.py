@@ -1,4 +1,5 @@
 import json
+from hashlib import sha256
 from collections.abc import Callable
 from contextlib import nullcontext, redirect_stderr
 from datetime import datetime, timezone
@@ -455,6 +456,40 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(prices[model]["long_context_threshold"], 272_000)
             self.assertEqual(prices[model]["fast_multiplier"], 2.0)
             self.assertEqual(prices[model]["web_search"], 0.01)
+        for model, input_rate in (
+            ("gpt-6.2-sol", 0.000002),
+            ("gpt-6.2-astra", 0.000008),
+        ):
+            rates = prices[model]
+            self.assertEqual(rates["input"], input_rate)
+            self.assertAlmostEqual(rates["output"], input_rate * 5)
+            self.assertAlmostEqual(rates["cache_read"], input_rate * 0.05)
+            self.assertAlmostEqual(rates["cache_write"], input_rate * 1.25)
+            self.assertAlmostEqual(rates["cache_write_one_hour"], input_rate * 2.5)
+            self.assertAlmostEqual(rates["input_long"], input_rate * 2)
+            self.assertAlmostEqual(rates["output_long"], input_rate * 7.5)
+            self.assertAlmostEqual(rates["cache_write_one_hour_long"], input_rate * 5)
+            self.assertEqual(rates["long_context_threshold"], 272_000)
+            long_write = UsageEvent(
+                "codex",
+                "session",
+                "long-write",
+                0,
+                model,
+                Usage(272_001, 0, 1_000_000, 1_000_000, 0, 0, "standard"),
+                0,
+                False,
+                None,
+                "standard",
+            )
+            self.assertAlmostEqual(
+                event_cost(long_write, prices),
+                272_001 * input_rate * 2 + 1_000_000 * input_rate * 5,
+            )
+        notice = (pricing_file.parents[2] / "NOTICE").read_text()
+        self.assertIn(
+            f"SHA-256: {sha256(pricing_file.read_bytes()).hexdigest()}", notice
+        )
 
     def test_previous_baseline_schema_is_rebuilt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1126,6 +1161,7 @@ class ServiceTests(unittest.TestCase):
             ):
                 snapshot = build_snapshot(1767225630.0)
         session = snapshot["sessions"][0]
+        self.assertNotIn("_billing_events", session)
         self.assertEqual(session["last_activity_at"], "2026-01-01T00:00:21+00:00")
         # The child's later call is its own thread, not the parent's context.
         self.assertEqual(session["context_tokens"], 1)
@@ -1227,6 +1263,21 @@ class ServiceTests(unittest.TestCase):
             "standard",
         )
         self.assertEqual(event_cost(event, prices), 6.0)
+
+    def test_one_hour_cache_write_uses_the_published_rate(self) -> None:
+        event = UsageEvent(
+            "claude",
+            "session",
+            "one",
+            0,
+            "claude-3-haiku-20240307",
+            Usage(0, 0, 1_000_000, 1_000_000, 0, 0, "standard"),
+            0,
+            False,
+            None,
+            "standard",
+        )
+        self.assertEqual(event_cost(event, load_pricing()), 0.5)
 
     def test_flex_rates_are_used_when_available(self) -> None:
         prices = {
@@ -1432,6 +1483,8 @@ class ServiceTests(unittest.TestCase):
             [agent["label"] for agent in first["sessions"][0]["subagents"]],
             ["Review tests"],
         )
+        self.assertNotIn("_billing_events", first["sessions"][0])
+        self.assertNotIn("_billing_events", second["sessions"][0])
         self.assertEqual(
             [agent["label"] for agent in second["sessions"][0]["subagents"]],
             ["Review tests", "Write docs"],
@@ -2415,6 +2468,7 @@ class ServiceTests(unittest.TestCase):
             "total_cost_usd": 0.02,
             "cost_status": "complete",
             "usage_mode": "exhausted",
+            "out_of_plan_spend_status": "since_observed_plan_exit",
             "projected_next_10_tasks_usd": 0.1,
             "task_count": 1,
             "context_tokens": 500,
