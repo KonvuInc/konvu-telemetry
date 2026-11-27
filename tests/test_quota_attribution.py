@@ -1254,9 +1254,9 @@ class QuotaAttributionTests(unittest.TestCase):
             apply_out_of_plan_accounting(snapshot(100, [unpriced]))
             for rows in ([session("priced", 2.0)], []):
                 apply_out_of_plan_accounting(snapshot(100, rows))
-                provider = json.loads(out_of_plan_spend_path().read_text())["providers"][
-                    "claude"
-                ]
+                provider = json.loads(out_of_plan_spend_path().read_text())[
+                    "providers"
+                ]["claude"]
                 self.assertEqual(provider["status"], "exhausted")
                 self.assertFalse(provider["complete"])
             apply_out_of_plan_accounting(snapshot(0, []))

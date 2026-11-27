@@ -43,9 +43,17 @@ class CodexCreditRateTests(unittest.TestCase):
         event = codex_event()
         self.assertEqual(event.usage.total_tokens, 15_000)
         self.assertEqual(
-            event_cost(event, {"openai/gpt-5.5-codex": {
-                "input": 1.0, "output": 2.0, "cache_write": 1.0, "cache_read": 1.0,
-            }}),
+            event_cost(
+                event,
+                {
+                    "openai/gpt-5.5-codex": {
+                        "input": 1.0,
+                        "output": 2.0,
+                        "cache_write": 1.0,
+                        "cache_read": 1.0,
+                    }
+                },
+            ),
             23_000.0,
         )
 

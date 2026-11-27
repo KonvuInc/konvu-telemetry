@@ -85,6 +85,5 @@ def codex_credit_equivalent(event: UsageEvent) -> float | None:
         * rate.input
         / per_million
         + event.usage.cache_read_tokens * rate.cached_input / per_million
-        + event.usage.output_tokens * rate.output
-        / per_million
+        + event.usage.output_tokens * rate.output / per_million
     )
